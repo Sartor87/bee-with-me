@@ -1,0 +1,128 @@
+<#
+.SYNOPSIS
+    Starts the whole Bee With Me stack on Windows: Postgres/PostGIS (Docker), the
+    FastAPI backend, and the Vue frontend - instead of starting each one by hand.
+
+    This script lives in the project root and uses its own location to find the
+    project, so it works wherever the folder is copied to.
+
+.PARAMETER ProjectPath
+    Path to the bee-with-me project folder. Defaults to the folder this script
+    is in.
+
+.PARAMETER SkipDocker
+    Don't touch Docker Compose (use this if the database is already running).
+
+.PARAMETER NoBrowser
+    Don't auto-open the frontend in the default browser once it's up.
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\start.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\start.ps1 -ProjectPath 'D:\bee-with-me'
+#>
+
+param(
+    [string]$ProjectPath = $PSScriptRoot,
+    [switch]$SkipDocker,
+    [switch]$NoBrowser
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+function Write-Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
+
+if (-not (Test-Path $ProjectPath)) {
+    throw "Project folder not found: $ProjectPath`nPass the real location with -ProjectPath, e.g.:`n  powershell -ExecutionPolicy Bypass -File .\start.ps1 -ProjectPath 'C:\path\to\bee-with-me'"
+}
+$root = (Resolve-Path $ProjectPath).Path
+Set-Location $root
+Write-Step "Using project folder: $root"
+
+# -- .env --------------------------------------------------------------------
+if (-not (Test-Path "$root\.env")) {
+    Write-Step 'No .env found - copying .env.example'
+    Copy-Item "$root\.env.example" "$root\.env"
+    Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, SECRET_KEY, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test.'
+}
+
+# -- Docker (Postgres/PostGIS) ------------------------------------------------
+if (-not $SkipDocker) {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw 'Docker was not found on PATH. Install/start Docker Desktop, or re-run with -SkipDocker if the database is already running elsewhere.'
+    }
+
+    Write-Step 'Starting database (docker compose up -d)'
+    Push-Location "$root\docker"
+    docker compose up -d
+    Pop-Location
+
+    Write-Step 'Waiting for Postgres to accept connections'
+    $pgPort = '5432'
+    foreach ($line in Get-Content "$root\.env") {
+        if ($line -match '^\s*POSTGRES_PORT\s*=\s*(\d+)') { $pgPort = $matches[1] }
+    }
+
+    $deadline = (Get-Date).AddSeconds(60)
+    $ready = $false
+    do {
+        $ready = (Test-NetConnection -ComputerName 'localhost' -Port $pgPort -InformationLevel Quiet -WarningAction SilentlyContinue)
+        if (-not $ready) { Start-Sleep -Seconds 1 }
+    } until ($ready -or (Get-Date) -gt $deadline)
+
+    if (-not $ready) {
+        Write-Warn "Postgres didn't come up on port $pgPort within 60s - continuing anyway. Check: docker compose -f docker\docker-compose.yaml logs"
+    }
+}
+
+# -- Python venv + backend deps -----------------------------------------------
+$venvActivate = "$root\.venv\Scripts\Activate.ps1"
+if (-not (Test-Path $venvActivate)) {
+    Write-Step 'Creating Python virtual environment (.venv)'
+    $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
+          elseif (Get-Command py -ErrorAction SilentlyContinue) { 'py' }
+          else { throw 'Python was not found on PATH (tried "python" and "py"). Install Python 3.11+ from python.org and re-run.' }
+    & $py -m venv "$root\.venv"
+    if (-not (Test-Path $venvActivate)) {
+        throw "Failed to create the virtual environment at $root\.venv - if 'python' opened the Microsoft Store instead of actually running, that's the Windows app-execution-alias stub, not real Python. Install Python 3.11+ from https://python.org (check 'Add python.exe to PATH' during install), or disable the stub under Settings > Apps > Advanced app settings > App execution aliases, then re-run this script."
+    }
+}
+
+Write-Step 'Installing/checking backend dependencies'
+& "$root\.venv\Scripts\python.exe" -m pip install -q -r "$root\backend\requirements.txt"
+
+# -- Frontend deps -------------------------------------------------------------
+if (-not (Test-Path "$root\frontend\node_modules")) {
+    Write-Step 'Installing frontend dependencies (first run only - this can take a minute)'
+    Push-Location "$root\frontend"
+    npm install
+    Pop-Location
+}
+
+# -- Backend (own window) ------------------------------------------------------
+Write-Step 'Starting backend (uvicorn) in a new window'
+Start-Process powershell -ArgumentList @(
+    '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command',
+    "Set-Location '$root'; & '$venvActivate'; uvicorn backend.main:app --reload"
+) -WindowStyle Normal
+
+# -- Frontend (own window) ------------------------------------------------------
+Write-Step 'Starting frontend (vite) in a new window'
+Start-Process powershell -ArgumentList @(
+    '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command',
+    "Set-Location '$root\frontend'; npm run dev"
+) -WindowStyle Normal
+
+Start-Sleep -Seconds 2
+if (-not $NoBrowser) { Start-Process 'http://localhost:5173' }
+
+Write-Host ''
+Write-Host 'Bee With Me is starting up:' -ForegroundColor Green
+Write-Host '  Backend:  http://localhost:8000  (API docs at /docs)'
+Write-Host '  Frontend: http://localhost:5173'
+Write-Host ''
+Write-Host 'Backend and frontend run in their own windows - close a window (or Ctrl+C inside it) to stop that service.' -ForegroundColor Gray
+Write-Host 'The database keeps running in Docker until you stop it yourself:' -ForegroundColor Gray
+Write-Host '  docker compose -f docker\docker-compose.yaml down' -ForegroundColor Gray
