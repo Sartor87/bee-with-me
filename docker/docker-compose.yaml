@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     env_file: ../.env
     volumes:
-      - ../backend/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - ../data/pgdata:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"

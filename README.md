@@ -56,19 +56,22 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 cd docker && docker compose up -d && cd ..
 ```
 
-The schema (PostGIS + all tables) is applied automatically on first start. To reset and re-apply the schema, destroying all data:
+The backend creates and upgrades the schema itself on start-up: numbered files in
+`backend/db/migrations/` are applied in order and recorded in the `schema_migrations` table.
+Check the state at any time with:
 
 ```bash
-cd docker && docker compose down -v && docker compose up -d && cd ..
+python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app
 ```
 
-**After upgrading from an earlier version**, apply the migration for any new columns:
+The start scripts take a backup (`data/backups/`) before applying pending migrations.
 
-```sql
-ALTER TABLE users ADD COLUMN IF NOT EXISTS pin VARCHAR(20);
-ALTER TABLE users ADD COLUMN IF NOT EXISTS is_radio_enthusiast BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_initials VARCHAR(20);
-```
+To reset to an empty database (**destroys all data**): stop the backend, run
+`cd docker && podman compose down && cd ..` (Docker: `docker compose down`), delete the
+`data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
+`cd docker && podman compose up -d && cd ..` (Docker: `docker compose up -d`).
+
+Schema changes: add a new numbered file; never edit a file that has already been applied.
 
 ### 3. Backend
 
@@ -227,7 +230,8 @@ backend/
     ws.py              GET /ws WebSocket endpoint
     test.py            POST /api/test/simulate (dev only)
   db/
-    schema.sql         Full PostgreSQL + PostGIS schema
+    migrate.py         Migration runner (python -m backend.db.migrate status|up)
+    migrations/        Numbered SQL migrations; 0001_baseline.sql is the full base schema
   tests/               pytest suite (mocked DB, no real Postgres needed)
 frontend/
   src/

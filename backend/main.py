@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import hash_password
 from .config import settings
 from .database import close_pool, get_pool, init_pool
+from .db.migrate import MigrationError, migrate
 from .routers import auth, devices, export, groups, locations, users, ws, test, hardware_reader, tiles
 from .ws import manager
 
@@ -70,22 +71,26 @@ def _warn_insecure_defaults() -> None:
     logger.error('=' * 72)
 
 
-async def _ensure_schema_migrations() -> None:
-    """Small, idempotent additive migrations for existing databases — schema.sql only
-    applies to a fresh volume, so anything added after go-live needs a safe upgrade path
-    here instead of requiring `docker compose down -v` (which would drop live data)."""
+async def _run_migrations() -> None:
+    """Bring the schema up to date before anything touches the database.
+
+    Unlike the insecure-defaults check this refuses to start: running on a half-migrated schema
+    would fail in confusing ways mid-operation. Each migration runs in a transaction, so a failure
+    leaves the database exactly as it was before that file.
+    """
     async with get_pool().acquire() as conn:
-        await conn.execute('ALTER TABLE devices ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ')
-        await conn.execute(
-            'ALTER TABLE location_events '
-            'ADD COLUMN IF NOT EXISTS gnss_valid BOOLEAN NOT NULL DEFAULT TRUE'
-        )
-        # /live and /trail both order and filter on received_at now that freshness is judged
-        # on the server clock rather than the device's.
-        await conn.execute(
-            'CREATE INDEX IF NOT EXISTS idx_location_events_device_received '
-            'ON location_events (device_id, received_at DESC)'
-        )
+        try:
+            applied = await migrate(conn)
+        except MigrationError as exc:
+            logger.critical('=' * 72)
+            logger.critical('DATABASE MIGRATION FAILED: %s', exc)
+            logger.critical('The failed migration was rolled back; the database is as it was before it.')
+            logger.critical('The start script took a backup before migrating: see data/backups/.')
+            logger.critical('Restore steps are at the top of scripts/backup.ps1 and scripts/backup.sh.')
+            logger.critical('=' * 72)
+            raise
+    if applied:
+        logger.info('Applied database migrations: %s', ', '.join(applied))
 
 
 async def _ensure_default_admin() -> None:
@@ -105,7 +110,7 @@ async def lifespan(app: FastAPI):
     _warn_insecure_defaults()
     await init_pool()
     logger.info('Database pool ready')
-    await _ensure_schema_migrations()
+    await _run_migrations()
     await _ensure_default_admin()
 
     notify_task  = asyncio.create_task(manager.listen_notifications())
