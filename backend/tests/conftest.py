@@ -87,3 +87,77 @@ def client(mock_conn, admin_user):
 def auth_headers(admin_user):
     token = create_access_token(admin_user['id'], admin_user['role'])
     return {'Authorization': f'Bearer {token}'}
+
+
+# ── Plan tooling: task filter + scratch databases ─────────────────────────────
+
+import asyncio
+
+import asyncpg
+import pytest_asyncio
+
+from backend.config import settings
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        '--task', action='append', default=[],
+        help='Only run tests tagged @pytest.mark.Trait("Task"|"Bug", "<id>"); repeatable',
+    )
+    parser.addoption(
+        '--require-db', action='store_true',
+        help='Fail (instead of skip) DB tests when PostgreSQL is unreachable',
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'Trait(kind, id): plan task/bug tag, e.g. Trait("Task", "T3")')
+    config.addinivalue_line('markers', 'db: needs a reachable PostgreSQL (skipped unless --require-db)')
+
+
+def pytest_collection_modifyitems(config, items):
+    wanted = set(config.getoption('--task'))
+    if not wanted:
+        return
+    keep, drop = [], []
+    for item in items:
+        tags = {m.args[1] for m in item.iter_markers('Trait') if len(m.args) == 2}
+        (keep if tags & wanted else drop).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    items[:] = keep
+
+
+def _dsn(database: str) -> dict:
+    return dict(
+        host=settings.postgres_host, port=settings.postgres_port,
+        user=settings.postgres_user, password=settings.postgres_password,
+        database=database,
+    )
+
+
+@pytest_asyncio.fixture()
+async def scratch_db(request):
+    """A fresh, empty database for one test, dropped afterwards."""
+    try:
+        admin = await asyncpg.connect(**_dsn(settings.postgres_db), timeout=3)
+    except (OSError, asyncpg.PostgresError, asyncio.TimeoutError) as exc:
+        if request.config.getoption('--require-db'):
+            pytest.fail(f'PostgreSQL required but not reachable: {exc}')
+        pytest.skip(f'PostgreSQL not reachable: {exc}')
+    name = f'bwm_test_{uuid.uuid4().hex[:12]}'
+    await admin.execute(f'CREATE DATABASE {name}')
+    try:
+        yield _dsn(name)
+    finally:
+        await admin.execute(f'DROP DATABASE IF EXISTS {name} WITH (FORCE)')
+        await admin.close()
+
+
+@pytest_asyncio.fixture()
+async def scratch_conn(scratch_db):
+    conn = await asyncpg.connect(**scratch_db)
+    try:
+        yield conn
+    finally:
+        await conn.close()
