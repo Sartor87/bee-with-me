@@ -123,6 +123,31 @@ def refuse_url_fetch(url: str, *args, **kwargs):
     raise ValueError(f'External resources are disabled in PDF export: {url!r}')
 
 
+def make_refusing_url_fetcher():
+    """A ``weasyprint.urls.URLFetcher`` (WeasyPrint 70.x) that refuses every URL.
+
+    WeasyPrint 70 calls ``url_fetcher(url)`` and, when that raises, reads
+    ``url_fetcher._fail_on_errors`` — a bare function has no such attribute, so the export
+    failed with a 500 as soon as any fetch was attempted. A subclass keeps that contract:
+    ``fetch()`` (which ``__call__`` and ``open()`` both route through) always raises, and
+    ``allowed_protocols=()`` refuses every scheme even if a future version bypassed it.
+    A refused resource is logged by WeasyPrint and skipped; the PDF still renders.
+
+    WeasyPrint is imported here, not at module level, so a missing GTK/Pango runtime only
+    breaks PDF export.
+    """
+    from weasyprint.urls import URLFetcher
+
+    class _RefusingURLFetcher(URLFetcher):
+        def __init__(self):
+            super().__init__(allowed_protocols=(), allow_redirects=False, fail_on_errors=False)
+
+        def fetch(self, url, headers=None):
+            refuse_url_fetch(url)
+
+    return _RefusingURLFetcher()
+
+
 def build_report_html(rows: list[dict], period: str) -> str:
     rows_html = ''.join(
         '<tr>'
@@ -174,7 +199,7 @@ async def export_pdf(
 
     rows = await _fetch_rows(conn, from_dt, to_dt, group_id, user_id)
     period = f"{from_dt or 'all'} → {to_dt or 'now'}"
-    pdf = HTML(string=build_report_html(rows, period), url_fetcher=refuse_url_fetch).write_pdf()
+    pdf = HTML(string=build_report_html(rows, period), url_fetcher=make_refusing_url_fetcher()).write_pdf()
     return Response(
         content=pdf,
         media_type='application/pdf',
