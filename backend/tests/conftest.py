@@ -113,7 +113,7 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line('markers', 'Trait(kind, id): plan task/bug tag, e.g. Trait("Task", "T3")')
-    config.addinivalue_line('markers', 'db: needs a reachable PostgreSQL (skipped unless --require-db)')
+    config.addinivalue_line('markers', 'db: needs a reachable PostgreSQL (skipped when unreachable; fails instead under --require-db)')
 
 
 def pytest_collection_modifyitems(config, items):
@@ -147,8 +147,8 @@ async def scratch_db(request):
             pytest.fail(f'PostgreSQL required but not reachable: {exc}')
         pytest.skip(f'PostgreSQL not reachable: {exc}')
     name = f'bwm_test_{uuid.uuid4().hex[:12]}'
-    await admin.execute(f'CREATE DATABASE {name}')
     try:
+        await admin.execute(f'CREATE DATABASE {name}')
         yield _dsn(name)
     finally:
         await admin.execute(f'DROP DATABASE IF EXISTS {name} WITH (FORCE)')
