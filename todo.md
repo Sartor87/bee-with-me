@@ -1,5 +1,7 @@
 # TODO/RoadMap:
 
+- [ ] implement Copernicus EFFIS burnt areas - reference: https://github.com/bilawalsidhu/gods-eye-view/pull/852. Ask for local development first.
+- [ ] wind-shift alerts for forest-fire ops (draft spec: docs/superpowers/specs/2026-10-02-wind-shift-alerts-design.md in the kit workspace)
 - [ ] move the logout button away from the language so nobody log outs accidentally
 - [ ] think if an account page is needed?
 - [ ] fix the bug where mgrs and lat/lon doesn't show accordingly
@@ -7,7 +9,7 @@
 - [ ] CI/CD
 - [ ] build and compile
 - [ ] think about windows support?
-- [ ] **[SECURITY]** WebSocket endpoint (`/ws`) accepts connections from any client on the network with no authentication — anyone who can reach the server can receive all live position and SOS alert data. maybe (re)introduce JWT authentication?
+- [ ] **[SECURITY]** WebSocket endpoint (`/ws`) accepts connections from any client on the network with no authentication — anyone who can reach the server can receive all live position and SOS alert data. maybe (re)introduce JWT authentication? Note: the EFFIS fire feature adds `fire_alert` / `fire_data_updated` messages (rescuer names + distances) to this same unauthenticated channel — TODO: authenticate `/ws` before multi-user use.
 - [ ] tighten CORS allow_origins=['*'] in main.py
 - [ ] add support for serial devices
 - [ ] orphaned files are not being deleted
@@ -19,3 +21,11 @@
 - [ ] the headquarters location is stored in localstorage (per browser), instead it should be stored in the database
 - [ ] drop redundant columns: latitude/longitude/mgrs duplicate what's in the geometry. should save a lot of db rows
 - [ ] fetchtrail () should only fetch a device if the row is in view, should make the json smaller
+- [ ] `/api/locations/live` query cost grows with the whole `location_events` table (DISTINCT ON, no skip scan in PG16) — rewrite as a per-device LATERAL probe on `idx_location_events_device_received`. See docs/research/2026-10-02-data-volume-archival.md (kit workspace)
+- [ ] retention cleanup deletes by `recorded_at` (device GNSS clock — a wrong clock deletes rows early or never) with no supporting index and no batching — key on `received_at`, batch the DELETE, add a BRIN index on `received_at`
+- [ ] export (CSV/GeoJSON/PDF) has no row cap and builds the whole result in memory — add a cap and stream the response; first limit users will hit at ~0.5–1M rows
+- [ ] backups (`scripts/backup.sh` / `backup.ps1`) write uncompressed plain SQL — switch to `pg_dump -Fc` (compressed, faster restore)
+- [ ] `idx_location_events_device_time` overlaps `idx_location_events_device_received` — drop the redundant index (~45 B/row) after checking query plans
+- [ ] partitioning plan: when `location_events` exceeds ~5 GB / ~12M rows or the retention DELETE takes >30 s, move to monthly RANGE partitions on `received_at` (runtime-created, DEFAULT partition, dump detached partitions before drop). No sharding needed for this deployment model
+- [ ] confirm the RescuerBee frame interval with the hardware owner — it drives every data-volume estimate
+- [ ] `docker-compose.yaml` tiles service: `maptiler/tileserver-gl:latest` no longer accepts `--no-config` (container restart-loops with "unknown option '--no-config'"). Pin the image to a known version and fix the command; is the service still used at all (BG Mountains tiles are served by FastAPI)?
