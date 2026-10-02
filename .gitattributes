@@ -1,3 +1,7 @@
 # Shell scripts keep LF endings everywhere: bash fails on a trailing CR, and Git for Windows
 # (core.autocrlf=true) would otherwise check them out with CRLF.
 *.sh text eol=lf
+
+# Migration files and SQL fixtures keep LF endings everywhere, so a checkout never differs from
+# the bytes that were reviewed (migrate.py also normalises line endings before checksumming).
+*.sql text eol=lf

@@ -4,8 +4,14 @@ Database migration runner.
 Migrations are numbered SQL files in backend/db/migrations/ (NNNN_name.sql) with dbmate-style
 markers; only the `-- migrate:up` section runs. Each file runs in its own transaction under a
 transaction-scoped advisory lock, so a failing file leaves the database as it was and two backend
-processes starting at once apply every file exactly once. Applied versions and the SHA-256 of
-each file are recorded in schema_migrations.
+processes starting at once apply every file exactly once. Applied versions and a SHA-256 checksum
+are recorded in schema_migrations.
+
+The checksum covers the up section only: the text between `-- migrate:up` and `-- migrate:down`
+with every line ending (CRLF, CR) normalised to LF and trailing whitespace of the section stripped.
+A Windows (CRLF) and a Linux (LF) checkout of the same file therefore have the same checksum. The
+down section is documentation (it never runs), so editing it never changes the checksum; any edit
+of the up section, including a comment, does and is logged as "changed after apply".
 
     python -m backend.db.migrate status   # exit 0 up to date, 10 pending, 2 database is newer,
                                           # 3 database not reachable, 1 bad files / failed migration
@@ -152,6 +158,11 @@ def _check_no_transaction_control(filename: str, up_sql: str) -> None:
             )
 
 
+def _normalise_newlines(text: str) -> str:
+    """CRLF and lone CR become LF, so the checkout's line endings never affect parsing or checksums."""
+    return text.replace('\r\n', '\n').replace('\r', '\n')
+
+
 def load_migrations(directory: Path | None = None) -> list[Migration]:
     directory = directory or MIGRATIONS_DIR
     migrations = []
@@ -159,14 +170,15 @@ def load_migrations(directory: Path | None = None) -> list[Migration]:
         match = _NAME_RE.match(path.name)
         if not match:
             raise MigrationError(f'Bad migration file name {path.name!r}: expected NNNN_lower_snake.sql')
-        text = path.read_text(encoding='utf-8')
+        text = _normalise_newlines(path.read_bytes().decode('utf-8'))
         up = _UP_RE.search(text)
         if not up:
             raise MigrationError(f'{path.name}: missing "-- migrate:up" marker')
         down = _DOWN_RE.search(text, up.end())
-        up_sql = text[up.end():down.start() if down else len(text)].strip()
+        up_section = text[up.end():down.start() if down else len(text)]
+        up_sql = up_section.strip()
         _check_no_transaction_control(path.name, up_sql)
-        checksum = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        checksum = hashlib.sha256(up_section.rstrip().encode('utf-8')).hexdigest()
         migrations.append(Migration(match.group(1), path.stem, up_sql, checksum))
     versions = [mig.version for mig in migrations]
     duplicates = sorted({v for v in versions if versions.count(v) > 1})

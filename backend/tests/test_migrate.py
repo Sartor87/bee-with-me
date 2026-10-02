@@ -272,3 +272,80 @@ async def test_cli_exit_unreachable_when_connect_fails(monkeypatch, capsys, comm
 def test_docstring_lists_exit_code_3():
     doc = m.__doc__ or ''
     assert '3 database not reachable' in doc
+
+
+# ── B15: checksum covers the up section only, independent of line endings ─────
+
+_B15_FILE = '-- migrate:up\nCREATE TABLE a (id int);\nCREATE INDEX idx_a_id ON a (id);\n\n-- migrate:down\nDROP TABLE a;\n'
+
+
+def _checksum_of(directory, content: bytes) -> str:
+    directory.mkdir(exist_ok=True)
+    (directory / '0001_a.sql').write_bytes(content)
+    return m.load_migrations(directory)[0].checksum
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_checksum_is_the_same_for_lf_crlf_and_cr(tmp_path):
+    lf = _checksum_of(tmp_path / 'lf', _B15_FILE.encode('utf-8'))
+    crlf = _checksum_of(tmp_path / 'crlf', _B15_FILE.replace('\n', '\r\n').encode('utf-8'))
+    cr = _checksum_of(tmp_path / 'cr', _B15_FILE.replace('\n', '\r').encode('utf-8'))
+    assert lf == crlf == cr
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_crlf_file_loads_the_same_up_sql(tmp_path):
+    (tmp_path / '0001_a.sql').write_bytes(_B15_FILE.replace('\n', '\r\n').encode('utf-8'))
+    assert '\r' not in m.load_migrations(tmp_path)[0].up_sql
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_editing_only_the_down_section_keeps_the_checksum(tmp_path):
+    before = _checksum_of(tmp_path / 'a', _B15_FILE.encode('utf-8'))
+    edited = _B15_FILE.replace('DROP TABLE a;\n', '-- a comment about rollback\nDROP TABLE IF EXISTS a;\n')
+    assert _checksum_of(tmp_path / 'b', edited.encode('utf-8')) == before
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_trailing_whitespace_of_the_up_section_does_not_change_the_checksum(tmp_path):
+    before = _checksum_of(tmp_path / 'a', _B15_FILE.encode('utf-8'))
+    edited = _B15_FILE.replace('(id);\n\n-- migrate:down', '(id);   \n\n\n\t\n-- migrate:down')
+    assert _checksum_of(tmp_path / 'b', edited.encode('utf-8')) == before
+
+
+@pytest.mark.Trait("Bug", "B15")
+@pytest.mark.parametrize('edit', [
+    ('CREATE TABLE a (id int);', 'CREATE TABLE a (id bigint);'),
+    ('CREATE TABLE a (id int);', 'CREATE TABLE a (id int); -- comment in up'),
+])
+def test_editing_the_up_section_changes_the_checksum(tmp_path, edit):
+    before = _checksum_of(tmp_path / 'a', _B15_FILE.encode('utf-8'))
+    assert _checksum_of(tmp_path / 'b', _B15_FILE.replace(*edit).encode('utf-8')) != before
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_docstring_says_the_down_section_is_not_checksummed():
+    doc = m.__doc__ or ''
+    assert 'down section' in doc and 'line ending' in doc
+
+
+@pytest.mark.Trait("Bug", "B15")
+def test_gitattributes_pins_sql_files_to_lf():
+    from pathlib import Path
+    attrs = (Path(m.__file__).resolve().parents[2] / '.gitattributes').read_text(encoding='utf-8')
+    rules = [line.split() for line in attrs.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    assert ['*.sql', 'text', 'eol=lf'] in rules
+
+
+@pytest.mark.Trait("Bug", "B15")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_crlf_checkout_of_an_applied_lf_file_is_not_reported_changed(scratch_conn, tmp_path, caplog):
+    (tmp_path / '0001_a.sql').write_bytes(_B15_FILE.encode('utf-8'))
+    await m.migrate(scratch_conn, m.load_migrations(tmp_path))
+    (tmp_path / '0001_a.sql').write_bytes(_B15_FILE.replace('\n', '\r\n').encode('utf-8'))
+    migs = m.load_migrations(tmp_path)
+    with caplog.at_level(logging.WARNING, logger='backend.db.migrate'):
+        assert await m.migrate(scratch_conn, migs) == []
+    assert (await m.status(scratch_conn, migs)).changed == []
+    assert 'changed' not in caplog.text
