@@ -111,14 +111,14 @@ Write-Step 'Installing/checking backend dependencies'
 # -- Database migrations: back up first if any are pending ---------------------
 if (-not $SkipContainers) {
     Write-Step 'Checking database migrations'
-    # Exit 1 usually means Postgres isn't accepting connections yet (slow after a reboot or
+    # Exit 3 means Postgres isn't accepting connections yet (slow after a reboot or
     # `podman machine start`): retry for up to 90 s rather than let the backend migrate later
-    # without the backup this check exists for.
+    # without the backup this check exists for. Any other code is final at once.
     $migDeadline = (Get-Date).AddSeconds(90)
     while ($true) {
         & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status
         $migExit = $LASTEXITCODE
-        if ($migExit -ne 1 -or (Get-Date) -gt $migDeadline) { break }
+        if ($migExit -ne 3 -or (Get-Date) -gt $migDeadline) { break }
         Write-Warn 'Database not reachable yet - retrying in 3 s'
         Start-Sleep -Seconds 3
     }
@@ -127,8 +127,9 @@ if (-not $SkipContainers) {
         10 {
             Write-Step 'Migrations pending - taking a backup first (data\backups)'
             try { & "$root\scripts\backup.ps1" -OutDir "$root\data\backups" }
-            catch { throw 'Backup failed - not starting, so the database is never migrated without a backup.' }
+            catch { throw 'Backup failed - not starting, so the database is never migrated without a backup.' + " $($_.Exception.Message)" }
         }
+        1  { throw 'Not starting: the migration files are invalid: see the message above.' }
         2  { throw 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' }
         default { throw "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $engine compose -f docker\docker-compose.yaml logs" }
     }

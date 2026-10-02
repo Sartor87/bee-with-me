@@ -112,16 +112,16 @@ step 'Installing/checking backend dependencies'
 # -- Database migrations: back up first if any are pending ---------------------------
 if [[ $SKIP_CONTAINERS -eq 0 ]]; then
     step 'Checking database migrations'
-    # Exit 1 usually means Postgres isn't accepting connections yet (slow after a reboot or
+    # Exit 3 means Postgres isn't accepting connections yet (slow after a reboot or
     # `podman machine start`): retry for up to 90 s rather than let the backend migrate later
-    # without the backup this check exists for.
+    # without the backup this check exists for. Any other code is final at once.
     mig_deadline=$((SECONDS + 90))
     while :; do
         set +e
         ( cd "$ROOT" && "$ROOT/.venv/bin/python" -m backend.db.migrate status )
         mig=$?
         set -e
-        [[ $mig -eq 1 && $SECONDS -lt $mig_deadline ]] || break
+        [[ $mig -eq 3 && $SECONDS -lt $mig_deadline ]] || break
         warn 'Database not reachable yet - retrying in 3 s'
         sleep 3
     done
@@ -130,6 +130,7 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
         10) step 'Migrations pending - taking a backup first (data/backups)'
             "$ROOT/scripts/backup.sh" "$ROOT/data/backups" \
                 || die 'Backup failed - not starting, so the database is never migrated without a backup.' ;;
+        1)  die 'Not starting: the migration files are invalid: see the message above.' ;;
         2)  die 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' ;;
         *)  die "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $ENGINE compose -f docker/docker-compose.yaml logs" ;;
     esac

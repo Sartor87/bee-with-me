@@ -66,8 +66,10 @@ The backend creates and upgrades the schema itself on start-up: numbered files i
 Check the state at any time with:
 
 ```bash
-python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app
+python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app, 3 = database not reachable, 1 = invalid migration files / failed migration
 ```
+
+The start scripts retry only exit 3 (Postgres still starting) for up to 90 s; exit 1 and 2 refuse at once.
 
 The start scripts take a backup (`data/backups/`) before applying pending migrations, and refuse to
 start when they cannot check the database for 90 s. `-SkipContainers` (start.ps1) / `--skip-containers`

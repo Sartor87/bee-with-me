@@ -239,3 +239,36 @@ async def test_cli_status_exit_failed_on_bad_file_name(scratch_db, tmp_path, mon
 def test_docstring_documents_non_transactional_statements():
     doc = m.__doc__ or ''
     assert 'CONCURRENTLY' in doc and 'ADD VALUE' in doc
+
+
+# ── B9: a connection failure has its own exit code ───────────────────────────
+
+def _unused_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+@pytest.mark.Trait("Bug", "B9")
+def test_exit_codes_are_distinct():
+    assert m.EXIT_UNREACHABLE == 3
+    assert m.EXIT_FAILED == 1
+    assert len({m.EXIT_OK, m.EXIT_FAILED, m.EXIT_NEWER_DB, m.EXIT_UNREACHABLE, m.EXIT_PENDING}) == 5
+
+
+@pytest.mark.Trait("Bug", "B9")
+@pytest.mark.asyncio
+@pytest.mark.parametrize('command', ['status', 'up'])
+async def test_cli_exit_unreachable_when_connect_fails(monkeypatch, capsys, command):
+    port = _unused_port()
+    monkeypatch.setattr(m, '_connect_kwargs', lambda: dict(
+        host='127.0.0.1', port=port, user='x', password='x', database='x'))
+    assert await m.main([command]) == m.EXIT_UNREACHABLE
+    assert 'Cannot connect to the database' in capsys.readouterr().err
+
+
+@pytest.mark.Trait("Bug", "B9")
+def test_docstring_lists_exit_code_3():
+    doc = m.__doc__ or ''
+    assert '3 database not reachable' in doc

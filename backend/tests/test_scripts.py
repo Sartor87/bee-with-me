@@ -254,3 +254,69 @@ def test_gitignore_has_backup_rules():
 def test_git_ignores_dumps(path):
     res = subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '-q', '--no-index', path])
     assert res.returncode == 0, f'{path} is not ignored'
+
+
+# ── B9: retry only "unreachable" (3); invalid files (1) refuse at once ───────
+
+_INVALID = 'migration files are invalid: see the message above'
+
+
+def _migration_section(rel):
+    text = _read(rel)
+    return text[text.index('Checking database migrations'):text.index("'Starting backend")]
+
+
+@pytest.mark.Trait("Bug", "B9")
+@pytest.mark.parametrize('rel,retry', [
+    ('start.ps1', '$migExit -ne 3 -or'),
+    ('start.sh', '$mig -eq 3 && $SECONDS -lt $mig_deadline'),
+])
+def test_start_script_retries_only_exit_3(rel, retry):
+    section = _migration_section(rel)
+    assert retry in section
+    assert '$migExit -ne 1' not in section and '$mig -eq 1 &&' not in section
+
+
+@pytest.mark.Trait("Bug", "B9")
+@pytest.mark.parametrize('rel,case1,keyword', [
+    ('start.ps1', re.compile(r'^\s*1\s*\{\s*throw\b'), 'throw'),
+    ('start.sh', re.compile(r'^\s*1\)\s*die\b'), 'die'),
+])
+def test_start_script_refuses_at_once_on_invalid_migration_files(rel, case1, keyword):
+    lines = _migration_section(rel).splitlines()
+    hits = [l for l in lines if case1.search(l)]
+    assert hits, 'no branch for exit 1'
+    assert _INVALID in hits[0]
+    # exit 3 (after the retries) still refuses with the "not reachable" message
+    assert any(_REFUSE in l and keyword in l for l in lines)
+
+
+@pytest.mark.Trait("Bug", "B9")
+def test_start_ps1_backup_failure_keeps_the_error_text():
+    text = _read('start.ps1')
+    m = re.search(r"catch\s*\{\s*throw 'Backup failed[^\n]*", text)
+    assert m and '$_.Exception.Message' in m.group(0)
+
+
+@pytest.mark.Trait("Bug", "B9")
+def test_gitattributes_forces_lf_for_shell_scripts():
+    lines = [l.split() for l in _read('.gitattributes').splitlines() if l.strip() and not l.startswith('#')]
+    assert ['*.sh', 'text', 'eol=lf'] in lines
+
+
+@pytest.mark.Trait("Bug", "B9")
+@pytest.mark.skipif(shutil.which('git') is None, reason='no git')
+@pytest.mark.parametrize('rel', ['start.sh', 'scripts/backup.sh'])
+def test_shell_scripts_are_lf_in_the_index_and_attributes(rel):
+    attr = subprocess.run(['git', '-C', str(ROOT), 'check-attr', 'eol', '--', rel],
+                          capture_output=True, text=True).stdout
+    assert attr.strip().endswith('eol: lf')
+    blob = subprocess.run(['git', '-C', str(ROOT), 'show', f':{rel}'], capture_output=True).stdout
+    assert blob and b'\r\n' not in blob
+
+
+@pytest.mark.Trait("Bug", "B9")
+def test_readme_lists_exit_code_3():
+    text = _read('README.md')
+    line = next(l for l in text.splitlines() if 'backend.db.migrate status' in l and 'exit 0' in l)
+    assert '3 = database not reachable' in line and '1 = ' in line

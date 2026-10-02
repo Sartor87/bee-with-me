@@ -7,7 +7,8 @@ transaction-scoped advisory lock, so a failing file leaves the database as it wa
 processes starting at once apply every file exactly once. Applied versions and the SHA-256 of
 each file are recorded in schema_migrations.
 
-    python -m backend.db.migrate status   # exit 0 up to date, 10 pending, 2 database is newer
+    python -m backend.db.migrate status   # exit 0 up to date, 10 pending, 2 database is newer,
+                                          # 3 database not reachable, 1 bad files / failed migration
     python -m backend.db.migrate up
 
 Because the runner owns the transaction, a migration file must not contain transaction control
@@ -38,6 +39,7 @@ LOCK_KEY = 7_342_001
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_NEWER_DB = 2
+EXIT_UNREACHABLE = 3   # could not connect (Postgres down or still starting): worth retrying
 EXIT_PENDING = 10
 
 _NAME_RE = re.compile(r'^(\d{4})_[a-z0-9_]+\.sql$')
@@ -222,7 +224,7 @@ async def main(argv: list[str]) -> int:
         conn = await asyncpg.connect(**_connect_kwargs(), timeout=10)
     except (OSError, asyncpg.PostgresError, asyncio.TimeoutError) as exc:
         print(f'Cannot connect to the database: {exc}', file=sys.stderr)
-        return EXIT_FAILED
+        return EXIT_UNREACHABLE
     try:
         if args.command == 'status':
             st = await status(conn)
