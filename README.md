@@ -104,6 +104,11 @@ machine rm` or a reset deletes it — back up with `scripts/backup.ps1` onto ano
 To reset to an empty database in this mode, `down -v` with both `-f` files removes the named volume
 instead of deleting `data/pgdata`.
 
+The database only listens on localhost (`127.0.0.1`, in both modes; the tile server too) — the
+backend, the hardware reader and the scripts all run on this machine. To reach it from another
+machine, change the binding in the compose files deliberately (and set a real `POSTGRES_PASSWORD`;
+the backend logs an INSECURE CONFIG line while it is still `change_me`).
+
 Schema changes: add a new numbered file; never edit a file that has already been applied.
 
 ### 3. Backend

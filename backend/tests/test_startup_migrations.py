@@ -52,3 +52,27 @@ async def test_run_migrations_logs_applied_versions(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         await main._run_migrations()
     assert '0001' in caplog.text
+
+
+@pytest.mark.Trait("Bug", "B6")
+@pytest.mark.parametrize('password', ['change_me', ''])
+def test_warn_insecure_defaults_flags_default_postgres_password(monkeypatch, caplog, password):
+    monkeypatch.setattr(main.settings, 'secret_key', 'x' * 40)
+    monkeypatch.setattr(main.settings, 'offline_maps_password', 'something-else')
+    monkeypatch.setattr(main.settings, 'enable_test_endpoints', False)
+    monkeypatch.setattr(main.settings, 'postgres_password', password)
+    with caplog.at_level(logging.ERROR):
+        main._warn_insecure_defaults()
+    assert any('INSECURE CONFIG' in r.getMessage() and 'POSTGRES_PASSWORD' in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.Trait("Bug", "B6")
+def test_warn_insecure_defaults_silent_for_custom_postgres_password(monkeypatch, caplog):
+    monkeypatch.setattr(main.settings, 'secret_key', 'x' * 40)
+    monkeypatch.setattr(main.settings, 'offline_maps_password', 'something-else')
+    monkeypatch.setattr(main.settings, 'enable_test_endpoints', False)
+    monkeypatch.setattr(main.settings, 'postgres_password', 'a-real-password')
+    with caplog.at_level(logging.ERROR):
+        main._warn_insecure_defaults()
+    assert 'POSTGRES_PASSWORD' not in caplog.text

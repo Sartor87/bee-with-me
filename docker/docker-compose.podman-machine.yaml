@@ -16,10 +16,13 @@ services:
       - pgdata:/var/lib/postgresql/data   # replaces the ../data/pgdata bind mount (same target)
     # WSL forwards to Windows localhost only ports that have a listening socket in the VM. A rootful
     # Podman machine publishes container ports with firewall redirects (no socket), so 5432 never
-    # reaches Windows. On the VM's host network Postgres itself listens on 0.0.0.0:5432, which WSL
-    # forwards. POSTGRES_PORT is ignored in this mode (Postgres always uses 5432).
+    # reaches Windows. On the VM's host network Postgres itself listens on 127.0.0.1:5432, which WSL
+    # forwards to Windows localhost. POSTGRES_PORT is ignored in this mode (Postgres always uses 5432).
+    # Loopback only: under WSL mirrored networking 0.0.0.0 would be the laptop's LAN/Starlink
+    # interfaces. To reach the database from another machine, change this binding deliberately.
     network_mode: host
     ports: !reset []
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
 
 volumes:
   pgdata:

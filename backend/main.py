@@ -61,6 +61,8 @@ def _warn_insecure_defaults() -> None:
         problems.append('SECRET_KEY is still the example value — JWTs can be forged. Set a long random string in .env')
     if settings.offline_maps_password in ('change_me', ''):
         problems.append('OFFLINE_MAPS_PASSWORD is unset or still the example value')
+    if settings.postgres_password in ('change_me', ''):
+        problems.append('POSTGRES_PASSWORD is unset or still the example value — set a real database password in .env')
     if settings.enable_test_endpoints:
         problems.append('ENABLE_TEST_ENDPOINTS=true — /api/test/simulate can write fabricated positions. Never enable during a real operation')
     if not problems:

@@ -174,3 +174,28 @@ def test_readme_says_skip_containers_skips_the_backup():
     assert re.search(r'--skip-containers.{0,400}backup', text, re.DOTALL)
     section = text[text.index('### 2. Database'):text.index('The backend creates')]
     assert 'podman-machine' in section
+
+
+# ── B6: Postgres and tiles only reachable on loopback ────────────────────────
+
+@pytest.mark.Trait("Bug", "B6")
+def test_podman_machine_override_binds_postgres_to_loopback():
+    text = _read('docker/docker-compose.podman-machine.yaml')
+    assert 'listen_addresses=127.0.0.1' in text
+    assert re.search(r'command:\s*\["postgres",\s*"-c",\s*"listen_addresses=127\.0\.0\.1"\]', text)
+
+
+@pytest.mark.Trait("Bug", "B6")
+def test_base_compose_publishes_db_and_tiles_on_loopback_only():
+    text = _read('docker/docker-compose.yaml')
+    published = re.findall(r'^\s*-\s*"([^"]+)"\s*$', text, re.MULTILINE)
+    port_maps = [p for p in published if re.search(r':\d+$', p) and not p.startswith('..')]
+    assert '127.0.0.1:${POSTGRES_PORT:-5432}:5432' in port_maps
+    assert '127.0.0.1:8080:8080' in port_maps
+    assert all(p.startswith('127.0.0.1:') for p in port_maps), port_maps
+
+
+@pytest.mark.Trait("Bug", "B6")
+def test_readme_says_database_listens_on_localhost_only():
+    text = _read('README.md')
+    assert re.search(r'only listens on localhost', text)
