@@ -101,3 +101,43 @@ async def test_legacy_rows_survive(scratch_conn):
 def test_schema_sql_is_gone_and_compose_no_longer_mounts_it():
     assert not (ROOT / 'backend' / 'db' / 'schema.sql').exists()
     assert 'schema.sql' not in (ROOT / 'docker' / 'docker-compose.yaml').read_text(encoding='utf-8')
+
+
+# ── B3: fail fast on lock waits and on silent type drift ─────────────────────
+
+@pytest.mark.Trait("Bug", "B3")
+def test_baseline_up_section_starts_with_lock_timeout():
+    up = _baseline()[0].up_sql
+    statements = [
+        s.strip() for s in '\n'.join(
+            line for line in up.splitlines() if not line.lstrip().startswith('--')
+        ).split(';') if s.strip()
+    ]
+    assert statements[0] == "SET LOCAL lock_timeout = '5s'"
+
+
+@pytest.mark.Trait("Bug", "B3")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_type_drift_fails_the_baseline_and_records_nothing(scratch_conn):
+    legacy = (FIXTURES / 'schema_v1_7_1.sql').read_text(encoding='utf-8')
+    drifted = legacy.replace('dev_sn      INTEGER     UNIQUE NOT NULL',
+                             'dev_sn      BIGINT      UNIQUE NOT NULL')
+    assert drifted != legacy
+    await scratch_conn.execute(drifted)
+    with pytest.raises(m.MigrationError, match='dev_sn'):
+        await m.migrate(scratch_conn, _baseline())
+    st = await m.status(scratch_conn, _baseline())
+    assert st.applied == [] and st.pending == ['0001']
+
+
+@pytest.mark.Trait("Bug", "B3")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_type_drift_message_names_both_types(scratch_conn):
+    legacy = (FIXTURES / 'schema_v1_7_1.sql').read_text(encoding='utf-8')
+    await scratch_conn.execute(legacy.replace('dev_sn      INTEGER     UNIQUE NOT NULL',
+                                              'dev_sn      BIGINT      UNIQUE NOT NULL'))
+    with pytest.raises(m.MigrationError) as exc:
+        await m.migrate(scratch_conn, _baseline())
+    assert 'schema drift: devices.dev_sn is int8, expected int4' in str(exc.value)

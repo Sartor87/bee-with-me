@@ -4,6 +4,10 @@
 -- schema.sql get the missing pieces from the IF NOT EXISTS / ADD COLUMN lines. This file is the
 -- single source of truth for the schema; backend/db/schema.sql no longer exists.
 
+-- Fail fast instead of queueing behind a long-running transaction (and blocking every writer
+-- behind this migration); the runner rolls back and the next start retries.
+SET LOCAL lock_timeout = '5s';
+
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -143,6 +147,38 @@ DROP TRIGGER IF EXISTS trg_groups_updated_at ON groups;
 CREATE TRIGGER trg_groups_updated_at
     BEFORE UPDATE ON groups
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Pre-flight: CREATE TABLE IF NOT EXISTS keeps an existing table as it is, so a key column created
+-- with another type would drift silently. Refuse (the whole file rolls back) instead.
+DO $$
+DECLARE
+    expected RECORD;
+    actual   TEXT;
+BEGIN
+    FOR expected IN
+        SELECT * FROM (VALUES
+            ('location_events', 'position',    'geometry'),
+            ('location_events', 'latitude',    'float8'),
+            ('location_events', 'longitude',   'float8'),
+            ('location_events', 'device_id',   'uuid'),
+            ('location_events', 'received_at', 'timestamptz'),
+            ('location_events', 'recorded_at', 'timestamptz'),
+            ('devices',         'dev_sn',      'int4'),
+            ('devices',         'id',          'uuid'),
+            ('users',           'id',          'uuid')
+        ) AS t(table_name, column_name, udt_name)
+    LOOP
+        SELECT c.udt_name INTO actual
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = expected.table_name
+          AND c.column_name = expected.column_name;
+        IF actual IS DISTINCT FROM expected.udt_name THEN
+            RAISE EXCEPTION 'schema drift: %.% is %, expected %',
+                expected.table_name, expected.column_name, COALESCE(actual, 'missing'), expected.udt_name;
+        END IF;
+    END LOOP;
+END $$;
 
 -- migrate:down
 -- Forward-only. To undo, restore the backup taken before migrating (data/backups/).
