@@ -140,3 +140,102 @@ async def test_cli_exit_codes(scratch_db, tmp_path, monkeypatch):
     assert await m.main(['status']) == m.EXIT_PENDING
     assert await m.main(['up']) == m.EXIT_OK
     assert await m.main(['status']) == m.EXIT_OK
+
+
+# ── B2: transaction control is rejected; CLI exit codes 1 and 2 ──────────────
+
+_PLPGSQL_OK = """
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+DO $$ BEGIN
+    CREATE TYPE app_role AS ENUM ('admin', 'rescuer', 'viewer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $body$
+BEGIN
+    PERFORM 1;
+    -- COMMIT; inside a body is plpgsql's business
+END
+$body$;
+
+-- BEGIN; in a comment is fine
+SELECT 'COMMIT;' AS not_a_statement, $q$ROLLBACK;$q$ AS neither;
+/* START TRANSACTION; in a block comment */
+"""
+
+
+@pytest.mark.Trait("Bug", "B2")
+@pytest.mark.parametrize('up', [
+    'BEGIN;\nCREATE TABLE x (id int);\nCOMMIT;',
+    'CREATE TABLE x (id int);\ncommit;',
+    'CREATE TABLE x (id int); COMMIT;',
+    '  begin work;\nCREATE TABLE x (id int);',
+    'BEGIN TRANSACTION;\nSELECT 1;',
+    'START TRANSACTION;\nSELECT 1;',
+    'SELECT 1;\nROLLBACK;',
+    'SELECT 1;\n  End;',
+    'SAVEPOINT s1;\nSELECT 1;',
+    'SELECT 1;\nABORT;',
+    'DO $$ BEGIN PERFORM 1; END $$;\nCOMMIT;',
+])
+def test_load_rejects_transaction_control_outside_bodies(tmp_path, up):
+    _write(tmp_path, '0001_tx.sql', up)
+    with pytest.raises(m.MigrationError, match='0001_tx.sql'):
+        m.load_migrations(tmp_path)
+
+
+@pytest.mark.Trait("Bug", "B2")
+def test_load_accepts_plpgsql_bodies_comments_and_strings(tmp_path):
+    _write(tmp_path, '0001_fn.sql', _PLPGSQL_OK)
+    assert [x.version for x in m.load_migrations(tmp_path)] == ['0001']
+
+
+@pytest.mark.Trait("Bug", "B2")
+def test_real_baseline_still_loads():
+    assert '0001' in [x.version for x in m.load_migrations()]
+
+
+@pytest.mark.Trait("Bug", "B2")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_accepted_plpgsql_file_applies(scratch_conn, tmp_path):
+    _write(tmp_path, '0001_fn.sql', _PLPGSQL_OK)
+    assert await m.migrate(scratch_conn, m.load_migrations(tmp_path)) == ['0001']
+
+
+@pytest.mark.Trait("Bug", "B2")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_cli_status_exit_newer_db(scratch_db, tmp_path, monkeypatch):
+    newer, older = tmp_path / 'newer', tmp_path / 'older'
+    newer.mkdir(); older.mkdir()
+    _write(newer, '0001_a.sql', 'CREATE TABLE a (id int);')
+    _write(newer, '0002_b.sql', 'CREATE TABLE b (id int);')
+    _write(older, '0001_a.sql', 'CREATE TABLE a (id int);')
+    monkeypatch.setattr(m, '_connect_kwargs', lambda: scratch_db)
+    monkeypatch.setattr(m, 'MIGRATIONS_DIR', newer)
+    assert await m.main(['up']) == m.EXIT_OK
+    monkeypatch.setattr(m, 'MIGRATIONS_DIR', older)
+    assert await m.main(['status']) == m.EXIT_NEWER_DB
+
+
+@pytest.mark.Trait("Bug", "B2")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_cli_status_exit_failed_on_bad_file_name(scratch_db, tmp_path, monkeypatch):
+    _write(tmp_path, 'bad.sql', 'SELECT 1;')
+    monkeypatch.setattr(m, 'MIGRATIONS_DIR', tmp_path)
+    monkeypatch.setattr(m, '_connect_kwargs', lambda: scratch_db)
+    assert await m.main(['status']) == m.EXIT_FAILED
+
+
+@pytest.mark.Trait("Bug", "B2")
+def test_docstring_documents_non_transactional_statements():
+    doc = m.__doc__ or ''
+    assert 'CONCURRENTLY' in doc and 'ADD VALUE' in doc

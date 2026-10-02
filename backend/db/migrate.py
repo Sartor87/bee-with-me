@@ -9,6 +9,12 @@ each file are recorded in schema_migrations.
 
     python -m backend.db.migrate status   # exit 0 up to date, 10 pending, 2 database is newer
     python -m backend.db.migrate up
+
+Because the runner owns the transaction, a migration file must not contain transaction control
+(BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, PREPARE TRANSACTION)
+outside dollar-quoted bodies; load_migrations rejects such files. For the same reason, statements
+that cannot run inside a transaction block are not supported: CREATE INDEX CONCURRENTLY, and
+ALTER TYPE ... ADD VALUE when the new value is used in the same file.
 """
 
 from __future__ import annotations
@@ -37,6 +43,11 @@ EXIT_PENDING = 10
 _NAME_RE = re.compile(r'^(\d{4})_[a-z0-9_]+\.sql$')
 _UP_RE = re.compile(r'^--\s*migrate:up\s*$', re.MULTILINE)
 _DOWN_RE = re.compile(r'^--\s*migrate:down\s*$', re.MULTILINE)
+_DOLLAR_TAG_RE = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)?\$')
+_TX_CONTROL_RE = re.compile(
+    r'^(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION)\b',
+    re.IGNORECASE,
+)
 
 _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -67,6 +78,64 @@ class Status:
     changed: list[str]
 
 
+def _top_level_sql(sql: str) -> str:
+    """The SQL with comments, string literals, quoted identifiers and dollar-quoted bodies blanked out."""
+    out = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if sql.startswith('--', i):
+            end = sql.find('\n', i)
+            i = n if end == -1 else end
+            continue
+        if sql.startswith('/*', i):
+            end = sql.find('*/', i + 2)
+            i = n if end == -1 else end + 2
+            out.append(' ')
+            continue
+        if ch == "'":
+            escapes = i > 0 and sql[i - 1] in 'eE' and (i == 1 or not (sql[i - 2].isalnum() or sql[i - 2] == '_'))
+            j = i + 1
+            while j < n:
+                if escapes and sql[j] == '\\':
+                    j += 2
+                    continue
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            i = j + 1
+            out.append(' ')
+            continue
+        if ch == '"':
+            end = sql.find('"', i + 1)
+            i = n if end == -1 else end + 1
+            out.append(' ')
+            continue
+        if ch == '$' and not (i > 0 and (sql[i - 1].isalnum() or sql[i - 1] == '_')):
+            tag = _DOLLAR_TAG_RE.match(sql, i)
+            if tag:
+                end = sql.find(tag.group(0), tag.end())
+                i = n if end == -1 else end + len(tag.group(0))
+                out.append(' ')
+                continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
+def _check_no_transaction_control(filename: str, up_sql: str) -> None:
+    for statement in _top_level_sql(up_sql).split(';'):
+        statement = statement.strip()
+        if _TX_CONTROL_RE.match(statement):
+            raise MigrationError(
+                f'{filename}: transaction control statement {statement.split()[0].upper()!r} is not '
+                f'allowed; the runner wraps each file in its own transaction'
+            )
+
+
 def load_migrations(directory: Path | None = None) -> list[Migration]:
     directory = directory or MIGRATIONS_DIR
     migrations = []
@@ -80,6 +149,7 @@ def load_migrations(directory: Path | None = None) -> list[Migration]:
             raise MigrationError(f'{path.name}: missing "-- migrate:up" marker')
         down = _DOWN_RE.search(text, up.end())
         up_sql = text[up.end():down.start() if down else len(text)].strip()
+        _check_no_transaction_control(path.name, up_sql)
         checksum = hashlib.sha256(text.encode('utf-8')).hexdigest()
         migrations.append(Migration(match.group(1), path.stem, up_sql, checksum))
     versions = [mig.version for mig in migrations]
