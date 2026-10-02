@@ -34,6 +34,30 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
+# Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop' as soon
+# as stderr is redirected (a warning from podman with exit code 0 would abort the backup). Native calls
+# run through this with 'Continue' (local to the function); the script decides on $LASTEXITCODE.
+function Invoke-Native([scriptblock]$Command) {
+    $ErrorActionPreference = 'Continue'
+    & $Command
+}
+
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+function Read-DotEnv([string]$Path) {
+    $vars = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $vars }
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        $key = $matches[1]
+        $value = ($matches[2] -replace "`r$", '').Trim()
+        if ($value -match '^"([^"]*)"') { $value = $matches[1] }
+        elseif ($value -match "^'([^']*)'") { $value = $matches[1] }
+        else { $value = ($value -replace '\s+#.*$', '').Trim() }
+        $vars[$key] = $value
+    }
+    return $vars
+}
+
 # Container engine: Podman first, Docker as the alternative. Override with $env:CONTAINER_ENGINE.
 $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
           elseif (Get-Command podman -ErrorAction SilentlyContinue) { 'podman' }
@@ -41,10 +65,7 @@ $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
           else { throw 'Neither podman nor docker was found on PATH.' }
 
 # Read DB settings out of .env so this never drifts from the running config
-$envVars = @{}
-foreach ($line in Get-Content (Join-Path $root '.env')) {
-    if ($line -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$') { $envVars[$matches[1]] = $matches[2] }
-}
+$envVars = Read-DotEnv (Join-Path $root '.env')
 $db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
 $user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
@@ -57,45 +78,59 @@ if (-not (Test-Path $OutDir)) {
 }
 $OutDir = (Resolve-Path $OutDir).Path   # .NET file calls below don't follow PowerShell's location
 
-$stamp  = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-$target = Join-Path $OutDir "beewithme_$stamp.dump"
+# Random suffix: two runs in the same second never share a file name (here or in the container).
+$stamp   = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+$suffix  = [guid]::NewGuid().ToString('N').Substring(0, 6)
+$target  = Join-Path $OutDir "beewithme_${stamp}_$suffix.dump"
+$partial = "$target.partial"   # becomes $target only after it was validated
 
 # Find the db container by its compose labels (project + service): works for podman and docker
 # compose alike, and never picks another compose project's `db` service.
 # -Container overrides the lookup (upgrade from an older install, see start.ps1).
 $container = if ($Container) { $Container }
-             else { & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1 }
+             else { Invoke-Native { & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' } | Select-Object -First 1 }
 if (-not $container) {
     throw "Database container is not running - start it with: $engine compose -p bee-with-me -f docker\docker-compose.yaml up -d"
 }
 
 # Custom format (-Fc) is binary and compressed: write it inside the container, then copy it out.
 # Piping it through PowerShell would re-encode the bytes and corrupt the dump.
-$inContainer = "/tmp/beewithme_$stamp.dump"
+$inContainer = "/tmp/beewithme_${stamp}_$suffix.dump"
 
 # State for the backup marker (last-backup.json, see below), read just before the dump: which server
 # this is and which migrations it has. The backend migrates only after a backup of this exact state.
 $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-$systemId = (& $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' | Out-String).Trim()
+$systemId = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+$') { throw "Could not read the database's system_identifier ($systemId)" }
-$hasMigrations = (& $engine exec $container psql -U $user -d $db -Atc "SELECT to_regclass('public.schema_migrations') IS NOT NULL" | Out-String).Trim()
+$hasMigrations = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc "SELECT to_regclass('public.schema_migrations') IS NOT NULL" } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the migration state - check the container logs' }
 $applied = @()
 if ($hasMigrations -eq 't') {
-    $applied = @(& $engine exec $container psql -U $user -d $db -Atc 'SELECT version FROM schema_migrations ORDER BY version' |
+    $applied = @(Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT version FROM schema_migrations ORDER BY version' } |
                  ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($LASTEXITCODE -ne 0) { throw 'Could not read schema_migrations - check the container logs' }
 }
 
 Write-Host "==> Dumping $db to $target ($engine)" -ForegroundColor Cyan
 try {
-    & $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer
+    Invoke-Native { & $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer }
     if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed - check the container logs' }
-    & $engine cp "${container}:$inContainer" $target
+    # A dump pg_restore cannot list is no backup: check it before it counts as one.
+    Invoke-Native { & $engine exec $container pg_restore -l $inContainer } | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'pg_restore -l cannot read the dump - not kept as a backup' }
+    $expected = (Invoke-Native { & $engine exec $container stat -c %s $inContainer } | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $expected -notmatch '^\d+$') { throw 'Could not read the dump size in the container' }
+    Invoke-Native { & $engine cp "${container}:$inContainer" $partial }
     if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
+    if ((Get-Item -LiteralPath $partial).Length -ne [int64]$expected) { throw "$engine cp copied an incomplete dump" }
+    Move-Item -LiteralPath $partial -Destination $target
+} catch {
+    # A partial dump is never left behind looking like a backup.
+    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    throw
 } finally {
     # Always remove the temp dump inside the container, also when the dump or the copy failed.
-    & $engine exec $container rm -f $inContainer | Out-Null
+    Invoke-Native { & $engine exec $container rm -f $inContainer } | Out-Null
 }
 
 if ((Get-Item $target).Length -eq 0) { throw 'Dump is empty - check the container logs' }
@@ -115,11 +150,12 @@ $markerJson = [ordered]@{
 Move-Item -LiteralPath "$marker.tmp" -Destination $marker -Force
 Write-Host "==> Marker $marker" -ForegroundColor Green
 
-# Prune old dumps (custom-format .dump; older plain .sql dumps are left alone)
-Get-ChildItem $OutDir -Filter 'beewithme_*.dump' |
+# Prune old dumps (custom-format .dump only: .dump.partial and older plain .sql dumps are left alone)
+Get-ChildItem -LiteralPath $OutDir -Filter 'beewithme_*.dump' |
+    Where-Object { $_.Name -like 'beewithme_*.dump' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -Skip $Keep |
-    ForEach-Object { Write-Host "    pruning $($_.Name)"; Remove-Item $_.FullName }
+    ForEach-Object { Write-Host "    pruning $($_.Name)"; Remove-Item -LiteralPath $_.FullName }
 
 Write-Host ''
 Write-Host 'To restore (replaces the whole database; stop the backend first):' -ForegroundColor Gray

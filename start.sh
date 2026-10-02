@@ -43,6 +43,22 @@ ROOT="$(cd "$PROJECT_PATH" && pwd)"
 cd "$ROOT"
 step "Using project folder: $ROOT"
 
+# .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
+# " # comment" are not part of the value.
+env_value() {
+  local line value
+  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *)   value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  printf '%s' "${value:-$2}"
+}
+
 # Returns 0 once something is listening on localhost:$1 (bash /dev/tcp - no nc needed)
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
@@ -99,8 +115,8 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
     "$ENGINE" compose -p bee-with-me "${COMPOSE_FILES[@]}" up -d
 
     step 'Waiting for Postgres to accept connections'
-    PG_PORT="$(grep -E '^\s*POSTGRES_PORT\s*=' "$ROOT/.env" | tail -n1 | cut -d= -f2- | tr -dc '0-9' || true)"
-    PG_PORT="${PG_PORT:-5432}"
+    PG_PORT="$(env_value POSTGRES_PORT 5432)"
+    [[ "$PG_PORT" =~ ^[0-9]+$ ]] || PG_PORT=5432
 
     ready=0
     for _ in $(seq 60); do

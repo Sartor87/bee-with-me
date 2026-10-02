@@ -43,11 +43,25 @@ if [ -z "$ENGINE" ]; then
   fi
 fi
 
+# .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
+# " # comment" are not part of the value.
+env_value() {
+  local line value
+  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *)   value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  printf '%s' "${value:-$2}"
+}
+
 # Read DB settings out of .env so this never drifts from the running config
-DB="$(grep -E '^\s*POSTGRES_DB\s*=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs || echo rescuer_locator)"
-USER_NAME="$(grep -E '^\s*POSTGRES_USER\s*=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs || echo rescuer)"
-DB="${DB:-rescuer_locator}"
-USER_NAME="${USER_NAME:-rescuer}"
+DB="$(env_value POSTGRES_DB rescuer_locator)"
+USER_NAME="$(env_value POSTGRES_USER rescuer)"
 
 # Git Bash/MSYS on Windows: keep container paths (/tmp/...) as they are, hand the engine a Windows path.
 case "$(uname -s)" in

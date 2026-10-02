@@ -35,6 +35,30 @@ $ErrorActionPreference = 'Stop'
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Warn($msg) { Write-Host $msg -ForegroundColor Yellow }
 
+# Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop' as soon
+# as stderr is redirected (e.g. a podman warning on `info` with exit code 0 would abort the start).
+# Native calls run through this with 'Continue' (local to the function); the script decides on $LASTEXITCODE.
+function Invoke-Native([scriptblock]$Command) {
+    $ErrorActionPreference = 'Continue'
+    & $Command
+}
+
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+function Read-DotEnv([string]$Path) {
+    $vars = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $vars }
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        $key = $matches[1]
+        $value = ($matches[2] -replace "`r$", '').Trim()
+        if ($value -match '^"([^"]*)"') { $value = $matches[1] }
+        elseif ($value -match "^'([^']*)'") { $value = $matches[1] }
+        else { $value = ($value -replace '\s+#.*$', '').Trim() }
+        $vars[$key] = $value
+    }
+    return $vars
+}
+
 if (-not (Test-Path $ProjectPath)) {
     throw "Project folder not found: $ProjectPath`nPass the real location with -ProjectPath, e.g.:`n  powershell -ExecutionPolicy Bypass -File .\start.ps1 -ProjectPath 'C:\path\to\bee-with-me'"
 }
@@ -59,7 +83,7 @@ if (-not $SkipContainers) {
     if (-not $engine) {
         throw 'Neither podman nor docker was found on PATH. Install Podman (https://podman.io) or Docker, or re-run with -SkipContainers if the database is already running elsewhere.'
     }
-    & $engine info *> $null
+    Invoke-Native { & $engine info *> $null }
     if ($LASTEXITCODE -ne 0) {
         if ($engine -eq 'podman') { throw 'Podman is installed but not running. Start it with: podman machine start' }
         throw 'Docker is installed but not running. Start Docker Desktop and re-run.'
@@ -73,26 +97,24 @@ if (-not $SkipContainers) {
     # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
     # same port and, on the base file, the same data folder. Back that database up, then stop the old
     # project (no -v: data\pgdata stays and the new project reuses it), before the new one starts.
-    $oldDb = & $engine ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+    $oldDb = Invoke-Native { & $engine ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' } | Select-Object -First 1
     $oldDump = $null
     if ($oldDb) {
         Write-Step "Found the database of an older install (compose project 'docker', container $oldDb): backing it up, then stopping it"
         try { & "$root\scripts\backup.ps1" -OutDir "$root\data\backups" -Container $oldDb }
         catch { throw 'Backup of the old database failed - not continuing; the old install is left running.' + " $($_.Exception.Message)" }
         $oldDump = Join-Path "$root\data\backups" ((Get-Content "$root\data\backups\last-backup.json" -Raw | ConvertFrom-Json).dump)
-        & $engine compose -p docker -f "$root\docker\docker-compose.yaml" down
+        Invoke-Native { & $engine compose -p docker -f "$root\docker\docker-compose.yaml" down }
         if ($LASTEXITCODE -ne 0) { throw "$engine compose -p docker down failed - stop the old containers (docker-db-1, docker-tiles-1) yourself, then re-run." }
     }
 
     Write-Step "Starting database ($engine compose -p bee-with-me up -d)"
-    & $engine compose -p bee-with-me @composeFiles up -d
+    Invoke-Native { & $engine compose -p bee-with-me @composeFiles up -d }
     if ($LASTEXITCODE -ne 0) { throw "$engine compose -p bee-with-me up failed - see the output above." }
 
     Write-Step 'Waiting for Postgres to accept connections'
-    $pgPort = '5432'
-    foreach ($line in Get-Content "$root\.env") {
-        if ($line -match '^\s*POSTGRES_PORT\s*=\s*(\d+)') { $pgPort = $matches[1] }
-    }
+    $pgPort = (Read-DotEnv "$root\.env")['POSTGRES_PORT']
+    if ($pgPort -notmatch '^\d+$') { $pgPort = '5432' }
 
     $deadline = (Get-Date).AddSeconds(60)
     $ready = $false

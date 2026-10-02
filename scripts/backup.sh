@@ -38,11 +38,25 @@ if [ -z "$ENGINE" ]; then
   fi
 fi
 
+# .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
+# " # comment" are not part of the value.
+env_value() {
+  local line value
+  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *)   value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  printf '%s' "${value:-$2}"
+}
+
 # Read DB settings out of .env so this never drifts from the running config
-DB="$(grep -E '^\s*POSTGRES_DB\s*=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs || echo rescuer_locator)"
-USER_NAME="$(grep -E '^\s*POSTGRES_USER\s*=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs || echo rescuer)"
-DB="${DB:-rescuer_locator}"
-USER_NAME="${USER_NAME:-rescuer}"
+DB="$(env_value POSTGRES_DB rescuer_locator)"
+USER_NAME="$(env_value POSTGRES_USER rescuer)"
 
 # Git Bash/MSYS on Windows: stop it rewriting container paths (/tmp/...) into Windows paths,
 # and give the engine the output folder as a Windows path it understands.
@@ -53,8 +67,12 @@ esac
 # Dumps hold every position and name of a callout: readable by this user only.
 umask 077
 mkdir -p "$OUT_DIR"
-STAMP="$(date +%Y-%m-%d_%H%M%S)"
-TARGET="$OUT_DIR/beewithme_$STAMP.dump"
+# Random suffix: two runs in the same second never share a file name (here or in the container).
+STAMP="$(date +%Y-%m-%d_%H%M%S)_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+FINAL="$OUT_DIR/beewithme_$STAMP.dump"
+# TARGET is the .partial file until the dump has been validated, then it is renamed to FINAL.
+PARTIAL="$FINAL.partial"
+TARGET="$PARTIAL"
 
 # Find the db container by its compose labels (project + service): works for podman and docker
 # compose alike, and never picks another compose project's `db` service.
@@ -68,8 +86,9 @@ fi
 
 # Custom format (-Fc): binary and compressed; written inside the container, then copied out.
 IN_CONTAINER="/tmp/beewithme_$STAMP.dump"
-# Always remove the temp dump inside the container, also when the dump or the copy fails.
-trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true' EXIT
+# Always remove the temp dump inside the container, also when the dump or the copy fails; a partial
+# dump is never left behind looking like a backup (after the rename it no longer exists).
+trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true; rm -f "$PARTIAL"' EXIT
 
 # State for the backup marker (last-backup.json, see below), read just before the dump: which server
 # this is and which migrations it has. The backend migrates only after a backup of this exact state.
@@ -83,16 +102,21 @@ if [ "$(psql_at "SELECT to_regclass('public.schema_migrations') IS NOT NULL")" =
 fi
 [[ "$APPLIED" =~ ^[0-9,]*$ ]] || { echo "Unexpected schema_migrations versions: $APPLIED" >&2; exit 1; }
 
-echo "==> Dumping $DB to $TARGET ($ENGINE)"
+echo "==> Dumping $DB to $FINAL ($ENGINE)"
 "$ENGINE" exec "$CONTAINER" pg_dump -Fc -U "$USER_NAME" -d "$DB" -f "$IN_CONTAINER"
+# A dump pg_restore cannot list is no backup: check it before it counts as one.
+"$ENGINE" exec "$CONTAINER" pg_restore -l "$IN_CONTAINER" >/dev/null \
+  || { echo "pg_restore -l cannot read the dump - not kept as a backup" >&2; exit 1; }
+EXPECTED="$("$ENGINE" exec "$CONTAINER" stat -c %s "$IN_CONTAINER" | tr -d '\r')"
 "$ENGINE" cp "$CONTAINER:$IN_CONTAINER" "$TARGET"
 chmod 600 "$TARGET"   # the engine copies the container file's mode (0644)
 
-if [ ! -s "$TARGET" ]; then
-  echo "Dump is empty - check the container logs" >&2
-  rm -f "$TARGET"
-  exit 1
+if [ ! -s "$TARGET" ] || [ "$(wc -c < "$TARGET" | tr -d ' ')" != "$EXPECTED" ]; then
+  echo "The copied dump is empty or incomplete - check the container logs" >&2
+  exit 1   # the EXIT trap removes the partial file
 fi
+mv -f "$TARGET" "$FINAL"
+TARGET="$FINAL"
 echo "==> Wrote $(du -h "$TARGET" | cut -f1)"
 
 # Backup marker next to the dump: the backend applies pending migrations only when the marker in
@@ -104,7 +128,7 @@ printf '{"system_identifier": "%s", "applied": [%s], "dump": "%s", "created_at":
 mv -f "$MARKER.tmp" "$MARKER"
 echo "==> Marker $MARKER"
 
-# Prune old dumps, keeping the most recent $KEEP (older plain .sql dumps are left alone)
+# Prune old dumps, keeping the most recent $KEEP (only *.dump: .dump.partial and older plain .sql dumps are left alone)
 ls -1t "$OUT_DIR"/beewithme_*.dump 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
   echo "    pruning $(basename "$old")"
   rm -f "$old"

@@ -37,6 +37,30 @@ if (-not (Test-Path -LiteralPath $Dump -PathType Leaf) -or (Get-Item -LiteralPat
 }
 $Dump = (Resolve-Path -LiteralPath $Dump).Path
 
+# Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop' as soon
+# as stderr is redirected. Native calls run through this with 'Continue' (local to the function); the
+# script decides on $LASTEXITCODE.
+function Invoke-Native([scriptblock]$Command) {
+    $ErrorActionPreference = 'Continue'
+    & $Command
+}
+
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+function Read-DotEnv([string]$Path) {
+    $vars = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $vars }
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        $key = $matches[1]
+        $value = ($matches[2] -replace "`r$", '').Trim()
+        if ($value -match '^"([^"]*)"') { $value = $matches[1] }
+        elseif ($value -match "^'([^']*)'") { $value = $matches[1] }
+        else { $value = ($value -replace '\s+#.*$', '').Trim() }
+        $vars[$key] = $value
+    }
+    return $vars
+}
+
 # Container engine: Podman first, Docker as the alternative. Override with $env:CONTAINER_ENGINE.
 $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
           elseif (Get-Command podman -ErrorAction SilentlyContinue) { 'podman' }
@@ -44,15 +68,12 @@ $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
           else { throw 'Neither podman nor docker was found on PATH.' }
 
 # Read DB settings out of .env so this never drifts from the running config
-$envVars = @{}
-foreach ($line in Get-Content (Join-Path $root '.env')) {
-    if ($line -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$') { $envVars[$matches[1]] = $matches[2] }
-}
+$envVars = Read-DotEnv (Join-Path $root '.env')
 $db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
 $user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
 # Find the db container by its compose labels (project + service), like the backup script.
-$container = & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+$container = Invoke-Native { & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' } | Select-Object -First 1
 if (-not $container) {
     throw "Database container is not running - start it with: $engine compose -p bee-with-me -f docker\docker-compose.yaml up -d"
 }
@@ -81,21 +102,21 @@ if (-not $Yes) {
 $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $inContainer = "/tmp/beewithme_restore_$(Get-Date -Format 'yyyyMMddHHmmss')_$suffix.dump"
 try {
-    & $engine cp $Dump "${container}:$inContainer"
+    Invoke-Native { & $engine cp $Dump "${container}:$inContainer" }
     if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
 
     Write-Host "==> Replacing $db ($engine)" -ForegroundColor Cyan
-    & $engine exec $container dropdb --if-exists --force -U $user $db
+    Invoke-Native { & $engine exec $container dropdb --if-exists --force -U $user $db }
     if ($LASTEXITCODE -ne 0) { throw 'dropdb failed - the database was not changed' }
-    & $engine exec $container createdb -U $user -O $user $db
+    Invoke-Native { & $engine exec $container createdb -U $user -O $user $db }
     if ($LASTEXITCODE -ne 0) { throw "createdb failed - database '$db' does not exist now; run the restore again" }
-    & $engine exec $container pg_restore --exit-on-error --single-transaction --no-owner -U $user -d $db $inContainer
+    Invoke-Native { & $engine exec $container pg_restore --exit-on-error --single-transaction --no-owner -U $user -d $db $inContainer }
     if ($LASTEXITCODE -ne 0) {
         throw "pg_restore failed - nothing was restored and database '$db' is now EMPTY. Fix the cause and run the restore again with the same dump."
     }
 } finally {
     # Always remove the temp dump inside the container, also when a step failed.
-    & $engine exec $container rm -f $inContainer | Out-Null
+    Invoke-Native { & $engine exec $container rm -f $inContainer } | Out-Null
 }
 Write-Host "==> Restored $Dump" -ForegroundColor Green
 

@@ -497,3 +497,124 @@ def test_readme_has_an_upgrade_note():
     section = text[text.index('Upgrading from 1.7.1 or earlier'):]
     assert 'docker-db-1' in section[:1500] and 'docker_pgdata' in section[:1500]
     assert 'restore' in section[:1500]
+
+
+# ── B13: PS 5.1 native stderr, validated dumps, .env parsing ─────────────────
+
+PS_SCRIPTS = ['start.ps1', 'scripts/backup.ps1', 'scripts/restore.ps1']
+SH_SCRIPTS = ['start.sh', 'scripts/backup.sh', 'scripts/restore.sh']
+_PS_EXE = shutil.which('powershell') or shutil.which('pwsh')   # 5.1 first: that is where the bug lives
+
+# quotes, a CRLF line end and an inline comment; '#' inside a value without a space stays
+_ENV_SAMPLE = ('POSTGRES_DB="quoted_db" # the database\r\n'
+               "POSTGRES_USER='single'\r\n"
+               'POSTGRES_PORT=6543   # the port\r\n'
+               '  PLAIN = value\r\n'
+               'HASH=a#b\r\n'
+               '# POSTGRES_HOST=commented-out\r\n')
+_ENV_EXPECTED = {'POSTGRES_DB': 'quoted_db', 'POSTGRES_USER': 'single', 'POSTGRES_PORT': '6543',
+                 'PLAIN': 'value', 'HASH': 'a#b', 'POSTGRES_HOST': 'DEFAULT'}
+
+
+def _block(text, start, end_line='}'):
+    i = text.index(start)
+    j = text.index('\n' + end_line + '\n', i)
+    return text[i:j + len(end_line) + 2]
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.parametrize('rel', PS_SCRIPTS)
+def test_ps_scripts_run_every_engine_call_through_invoke_native(rel):
+    text = _read(rel)
+    fn = _block(text, 'function Invoke-Native')
+    assert "$ErrorActionPreference = 'Continue'" in fn
+    calls = [l for l in text.splitlines() if '& $engine' in l]
+    assert calls
+    for line in calls:
+        assert 'Invoke-Native { & $engine' in line, line
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.skipif(_PS_EXE is None or shutil.which('cmd') is None, reason='needs PowerShell and cmd')
+def test_invoke_native_ignores_stderr_and_keeps_the_exit_code(tmp_path):
+    fn = _block(_read('start.ps1'), 'function Invoke-Native')
+    script = tmp_path / 'probe.ps1'
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + fn +
+                      'Invoke-Native { & cmd /c "echo warning 1>&2 & exit 0" *> $null }\n'
+                      '"first=$LASTEXITCODE"\n'
+                      'Invoke-Native { & cmd /c "echo broken 1>&2 & exit 3" 2>&1 } | Out-Null\n'
+                      '"second=$LASTEXITCODE"\n'
+                      "\"eap=$ErrorActionPreference\"\n", encoding='utf-8')
+    res = subprocess.run([_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert 'first=0' in res.stdout and 'second=3' in res.stdout and 'eap=Stop' in res.stdout
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')
+@pytest.mark.parametrize('rel', PS_SCRIPTS)
+def test_ps_dotenv_parsing_strips_quotes_cr_and_comments(rel, tmp_path):
+    fn = _block(_read(rel), 'function Read-DotEnv')
+    (tmp_path / '.env').write_bytes(_ENV_SAMPLE.encode('utf-8'))
+    script = tmp_path / 'probe.ps1'
+    keys = ', '.join(f"'{k}'" for k in _ENV_EXPECTED)
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + fn +
+                      f"$v = Read-DotEnv '{tmp_path / '.env'}'\n"
+                      f"foreach ($k in @({keys})) {{ $x = if ($v[$k]) {{ $v[$k] }} else {{ 'DEFAULT' }}; \"$k=[$x]\" }}\n",
+                      encoding='utf-8')
+    res = subprocess.run([_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    for key, value in _ENV_EXPECTED.items():
+        assert f'{key}=[{value}]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.parametrize('rel', SH_SCRIPTS)
+def test_sh_dotenv_parsing_strips_quotes_cr_and_comments(rel, tmp_path):
+    fn = _block(_read(rel), 'env_value() {')
+    (tmp_path / '.env').write_bytes(_ENV_SAMPLE.encode('utf-8'))
+    probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
+             ''.join(f'printf "%s=[%s]\\n" {k} "$(env_value {k} DEFAULT)"\n' for k in _ENV_EXPECTED))
+    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    for key, value in _ENV_EXPECTED.items():
+        assert f'{key}=[{value}]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.parametrize('rel', ['scripts/backup.ps1', 'scripts/backup.sh'])
+def test_backup_writes_a_partial_file_and_keeps_it_only_after_validation(rel):
+    text = _read(rel)
+    assert '.partial' in text
+    validate = text.index('pg_restore -l')
+    copy = text.index(' cp ', text.index('pg_dump -Fc'))
+    rename = text.index('Move-Item -LiteralPath $partial' if rel.endswith('.ps1') else 'mv -f "$TARGET" "$FINAL"')
+    assert text.index('pg_dump -Fc') < validate < copy < rename
+    if rel.endswith('.ps1'):
+        catch = re.search(r'\}\s*catch\s*\{(?P<body>.*?)\}\s*finally', text, re.DOTALL)
+        assert catch and 'Remove-Item -LiteralPath $partial' in catch['body']
+    else:
+        trap = next(l for l in text.splitlines() if l.strip().startswith('trap '))
+        assert 'rm -f "$PARTIAL"' in trap
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.parametrize('rel,random', [('scripts/backup.ps1', 'NewGuid()'), ('scripts/backup.sh', '$RANDOM'),
+                                        ('scripts/restore.ps1', 'NewGuid()'), ('scripts/restore.sh', '$RANDOM')])
+def test_dump_names_carry_a_random_suffix(rel, random):
+    text = _read(rel)
+    assert random in text
+    line = next(l for l in text.splitlines() if '/tmp/beewithme_' in l and not l.lstrip().startswith('#'))
+    assert 'suffix' in line or 'STAMP' in line or 'RANDOM' in line, line
+
+
+@pytest.mark.Trait("Bug", "B13")
+@pytest.mark.parametrize('rel,prune', [
+    ('scripts/backup.ps1', "Where-Object { $_.Name -like 'beewithme_*.dump' }"),
+    ('scripts/backup.sh', 'ls -1t "$OUT_DIR"/beewithme_*.dump'),
+])
+def test_pruning_only_counts_finished_dumps(rel, prune):
+    assert prune in _read(rel)
