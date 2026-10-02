@@ -320,3 +320,108 @@ def test_readme_lists_exit_code_3():
     text = _read('README.md')
     line = next(l for l in text.splitlines() if 'backend.db.migrate status' in l and 'exit 0' in l)
     assert '3 = database not reachable' in line and '1 = ' in line
+
+
+# ── B10: restore scripts (drop/create, single-transaction restore, guarded) ──
+
+from backend.tests.test_restore import CREATE_CMD, DROP_CMD, RESTORE_CMD  # noqa: E402
+
+RESTORE_SCRIPTS = ['scripts/restore.ps1', 'scripts/restore.sh']
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.parametrize('rel', RESTORE_SCRIPTS)
+def test_restore_script_finds_the_container_like_backup(rel):
+    text = _read(rel)
+    assert 'CONTAINER_ENGINE' in text
+    start = text.index('CONTAINER_ENGINE')
+    assert text.index('podman', start) < text.index('docker', start)
+    assert not re.search(r'^\s*docker (exec|cp|compose|ps|info)\b', text, re.MULTILINE)
+    ps_lines = [l for l in text.splitlines() if ' ps -q ' in l]
+    assert ps_lines
+    for line in ps_lines:
+        assert 'label=com.docker.compose.project=bee-with-me' in line
+        assert 'label=com.docker.compose.service=db' in line
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.parametrize('rel', RESTORE_SCRIPTS)
+def test_restore_script_drops_creates_and_restores_in_one_transaction(rel):
+    text = _read(rel)
+    drop = text.index(' '.join(DROP_CMD))
+    create = text.index(' '.join(CREATE_CMD) + ' ', drop)
+    restore = text.index(' '.join(RESTORE_CMD), create)
+    assert drop < create < restore
+    assert '--clean' not in text   # the old "restore over the live database" way is gone
+    assert text.index('backend.db.migrate status', restore)
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.parametrize('rel,force,yes', [('scripts/restore.ps1', '$Force', '$Yes'),
+                                           ('scripts/restore.sh', '--force', '--yes')])
+def test_restore_script_refuses_while_backend_runs_and_asks_first(rel, force, yes):
+    text = _read(rel)
+    assert '8000' in text
+    assert force in text and yes in text
+    first_drop = text.index(' '.join(DROP_CMD))
+    assert text.index('8000') < first_drop
+    assert re.search(r'Read-Host|read -r', text)
+
+
+@pytest.mark.Trait("Bug", "B10")
+def test_restore_ps1_always_removes_the_temp_dump():
+    text = _read('scripts/restore.ps1')
+    blocks = [m for m in re.finditer(r'\btry\s*\{(?P<body>.*?)\}\s*finally\s*\{(?P<fin>.*?)\}', text, re.DOTALL)
+              if 'pg_restore' in m['body']]
+    assert blocks, 'no try/finally around the restore'
+    assert 'rm -f $inContainer' in blocks[0]['fin']
+
+
+@pytest.mark.Trait("Bug", "B10")
+def test_restore_sh_traps_exit_to_remove_the_temp_dump():
+    text = _read('scripts/restore.sh')
+    traps = [l for l in text.splitlines() if l.strip().startswith('trap ')]
+    assert traps and 'EXIT' in traps[0] and 'rm -f' in traps[0] and 'IN_CONTAINER' in traps[0]
+    assert text.index(traps[0]) < text.index(' cp ')
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.parametrize('rel,hint', [('scripts/backup.ps1', 'restore.ps1'), ('scripts/backup.sh', 'restore.sh')])
+def test_backup_hint_points_at_the_restore_script(rel, hint):
+    text = _read(rel)
+    tail = text[text.index('To restore'):]
+    assert hint in tail
+    assert '--clean' not in text
+    assert re.search(r"""['"]\$target\\?['"]""", tail, re.IGNORECASE)   # the dump path is quoted
+
+
+@pytest.mark.Trait("Bug", "B10")
+def test_startup_failure_message_and_baseline_point_at_restore_scripts():
+    main_text = _read('backend/main.py')
+    assert 'scripts/restore.ps1' in main_text and 'scripts/restore.sh' in main_text
+    down = _read('backend/db/migrations/0001_baseline.sql').split('-- migrate:down', 1)[1]
+    assert 'restore.ps1' in down and 'restore.sh' in down
+
+
+@pytest.mark.Trait("Bug", "B10")
+def test_readme_has_a_backup_and_restore_section():
+    text = _read('README.md')
+    section = text[text.index('Backup and restore'):]
+    assert 'restore.ps1' in section and 'restore.sh' in section
+    assert section.lower().index('podman') < section.lower().index('docker')
+    assert re.search(r'[Ss]top the backend', section)
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.skipif(shutil.which('powershell') is None and shutil.which('pwsh') is None, reason='no PowerShell')
+def test_restore_ps1_parses():
+    exe = shutil.which('pwsh') or shutil.which('powershell')
+    cmd = ("$e=$null; [System.Management.Automation.Language.Parser]::ParseFile("
+           f"'{ROOT / 'scripts/restore.ps1'}', [ref]$null, [ref]$e) | Out-Null; if ($e) {{ $e; exit 1 }}")
+    assert subprocess.run([exe, '-NoProfile', '-Command', cmd]).returncode == 0
+
+
+@pytest.mark.Trait("Bug", "B10")
+@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+def test_restore_sh_parses():
+    assert subprocess.run([shutil.which('bash'), '-n', str(ROOT / 'scripts/restore.sh')]).returncode == 0

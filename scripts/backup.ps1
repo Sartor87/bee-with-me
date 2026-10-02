@@ -7,7 +7,7 @@
     between a disk failure and losing it.
 
     Works with Podman (default) or Docker; set CONTAINER_ENGINE to force one. Dumps are
-    pg_dump custom format (.dump); restore with pg_restore (see the hint printed at the end).
+    pg_dump custom format (.dump); restore with scripts\restore.ps1, which runs pg_restore (see the hint printed at the end).
 
 .PARAMETER OutDir
     Where to write the dump. Point this at a USB stick or a second drive — a backup on
@@ -85,6 +85,5 @@ Get-ChildItem $OutDir -Filter 'beewithme_*.dump' |
     ForEach-Object { Write-Host "    pruning $($_.Name)"; Remove-Item $_.FullName }
 
 Write-Host ''
-Write-Host 'To restore (replaces the current data):' -ForegroundColor Gray
-Write-Host "  $engine cp '$target' ${container}:/tmp/restore.dump" -ForegroundColor Gray
-Write-Host "  $engine exec $container pg_restore --clean --if-exists -U $user -d $db /tmp/restore.dump" -ForegroundColor Gray
+Write-Host 'To restore (replaces the whole database; stop the backend first):' -ForegroundColor Gray
+Write-Host "  powershell -ExecutionPolicy Bypass -File '$root\scripts\restore.ps1' '$target'" -ForegroundColor Gray

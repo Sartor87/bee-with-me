@@ -88,7 +88,8 @@ async def _run_migrations() -> None:
             logger.critical('DATABASE MIGRATION FAILED: %s', exc)
             logger.critical('The failed migration was rolled back; the database is as it was before it.')
             logger.critical('The start script took a backup before migrating: see data/backups/.')
-            logger.critical('Restore steps are at the top of scripts/backup.ps1 and scripts/backup.sh.')
+            logger.critical('To go back to it: stop the backend, then run scripts/restore.ps1 (Windows) or '
+                            'scripts/restore.sh with that dump (see README, Backup and restore).')
             logger.critical('=' * 72)
             raise
     if applied:

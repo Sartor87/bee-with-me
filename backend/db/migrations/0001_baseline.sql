@@ -181,4 +181,5 @@ BEGIN
 END $$;
 
 -- migrate:down
--- Forward-only. To undo, restore the backup taken before migrating (data/backups/).
+-- Forward-only. To undo, stop the backend and restore the backup taken before migrating
+-- (data/backups/) with scripts/restore.ps1 (Windows) or scripts/restore.sh.

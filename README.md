@@ -113,6 +113,29 @@ the backend logs an INSECURE CONFIG line while it is still `change_me`).
 
 Schema changes: add a new numbered file; never edit a file that has already been applied.
 
+#### Backup and restore
+
+Back up with `scripts/backup.ps1 -OutDir E:\bee-backups` (Windows) or `./scripts/backup.sh /media/usb/bee-backups`
+(Linux/macOS) — onto another disk. Both find the database container (`bee-with-me-db-1`) through the
+chosen engine: Podman first, Docker when Podman is not installed (`CONTAINER_ENGINE=docker` to force it).
+
+To restore a dump (**replaces the whole database**): stop the backend first (close its window / Ctrl+C), then
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\restore.ps1 'E:\bee-backups\beewithme_2026-10-02_101500.dump'
+```
+
+```bash
+./scripts/restore.sh /media/usb/bee-backups/beewithme_2026-10-02_101500.dump
+```
+
+The restore script drops the database, creates it empty and restores the dump in one transaction that
+stops at the first error (`pg_restore --exit-on-error --single-transaction`), so nothing created after
+the backup survives — including newer `schema_migrations` rows. It refuses while something listens on
+port 8000 (`-Force` / `--force` overrides), asks before replacing anything (`-Yes` / `--yes` skips the
+question) and finally prints `python -m backend.db.migrate status`. It uses the same engine detection
+as the backup (Podman, then Docker).
+
 ### 3. Backend
 
 ```bash

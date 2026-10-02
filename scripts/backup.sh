@@ -10,7 +10,7 @@
 # OUT_DIR should be a USB stick or a second drive — a backup on the same disk as the
 # database is not a backup. Defaults to ./backups, KEEP defaults to 30.
 #
-# Works with Podman (default) or Docker; set CONTAINER_ENGINE to force one. Dumps are pg_dump custom format (.dump); restore with pg_restore (hint printed at the end).
+# Works with Podman (default) or Docker; set CONTAINER_ENGINE to force one. Dumps are pg_dump custom format (.dump); restore with scripts/restore.sh, which runs pg_restore (hint printed at the end).
 
 set -euo pipefail
 
@@ -76,6 +76,5 @@ ls -1t "$OUT_DIR"/beewithme_*.dump 2>/dev/null | tail -n "+$((KEEP + 1))" | whil
 done
 
 echo
-echo "To restore (replaces the current data):"
-echo "  $ENGINE cp $TARGET $CONTAINER:/tmp/restore.dump"
-echo "  $ENGINE exec $CONTAINER pg_restore --clean --if-exists -U $USER_NAME -d $DB /tmp/restore.dump"
+echo "To restore (replaces the whole database; stop the backend first):"
+echo "  \"$ROOT/scripts/restore.sh\" \"$TARGET\""
