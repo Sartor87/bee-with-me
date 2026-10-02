@@ -81,8 +81,22 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
             [[ "$ENGINE" == podman ]] && COMPOSE_FILES+=(-f "$ROOT/docker/docker-compose.podman-machine.yaml") ;;
     esac
 
-    step "Starting database ($ENGINE compose up -d)"
-    "$ENGINE" compose "${COMPOSE_FILES[@]}" up -d
+    # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
+    # same port and, on the base file, the same data folder. Back that database up, then stop the old
+    # project (no -v: data/pgdata stays and the new project reuses it), before the new one starts.
+    OLD_DB="$("$ENGINE" ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' | head -n1)"
+    OLD_DUMP=""
+    if [[ -n "$OLD_DB" ]]; then
+        step "Found the database of an older install (compose project 'docker', container $OLD_DB): backing it up, then stopping it"
+        "$ROOT/scripts/backup.sh" --container "$OLD_DB" "$ROOT/data/backups" \
+            || die 'Backup of the old database failed - not continuing; the old install is left running.'
+        OLD_DUMP="$ROOT/data/backups/$(sed -n 's/.*"dump": *"\([^"]*\)".*/\1/p' "$ROOT/data/backups/last-backup.json")"
+        "$ENGINE" compose -p docker -f "$ROOT/docker/docker-compose.yaml" down \
+            || die "$ENGINE compose -p docker down failed - stop the old containers (docker-db-1, docker-tiles-1) yourself, then re-run."
+    fi
+
+    step "Starting database ($ENGINE compose -p bee-with-me up -d)"
+    "$ENGINE" compose -p bee-with-me "${COMPOSE_FILES[@]}" up -d
 
     step 'Waiting for Postgres to accept connections'
     PG_PORT="$(grep -E '^\s*POSTGRES_PORT\s*=' "$ROOT/.env" | tail -n1 | cut -d= -f2- | tr -dc '0-9' || true)"
@@ -94,7 +108,16 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
         sleep 1
     done
     [[ $ready -eq 1 ]] \
-        || warn "Postgres didn't come up on port $PG_PORT within 60s - continuing anyway. Check: $ENGINE compose -f docker/docker-compose.yaml logs"
+        || warn "Postgres didn't come up on port $PG_PORT within 60s - continuing anyway. Check: $ENGINE compose -f docker/docker-compose.yaml -p bee-with-me logs"
+
+    if [[ -n "$OLD_DUMP" && " ${COMPOSE_FILES[*]} " == *podman-machine* ]]; then
+        # With the podman-machine override the old data is in the volume docker_pgdata, not data/pgdata:
+        # the new database (volume bee-with-me_pgdata) is empty. Don't start the backend on it.
+        die "The old install kept its data in the Podman volume docker_pgdata; the new database (volume bee-with-me_pgdata) starts empty, so the backend is not started. Restore the backup just taken into it, then start again:
+  \"$ROOT/scripts/restore.sh\" \"$OLD_DUMP\"
+  \"$ROOT/start.sh\"
+(The volume docker_pgdata is left as it was.)"
+    fi
 fi
 
 # -- Python venv + backend deps ---------------------------------------------------
@@ -132,7 +155,7 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
                 || die 'Backup failed - not starting, so the database is never migrated without a backup.' ;;
         1)  die 'Not starting: the migration files are invalid: see the message above.' ;;
         2)  die 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' ;;
-        *)  die "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $ENGINE compose -f docker/docker-compose.yaml logs" ;;
+        *)  die "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $ENGINE compose -f docker/docker-compose.yaml -p bee-with-me logs" ;;
     esac
 fi
 
@@ -183,7 +206,7 @@ echo '  Frontend: http://localhost:5173'
 echo
 printf '\033[90m%s\033[0m\n' 'Press Ctrl+C to stop backend and frontend.'
 printf '\033[90m%s\033[0m\n' 'The database keeps running in its container until you stop it yourself:'
-printf '\033[90m%s\033[0m\n' "  ${ENGINE:-podman} compose -f docker/docker-compose.yaml down"
+printf '\033[90m%s\033[0m\n' "  ${ENGINE:-podman} compose -p bee-with-me -f docker/docker-compose.yaml down"
 echo
 
 wait

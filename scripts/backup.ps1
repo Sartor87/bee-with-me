@@ -16,13 +16,19 @@
 .PARAMETER Keep
     How many dumps to retain in OutDir (oldest are pruned). Default 30.
 
+.PARAMETER Container
+    Dump this container instead of the one found by its compose labels (project bee-with-me,
+    service db). The start scripts use it to back up the database of a 1.7.1-or-earlier install
+    (older compose project name) before they stop it.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\scripts\backup.ps1 -OutDir E:\bee-backups
 #>
 
 param(
     [string]$OutDir = (Join-Path $env:USERPROFILE 'Desktop\bee-backups'),
-    [int]$Keep = 30
+    [int]$Keep = 30,
+    [string]$Container
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,9 +62,11 @@ $target = Join-Path $OutDir "beewithme_$stamp.dump"
 
 # Find the db container by its compose labels (project + service): works for podman and docker
 # compose alike, and never picks another compose project's `db` service.
-$container = & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+# -Container overrides the lookup (upgrade from an older install, see start.ps1).
+$container = if ($Container) { $Container }
+             else { & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1 }
 if (-not $container) {
-    throw "Database container is not running - start it with: $engine compose -f docker\docker-compose.yaml up -d"
+    throw "Database container is not running - start it with: $engine compose -p bee-with-me -f docker\docker-compose.yaml up -d"
 }
 
 # Custom format (-Fc) is binary and compressed: write it inside the container, then copy it out.

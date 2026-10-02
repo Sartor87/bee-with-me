@@ -70,9 +70,23 @@ if (-not $SkipContainers) {
     $composeFiles = @('-f', "$root\docker\docker-compose.yaml")
     if ($engine -eq 'podman') { $composeFiles += @('-f', "$root\docker\docker-compose.podman-machine.yaml") }
 
-    Write-Step "Starting database ($engine compose up -d)"
-    & $engine compose @composeFiles up -d
-    if ($LASTEXITCODE -ne 0) { throw "$engine compose up failed - see the output above." }
+    # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
+    # same port and, on the base file, the same data folder. Back that database up, then stop the old
+    # project (no -v: data\pgdata stays and the new project reuses it), before the new one starts.
+    $oldDb = & $engine ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+    $oldDump = $null
+    if ($oldDb) {
+        Write-Step "Found the database of an older install (compose project 'docker', container $oldDb): backing it up, then stopping it"
+        try { & "$root\scripts\backup.ps1" -OutDir "$root\data\backups" -Container $oldDb }
+        catch { throw 'Backup of the old database failed - not continuing; the old install is left running.' + " $($_.Exception.Message)" }
+        $oldDump = Join-Path "$root\data\backups" ((Get-Content "$root\data\backups\last-backup.json" -Raw | ConvertFrom-Json).dump)
+        & $engine compose -p docker -f "$root\docker\docker-compose.yaml" down
+        if ($LASTEXITCODE -ne 0) { throw "$engine compose -p docker down failed - stop the old containers (docker-db-1, docker-tiles-1) yourself, then re-run." }
+    }
+
+    Write-Step "Starting database ($engine compose -p bee-with-me up -d)"
+    & $engine compose -p bee-with-me @composeFiles up -d
+    if ($LASTEXITCODE -ne 0) { throw "$engine compose -p bee-with-me up failed - see the output above." }
 
     Write-Step 'Waiting for Postgres to accept connections'
     $pgPort = '5432'
@@ -88,7 +102,18 @@ if (-not $SkipContainers) {
     } until ($ready -or (Get-Date) -gt $deadline)
 
     if (-not $ready) {
-        Write-Warn "Postgres didn't come up on port $pgPort within 60s - continuing anyway. Check: $engine compose -f docker\docker-compose.yaml logs"
+        Write-Warn "Postgres didn't come up on port $pgPort within 60s - continuing anyway. Check: $engine compose -f docker\docker-compose.yaml -p bee-with-me logs"
+    }
+
+    if ($oldDump -and $engine -eq 'podman') {
+        # With the podman-machine override the old data is in the volume docker_pgdata, not data\pgdata:
+        # the new database (volume bee-with-me_pgdata) is empty. Don't start the backend on it.
+        throw ("The old install kept its data in the Podman volume docker_pgdata; the new database " +
+               "(volume bee-with-me_pgdata) starts empty, so the backend is not started. Restore the " +
+               "backup just taken into it, then start again:`n" +
+               "  powershell -ExecutionPolicy Bypass -File `"$root\scripts\restore.ps1`" `"$oldDump`"`n" +
+               "  powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
+               "(The volume docker_pgdata is left as it was.)")
     }
 }
 
@@ -131,7 +156,7 @@ if (-not $SkipContainers) {
         }
         1  { throw 'Not starting: the migration files are invalid: see the message above.' }
         2  { throw 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' }
-        default { throw "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $engine compose -f docker\docker-compose.yaml logs" }
+        default { throw "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $engine compose -f docker\docker-compose.yaml -p bee-with-me logs" }
     }
 }
 
@@ -168,4 +193,4 @@ Write-Host ''
 Write-Host 'Backend and frontend run in their own windows - close a window (or Ctrl+C inside it) to stop that service.' -ForegroundColor Gray
 $engineHint = if ($engine) { $engine } else { 'podman' }
 Write-Host 'The database keeps running in its container until you stop it yourself:' -ForegroundColor Gray
-Write-Host "  $engineHint compose -f docker\docker-compose.yaml down" -ForegroundColor Gray
+Write-Host "  $engineHint compose -p bee-with-me -f docker\docker-compose.yaml down" -ForegroundColor Gray

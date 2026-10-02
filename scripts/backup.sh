@@ -5,7 +5,10 @@
 # callout lives in one Docker volume on one machine; this is the only thing standing
 # between a disk failure and losing it.
 #
-#   ./scripts/backup.sh [OUT_DIR] [KEEP]
+#   ./scripts/backup.sh [--container ID] [OUT_DIR] [KEEP]
+#
+# --container ID dumps that container instead of the one found by its compose labels (project
+# bee-with-me, service db); the start scripts use it to back up an older install (project "docker").
 #
 # OUT_DIR should be a USB stick or a second drive — a backup on the same disk as the
 # database is not a backup. Defaults to ./backups, KEEP defaults to 30.
@@ -15,8 +18,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${1:-$ROOT/backups}"
-KEEP="${2:-30}"
+CONTAINER_OVERRIDE=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --container) [ $# -ge 2 ] || { echo "--container needs a value" >&2; exit 1; }; CONTAINER_OVERRIDE="$2"; shift 2 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+OUT_DIR="${POSITIONAL[0]:-$ROOT/backups}"
+KEEP="${POSITIONAL[1]:-30}"
 
 # Container engine: Podman first, Docker as the alternative. Override with CONTAINER_ENGINE.
 ENGINE="${CONTAINER_ENGINE:-}"
@@ -47,9 +58,11 @@ TARGET="$OUT_DIR/beewithme_$STAMP.dump"
 
 # Find the db container by its compose labels (project + service): works for podman and docker
 # compose alike, and never picks another compose project's `db` service.
-CONTAINER="$("$ENGINE" ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | head -n1)"
+# --container overrides the lookup (upgrade from an older install, see start.sh).
+CONTAINER="$CONTAINER_OVERRIDE"
+[ -n "$CONTAINER" ] || CONTAINER="$("$ENGINE" ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | head -n1)"
 if [ -z "$CONTAINER" ]; then
-  echo "Database container is not running - start it with: $ENGINE compose -f docker/docker-compose.yaml up -d" >&2
+  echo "Database container is not running - start it with: $ENGINE compose -p bee-with-me -f docker/docker-compose.yaml up -d" >&2
   exit 1
 fi
 

@@ -425,3 +425,75 @@ def test_restore_ps1_parses():
 @pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
 def test_restore_sh_parses():
     assert subprocess.run([shutil.which('bash'), '-n', str(ROOT / 'scripts/restore.sh')]).returncode == 0
+
+
+# ── B12: explicit compose project; upgrade from the old project "docker" ─────
+
+ALL_SCRIPTS = ['start.ps1', 'start.sh', 'scripts/backup.ps1', 'scripts/backup.sh',
+               'scripts/restore.ps1', 'scripts/restore.sh']
+
+
+def _compose_calls(text):
+    """Lines (code or printed hints, not comments) that run a compose command."""
+    return [l for l in text.splitlines()
+            if not l.lstrip().startswith('#') and _COMPOSE_CALL.search(l)]
+
+
+# `compose`, then only -p/-f options or a files array, then the subcommand
+_COMPOSE_CALL = re.compile(r'\bcompose((\s+-[pf]\s+\S+)|(\s+@\w+)|(\s+"\$\{\w+\[@\]\}"))*\s+(up|down|logs)\b')
+
+
+@pytest.mark.Trait("Bug", "B12")
+@pytest.mark.parametrize('rel', ALL_SCRIPTS)
+def test_every_compose_call_names_the_project(rel):
+    calls = _compose_calls(_read(rel))
+    assert calls, 'no compose call found'
+    for line in calls:
+        assert re.search(r'-p (bee-with-me|docker)\b', line), line
+
+
+@pytest.mark.Trait("Bug", "B12")
+@pytest.mark.parametrize('rel,param', [('scripts/backup.ps1', '[string]$Container'),
+                                       ('scripts/backup.sh', '--container')])
+def test_backup_accepts_a_container_override(rel, param):
+    text = _read(rel)
+    assert param in text
+    lookup = text.index(' ps -q ')
+    override = text.index('$Container' if rel.endswith('.ps1') else 'CONTAINER_OVERRIDE')
+    assert override < lookup or 'CONTAINER_OVERRIDE' in text[lookup - 200:lookup + 200]
+
+
+@pytest.mark.Trait("Bug", "B12")
+@pytest.mark.parametrize('rel,backup,refuse', [
+    ('start.ps1', r'backup\.ps1"? -OutDir "\$root\\data\\backups" -Container \$oldDb', 'throw'),
+    ('start.sh', r'backup\.sh" --container "\$OLD_DB" "\$ROOT/data/backups"', 'die'),
+])
+def test_start_script_backs_up_and_stops_the_old_project_before_compose_up(rel, backup, refuse):
+    text = _read(rel)
+    find = text.index('label=com.docker.compose.project=docker')
+    assert 'label=com.docker.compose.service=db' in text[find:find + 200]
+    m = re.search(backup, text)
+    assert m, 'old container is not backed up through the override'
+    after_backup = text[m.end():m.end() + 300]
+    assert refuse in after_backup   # a failed backup refuses to continue
+    down = re.search(r'compose -p docker -f "\$(root|ROOT)[\\/]docker[\\/]docker-compose\.yaml" down', text)
+    assert down and ' -v' not in text[down.start():text.index('\n', down.start())]
+    up = text.index('compose -p bee-with-me', down.end())
+    assert find < m.start() < down.start() < up
+
+
+@pytest.mark.Trait("Bug", "B12")
+@pytest.mark.parametrize('rel', ['start.ps1', 'start.sh'])
+def test_start_script_gives_restore_steps_for_the_old_podman_volume(rel):
+    text = _read(rel)
+    assert 'docker_pgdata' in text
+    hint = text[text.index('docker_pgdata'):]
+    assert 'restore.ps1' in hint[:600] if rel.endswith('.ps1') else 'restore.sh' in hint[:600]
+
+
+@pytest.mark.Trait("Bug", "B12")
+def test_readme_has_an_upgrade_note():
+    text = _read('README.md')
+    section = text[text.index('Upgrading from 1.7.1 or earlier'):]
+    assert 'docker-db-1' in section[:1500] and 'docker_pgdata' in section[:1500]
+    assert 'restore' in section[:1500]

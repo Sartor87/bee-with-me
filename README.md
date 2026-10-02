@@ -110,10 +110,21 @@ The start scripts use Podman when it is installed and Docker otherwise; set `CON
 
 The compose project is named `bee-with-me` (containers `bee-with-me-db-1`, `bee-with-me-tiles-1`), so
 the scripts only ever pick this project's database; with the Podman-machine override the data volume
-is `bee-with-me_pgdata`. Existing installs on the base file lose nothing — the data stays in
-`data/pgdata` (bind mount); an earlier Podman-machine install kept it in the volume `docker_pgdata`,
-so take a backup *before* updating (the new backup script no longer finds the old `docker-db-1`
-container) and restore it into `bee-with-me-db-1` afterwards.
+is `bee-with-me_pgdata`. Every script passes `-p bee-with-me` to compose explicitly (older
+podman-compose versions ignore the `name:` key).
+
+**Upgrading from 1.7.1 or earlier.** Older versions ran as compose project `docker` (containers
+`docker-db-1`, `docker-tiles-1`) on the same ports, so the new project could not start next to them.
+The start scripts handle this once: when a running `docker-db-1` (project `docker`, service `db`) is
+found, they back it up into `data/backups` (`scripts/backup.ps1 -Container <id>` /
+`scripts/backup.sh --container <id>`), refuse to continue if that backup fails, then run
+`podman compose -p docker -f docker/docker-compose.yaml down` (Docker: `docker compose -p docker …`;
+no `-v`, nothing is deleted) and start `bee-with-me`. On the base file the data stays in `data/pgdata`
+and the new project reuses it. With the Podman-machine override the old data is in the volume
+`docker_pgdata` and the new volume `bee-with-me_pgdata` starts empty: the start script stops before
+the backend and prints the restore command for the backup it just took
+(`scripts/restore.ps1 '<dump>'` / `./scripts/restore.sh <dump>`); run it, then start again. The old
+volume is left in place until you remove it yourself.
 
 **Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
 `podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
