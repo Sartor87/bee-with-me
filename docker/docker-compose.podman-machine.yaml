@@ -1,0 +1,25 @@
+# Override for Podman on Windows/macOS (podman machine).
+#
+# There the project folder is a host-drive mount inside the Podman VM (e.g. /mnt/f/...), which
+# does not support the chmod that Postgres requires on its data directory, so initdb fails with
+# "could not change permissions of directory". This override keeps the database in a named
+# volume on the VM's own disk instead. Docker and rootless Podman on Linux don't need it.
+#
+#   podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d
+#
+# WARNING: the data now lives inside the Podman VM. `podman machine rm` or a machine reset
+# deletes it. Take backups (scripts/backup.ps1) onto a separate disk.
+
+services:
+  db:
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # replaces the ../data/pgdata bind mount (same target)
+    # WSL forwards to Windows localhost only ports that have a listening socket in the VM. A rootful
+    # Podman machine publishes container ports with firewall redirects (no socket), so 5432 never
+    # reaches Windows. On the VM's host network Postgres itself listens on 0.0.0.0:5432, which WSL
+    # forwards. POSTGRES_PORT is ignored in this mode (Postgres always uses 5432).
+    network_mode: host
+    ports: !reset []
+
+volumes:
+  pgdata:

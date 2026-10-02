@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts the whole Bee With Me stack on Linux: Postgres/PostGIS (Docker), the
+# Starts the whole Bee With Me stack on Linux: Postgres/PostGIS (Podman or Docker), the
 # FastAPI backend, and the Vue frontend - instead of starting each one by hand.
 # Linux counterpart of start.ps1.
 #
@@ -10,16 +10,16 @@
 # with [backend] / [frontend]) rather than in new windows - there is no terminal
 # emulator that is guaranteed to exist on every distro. Ctrl+C stops both.
 #
-#   ./start.sh [--project-path DIR] [--skip-docker] [--no-browser]
+#   ./start.sh [--project-path DIR] [--skip-containers] [--no-browser]
 #
 #   --project-path DIR  Path to the project folder (default: this script's folder).
-#   --skip-docker       Don't touch Docker Compose (database already running).
+#   --skip-containers  Don't start the database container (database already running). --skip-docker still works.
 #   --no-browser        Don't auto-open the frontend once it's up.
 
 set -euo pipefail
 
 PROJECT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKIP_DOCKER=0
+SKIP_CONTAINERS=0
 NO_BROWSER=0
 
 step() { printf '\033[36m==> %s\033[0m\n' "$*"; }
@@ -29,7 +29,7 @@ die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project-path) [[ $# -ge 2 ]] || die '--project-path needs a value'; PROJECT_PATH="$2"; shift 2 ;;
-        --skip-docker)  SKIP_DOCKER=1; shift ;;
+        --skip-containers|--skip-docker) SKIP_CONTAINERS=1; shift ;;
         --no-browser)   NO_BROWSER=1; shift ;;
         -h|--help)      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)              die "Unknown option: $1 (see --help)" ;;
@@ -53,18 +53,36 @@ if [[ ! -f "$ROOT/.env" ]]; then
     warn 'Edit .env with real values (POSTGRES_PASSWORD, SECRET_KEY, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test.'
 fi
 
-# -- Docker (Postgres/PostGIS) ----------------------------------------------------
-if [[ $SKIP_DOCKER -eq 0 ]]; then
-    command -v docker >/dev/null 2>&1 \
-        || die 'Docker was not found on PATH. Install Docker Engine, or re-run with --skip-docker if the database is already running elsewhere.'
-    if ! docker info >/dev/null 2>&1; then
+# -- Database container (Podman first, Docker as the alternative) --------------------
+ENGINE="${CONTAINER_ENGINE:-}"
+if [[ -z "$ENGINE" ]]; then
+    if command -v podman >/dev/null 2>&1; then ENGINE=podman
+    elif command -v docker >/dev/null 2>&1; then ENGINE=docker
+    fi
+fi
+
+if [[ $SKIP_CONTAINERS -eq 0 ]]; then
+    [[ -n "$ENGINE" ]] \
+        || die 'Neither podman nor docker was found on PATH. Install Podman (https://podman.io) or Docker, or re-run with --skip-containers if the database is already running elsewhere.'
+    if ! "$ENGINE" info >/dev/null 2>&1; then
+        if [[ "$ENGINE" == podman ]]; then
+            die "Podman is installed but not usable by $(whoami). Rootless podman needs no daemon; check 'podman info' for the error (on macOS/Windows: podman machine start)."
+        fi
         die "Docker is installed but not usable by $(whoami). Either the daemon isn't running
   (sudo systemctl start docker) or you're not in the docker group
   (sudo usermod -aG docker $(whoami), then log out and back in)."
     fi
 
-    step 'Starting database (docker compose up -d)'
-    (cd "$ROOT/docker" && docker compose up -d)
+    # Podman on macOS/Windows runs in a VM: named volume + host network for Postgres
+    # (see docker/docker-compose.podman-machine.yaml for why). Native-Linux Podman uses the base file.
+    COMPOSE_FILES=(-f "$ROOT/docker/docker-compose.yaml")
+    case "$(uname -s)" in
+        Darwin|MINGW*|MSYS*|CYGWIN*)
+            [[ "$ENGINE" == podman ]] && COMPOSE_FILES+=(-f "$ROOT/docker/docker-compose.podman-machine.yaml") ;;
+    esac
+
+    step "Starting database ($ENGINE compose up -d)"
+    "$ENGINE" compose "${COMPOSE_FILES[@]}" up -d
 
     step 'Waiting for Postgres to accept connections'
     PG_PORT="$(grep -E '^\s*POSTGRES_PORT\s*=' "$ROOT/.env" | tail -n1 | cut -d= -f2- | tr -dc '0-9' || true)"
@@ -76,7 +94,7 @@ if [[ $SKIP_DOCKER -eq 0 ]]; then
         sleep 1
     done
     [[ $ready -eq 1 ]] \
-        || warn "Postgres didn't come up on port $PG_PORT within 60s - continuing anyway. Check: docker compose -f docker/docker-compose.yaml logs"
+        || warn "Postgres didn't come up on port $PG_PORT within 60s - continuing anyway. Check: $ENGINE compose -f docker/docker-compose.yaml logs"
 fi
 
 # -- Python venv + backend deps ---------------------------------------------------
@@ -90,6 +108,23 @@ fi
 
 step 'Installing/checking backend dependencies'
 "$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/backend/requirements.txt"
+
+# -- Database migrations: back up first if any are pending ---------------------------
+if [[ $SKIP_CONTAINERS -eq 0 ]]; then
+    step 'Checking database migrations'
+    set +e
+    ( cd "$ROOT" && "$ROOT/.venv/bin/python" -m backend.db.migrate status )
+    mig=$?
+    set -e
+    case "$mig" in
+        0)  ;;
+        10) step 'Migrations pending - taking a backup first (data/backups)'
+            "$ROOT/scripts/backup.sh" "$ROOT/data/backups" \
+                || die 'Backup failed - not starting, so the database is never migrated without a backup.' ;;
+        2)  die 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' ;;
+        *)  warn "Could not check migrations (exit $mig) - the backend will report the problem on start." ;;
+    esac
+fi
 
 # -- Frontend deps ------------------------------------------------------------------
 command -v npm >/dev/null 2>&1 || die 'npm was not found on PATH. Install Node.js (LTS) and re-run.'
@@ -137,8 +172,8 @@ echo '  Backend:  http://localhost:8000  (API docs at /docs)'
 echo '  Frontend: http://localhost:5173'
 echo
 printf '\033[90m%s\033[0m\n' 'Press Ctrl+C to stop backend and frontend.'
-printf '\033[90m%s\033[0m\n' 'The database keeps running in Docker until you stop it yourself:'
-printf '\033[90m%s\033[0m\n' '  docker compose -f docker/docker-compose.yaml down'
+printf '\033[90m%s\033[0m\n' 'The database keeps running in its container until you stop it yourself:'
+printf '\033[90m%s\033[0m\n' "  ${ENGINE:-podman} compose -f docker/docker-compose.yaml down"
 echo
 
 wait

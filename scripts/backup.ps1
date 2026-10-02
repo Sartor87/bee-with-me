@@ -6,6 +6,9 @@
     callout lives in one Docker volume on one laptop; this is the only thing standing
     between a disk failure and losing it.
 
+    Works with Podman (default) or Docker; set CONTAINER_ENGINE to force one. Dumps are
+    pg_dump custom format (.dump); restore with pg_restore (see the hint printed at the end).
+
 .PARAMETER OutDir
     Where to write the dump. Point this at a USB stick or a second drive — a backup on
     the same disk as the database is not a backup.
@@ -25,6 +28,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
+# Container engine: Podman first, Docker as the alternative. Override with $env:CONTAINER_ENGINE.
+$engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
+          elseif (Get-Command podman -ErrorAction SilentlyContinue) { 'podman' }
+          elseif (Get-Command docker -ErrorAction SilentlyContinue) { 'docker' }
+          else { throw 'Neither podman nor docker was found on PATH.' }
+
 # Read DB settings out of .env so this never drifts from the running config
 $envVars = @{}
 foreach ($line in Get-Content (Join-Path $root '.env')) {
@@ -36,24 +45,35 @@ $user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'res
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 
 $stamp  = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-$target = Join-Path $OutDir "beewithme_$stamp.sql"
+$target = Join-Path $OutDir "beewithme_$stamp.dump"
 
-$container = (docker compose -f (Join-Path $root 'docker\docker-compose.yaml') ps -q db)
-if (-not $container) { throw 'Database container is not running — start it with: docker compose up -d' }
+# Find the db container by its compose label: works for podman and docker compose alike.
+$container = & $engine ps -q --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+if (-not $container) {
+    throw "Database container is not running - start it with: $engine compose -f docker\docker-compose.yaml up -d"
+}
 
-Write-Host "==> Dumping $db to $target" -ForegroundColor Cyan
-docker exec $container pg_dump -U $user -d $db | Out-File -FilePath $target -Encoding utf8
+# Custom format (-Fc) is binary and compressed: write it inside the container, then copy it out.
+# Piping it through PowerShell would re-encode the bytes and corrupt the dump.
+$inContainer = "/tmp/beewithme_$stamp.dump"
+Write-Host "==> Dumping $db to $target ($engine)" -ForegroundColor Cyan
+& $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer
+if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed - check the container logs' }
+& $engine cp "${container}:$inContainer" $target
+if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
+& $engine exec $container rm -f $inContainer | Out-Null
 
+if ((Get-Item $target).Length -eq 0) { throw 'Dump is empty - check the container logs' }
 $size = [math]::Round((Get-Item $target).Length / 1MB, 2)
-if ((Get-Item $target).Length -eq 0) { throw "Dump is empty — check the container logs" }
 Write-Host "==> Wrote $size MB" -ForegroundColor Green
 
-# Prune old dumps
-Get-ChildItem $OutDir -Filter 'beewithme_*.sql' |
+# Prune old dumps (custom-format .dump; older plain .sql dumps are left alone)
+Get-ChildItem $OutDir -Filter 'beewithme_*.dump' |
     Sort-Object LastWriteTime -Descending |
     Select-Object -Skip $Keep |
     ForEach-Object { Write-Host "    pruning $($_.Name)"; Remove-Item $_.FullName }
 
 Write-Host ''
-Write-Host 'To restore into a running (empty) database:' -ForegroundColor Gray
-Write-Host "  Get-Content '$target' | docker exec -i <container> psql -U $user -d $db" -ForegroundColor Gray
+Write-Host 'To restore (replaces the current data):' -ForegroundColor Gray
+Write-Host "  $engine cp '$target' ${container}:/tmp/restore.dump" -ForegroundColor Gray
+Write-Host "  $engine exec $container pg_restore --clean --if-exists -U $user -d $db /tmp/restore.dump" -ForegroundColor Gray

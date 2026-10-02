@@ -26,7 +26,7 @@ Offline people-tracking application for LoRaWAN-based rescue and volunteer opera
 
 - Python 3.11+
 - Node.js 20+
-- Docker + Docker Compose
+- Podman 4.7+ with a compose provider (`podman compose`), **or** Docker with Docker Compose
 
 ---
 
@@ -53,8 +53,10 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 ### 2. Database
 
 ```bash
-cd docker && docker compose up -d && cd ..
+cd docker && podman compose up -d && cd ..
 ```
+
+(Docker: `docker compose up -d`)
 
 The backend creates and upgrades the schema itself on start-up: numbered files in
 `backend/db/migrations/` are applied in order and recorded in the `schema_migrations` table.
@@ -70,6 +72,24 @@ To reset to an empty database (**destroys all data**): stop the backend, run
 `cd docker && podman compose down && cd ..` (Docker: `docker compose down`), delete the
 `data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
 `cd docker && podman compose up -d && cd ..` (Docker: `docker compose up -d`).
+
+**Coming back after a reboot.** `restart: unless-stopped` only helps while the container engine runs:
+- Podman on Windows/macOS: `podman machine start` (once per boot), then `podman compose up -d` or the start script.
+- Podman on Linux (rootless): `systemctl --user enable --now podman-restart.service` restarts
+  `unless-stopped` containers at login; for start at boot without login also run `loginctl enable-linger $USER`.
+- Docker: Docker Desktop / the docker service restarts the container by itself.
+
+The start scripts use Podman when it is installed and Docker otherwise; set `CONTAINER_ENGINE=docker`
+(or `podman`) to choose explicitly.
+
+**Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
+`podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
+(the start scripts do this automatically). It keeps the Postgres data in a named volume inside the
+Podman VM — Postgres can't set permissions on a Windows-drive folder — and puts Postgres on the VM's
+host network so `localhost:5432` reaches it from Windows. **The data then lives in the VM: `podman
+machine rm` or a reset deletes it — back up with `scripts/backup.ps1` onto another disk.**
+To reset to an empty database in this mode, `down -v` with both `-f` files removes the named volume
+instead of deleting `data/pgdata`.
 
 Schema changes: add a new numbered file; never edit a file that has already been applied.
 

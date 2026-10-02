@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Starts the whole Bee With Me stack on Windows: Postgres/PostGIS (Docker), the
+    Starts the whole Bee With Me stack on Windows: Postgres/PostGIS (Podman or Docker), the
     FastAPI backend, and the Vue frontend - instead of starting each one by hand.
 
     This script lives in the project root and uses its own location to find the
@@ -10,8 +10,8 @@
     Path to the bee-with-me project folder. Defaults to the folder this script
     is in.
 
-.PARAMETER SkipDocker
-    Don't touch Docker Compose (use this if the database is already running).
+.PARAMETER SkipContainers
+    Don't start the database container (use this if it is already running). -SkipDocker still works.
 
 .PARAMETER NoBrowser
     Don't auto-open the frontend in the default browser once it's up.
@@ -25,7 +25,8 @@
 
 param(
     [string]$ProjectPath = $PSScriptRoot,
-    [switch]$SkipDocker,
+    [Alias('SkipDocker')]
+    [switch]$SkipContainers,
     [switch]$NoBrowser
 )
 
@@ -48,16 +49,30 @@ if (-not (Test-Path "$root\.env")) {
     Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, SECRET_KEY, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test.'
 }
 
-# -- Docker (Postgres/PostGIS) ------------------------------------------------
-if (-not $SkipDocker) {
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-        throw 'Docker was not found on PATH. Install/start Docker Desktop, or re-run with -SkipDocker if the database is already running elsewhere.'
+# -- Database container (Podman first, Docker as the alternative) ----------------
+$engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
+          elseif (Get-Command podman -ErrorAction SilentlyContinue) { 'podman' }
+          elseif (Get-Command docker -ErrorAction SilentlyContinue) { 'docker' }
+          else { $null }
+
+if (-not $SkipContainers) {
+    if (-not $engine) {
+        throw 'Neither podman nor docker was found on PATH. Install Podman (https://podman.io) or Docker, or re-run with -SkipContainers if the database is already running elsewhere.'
+    }
+    & $engine info *> $null
+    if ($LASTEXITCODE -ne 0) {
+        if ($engine -eq 'podman') { throw 'Podman is installed but not running. Start it with: podman machine start' }
+        throw 'Docker is installed but not running. Start Docker Desktop and re-run.'
     }
 
-    Write-Step 'Starting database (docker compose up -d)'
-    Push-Location "$root\docker"
-    docker compose up -d
-    Pop-Location
+    # Podman on Windows runs in a WSL machine: named volume + host network for Postgres
+    # (see docker\docker-compose.podman-machine.yaml for why).
+    $composeFiles = @('-f', "$root\docker\docker-compose.yaml")
+    if ($engine -eq 'podman') { $composeFiles += @('-f', "$root\docker\docker-compose.podman-machine.yaml") }
+
+    Write-Step "Starting database ($engine compose up -d)"
+    & $engine compose @composeFiles up -d
+    if ($LASTEXITCODE -ne 0) { throw "$engine compose up failed - see the output above." }
 
     Write-Step 'Waiting for Postgres to accept connections'
     $pgPort = '5432'
@@ -73,7 +88,7 @@ if (-not $SkipDocker) {
     } until ($ready -or (Get-Date) -gt $deadline)
 
     if (-not $ready) {
-        Write-Warn "Postgres didn't come up on port $pgPort within 60s - continuing anyway. Check: docker compose -f docker\docker-compose.yaml logs"
+        Write-Warn "Postgres didn't come up on port $pgPort within 60s - continuing anyway. Check: $engine compose -f docker\docker-compose.yaml logs"
     }
 }
 
@@ -92,6 +107,22 @@ if (-not (Test-Path $venvActivate)) {
 
 Write-Step 'Installing/checking backend dependencies'
 & "$root\.venv\Scripts\python.exe" -m pip install -q -r "$root\backend\requirements.txt"
+
+# -- Database migrations: back up first if any are pending ---------------------
+if (-not $SkipContainers) {
+    Write-Step 'Checking database migrations'
+    & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status
+    switch ($LASTEXITCODE) {
+        0  { }
+        10 {
+            Write-Step 'Migrations pending - taking a backup first (data\backups)'
+            & "$root\scripts\backup.ps1" -OutDir "$root\data\backups"
+            if (-not $?) { throw 'Backup failed - not starting, so the database is never migrated without a backup.' }
+        }
+        2  { throw 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' }
+        default { Write-Warn "Could not check migrations (exit $LASTEXITCODE) - the backend will report the problem on start." }
+    }
+}
 
 # -- Frontend deps -------------------------------------------------------------
 if (-not (Test-Path "$root\frontend\node_modules")) {
@@ -124,5 +155,6 @@ Write-Host '  Backend:  http://localhost:8000  (API docs at /docs)'
 Write-Host '  Frontend: http://localhost:5173'
 Write-Host ''
 Write-Host 'Backend and frontend run in their own windows - close a window (or Ctrl+C inside it) to stop that service.' -ForegroundColor Gray
-Write-Host 'The database keeps running in Docker until you stop it yourself:' -ForegroundColor Gray
-Write-Host '  docker compose -f docker\docker-compose.yaml down' -ForegroundColor Gray
+$engineHint = if ($engine) { $engine } else { 'podman' }
+Write-Host 'The database keeps running in its container until you stop it yourself:' -ForegroundColor Gray
+Write-Host "  $engineHint compose -f docker\docker-compose.yaml down" -ForegroundColor Gray
