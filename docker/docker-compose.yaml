@@ -1,3 +1,6 @@
+# Fixed project name: the scripts find the db container by this label, whatever the folder is called.
+name: bee-with-me
+
 services:
   db:
     image: postgis/postgis:16-3.4

@@ -82,6 +82,13 @@ To reset to an empty database (**destroys all data**): stop the backend, run
 The start scripts use Podman when it is installed and Docker otherwise; set `CONTAINER_ENGINE=docker`
 (or `podman`) to choose explicitly.
 
+The compose project is named `bee-with-me` (containers `bee-with-me-db-1`, `bee-with-me-tiles-1`), so
+the scripts only ever pick this project's database; with the Podman-machine override the data volume
+is `bee-with-me_pgdata`. Existing installs on the base file lose nothing — the data stays in
+`data/pgdata` (bind mount); an earlier Podman-machine install kept it in the volume `docker_pgdata`,
+so take a backup *before* updating (the new backup script no longer finds the old `docker-db-1`
+container) and restore it into `bee-with-me-db-1` afterwards.
+
 **Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
 `podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
 (the start scripts do this automatically). It keeps the Postgres data in a named volume inside the

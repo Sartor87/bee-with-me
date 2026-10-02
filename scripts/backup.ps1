@@ -47,8 +47,9 @@ if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Forc
 $stamp  = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $target = Join-Path $OutDir "beewithme_$stamp.dump"
 
-# Find the db container by its compose label: works for podman and docker compose alike.
-$container = & $engine ps -q --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
+# Find the db container by its compose labels (project + service): works for podman and docker
+# compose alike, and never picks another compose project's `db` service.
+$container = & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | Select-Object -First 1
 if (-not $container) {
     throw "Database container is not running - start it with: $engine compose -f docker\docker-compose.yaml up -d"
 }

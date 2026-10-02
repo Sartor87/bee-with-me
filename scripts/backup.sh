@@ -43,8 +43,9 @@ mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y-%m-%d_%H%M%S)"
 TARGET="$OUT_DIR/beewithme_$STAMP.dump"
 
-# Find the db container by its compose label: works for podman and docker compose alike.
-CONTAINER="$("$ENGINE" ps -q --filter 'label=com.docker.compose.service=db' | head -n1)"
+# Find the db container by its compose labels (project + service): works for podman and docker
+# compose alike, and never picks another compose project's `db` service.
+CONTAINER="$("$ENGINE" ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' | head -n1)"
 if [ -z "$CONTAINER" ]; then
   echo "Database container is not running - start it with: $ENGINE compose -f docker/docker-compose.yaml up -d" >&2
   exit 1

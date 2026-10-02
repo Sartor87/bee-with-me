@@ -96,3 +96,30 @@ def test_bash_scripts_parse(rel):
     # Use the resolved path: on Windows a bare 'bash' resolves to System32\bash.exe (WSL) first,
     # which can't read Windows paths.
     assert subprocess.run([shutil.which('bash'), '-n', str(ROOT / rel)]).returncode == 0
+
+
+# ── B4: only this compose project's db container is ever picked ──────────────
+
+@pytest.mark.Trait("Bug", "B4")
+def test_compose_project_is_named_bee_with_me():
+    lines = [l for l in _read('docker/docker-compose.yaml').splitlines()
+             if l.strip() and not l.lstrip().startswith('#')]
+    assert lines[0] == 'name: bee-with-me'
+
+
+@pytest.mark.Trait("Bug", "B4")
+@pytest.mark.parametrize('rel', ['scripts/backup.ps1', 'scripts/backup.sh'])
+def test_backup_filters_on_project_and_service_labels(rel):
+    text = _read(rel)
+    ps_lines = [l for l in text.splitlines() if ' ps -q ' in l]
+    assert ps_lines, 'no container lookup found'
+    for line in ps_lines:
+        assert 'label=com.docker.compose.project=bee-with-me' in line
+        assert 'label=com.docker.compose.service=db' in line
+
+
+@pytest.mark.Trait("Bug", "B4")
+def test_readme_names_the_compose_project_and_volume():
+    text = _read('README.md')
+    assert 'bee-with-me-db-1' in text
+    assert 'bee-with-me_pgdata' in text
