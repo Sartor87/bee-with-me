@@ -42,7 +42,13 @@ foreach ($line in Get-Content (Join-Path $root '.env')) {
 $db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
 $user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
-if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
+if (-not (Test-Path $OutDir)) {
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    # Dumps hold every position and name of a callout: a folder we create is for this user only
+    # (no inherited ACEs; the dumps inside inherit this). An existing folder is left as it is.
+    icacls "$OutDir" /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not restrict access to $OutDir (icacls failed)" }
+}
 
 $stamp  = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $target = Join-Path $OutDir "beewithme_$stamp.dump"
@@ -58,11 +64,15 @@ if (-not $container) {
 # Piping it through PowerShell would re-encode the bytes and corrupt the dump.
 $inContainer = "/tmp/beewithme_$stamp.dump"
 Write-Host "==> Dumping $db to $target ($engine)" -ForegroundColor Cyan
-& $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer
-if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed - check the container logs' }
-& $engine cp "${container}:$inContainer" $target
-if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
-& $engine exec $container rm -f $inContainer | Out-Null
+try {
+    & $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer
+    if ($LASTEXITCODE -ne 0) { throw 'pg_dump failed - check the container logs' }
+    & $engine cp "${container}:$inContainer" $target
+    if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
+} finally {
+    # Always remove the temp dump inside the container, also when the dump or the copy failed.
+    & $engine exec $container rm -f $inContainer | Out-Null
+}
 
 if ((Get-Item $target).Length -eq 0) { throw 'Dump is empty - check the container logs' }
 $size = [math]::Round((Get-Item $target).Length / 1MB, 2)

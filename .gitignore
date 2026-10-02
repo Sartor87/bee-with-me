@@ -41,6 +41,10 @@ data/
 #LoraWAN info
 /lorawan/*
 
+# Database dumps (scripts/backup.*): personal data, never commit
+/backups/
+*.dump
+
 # Environment — never commit secrets
 .env
 

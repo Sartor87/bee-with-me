@@ -39,6 +39,8 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1; OUT_DIR="$(cygpath -m "$OUT_DIR")" ;;
 esac
 
+# Dumps hold every position and name of a callout: readable by this user only.
+umask 077
 mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y-%m-%d_%H%M%S)"
 TARGET="$OUT_DIR/beewithme_$STAMP.dump"
@@ -53,10 +55,12 @@ fi
 
 # Custom format (-Fc): binary and compressed; written inside the container, then copied out.
 IN_CONTAINER="/tmp/beewithme_$STAMP.dump"
+# Always remove the temp dump inside the container, also when the dump or the copy fails.
+trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true' EXIT
 echo "==> Dumping $DB to $TARGET ($ENGINE)"
 "$ENGINE" exec "$CONTAINER" pg_dump -Fc -U "$USER_NAME" -d "$DB" -f "$IN_CONTAINER"
 "$ENGINE" cp "$CONTAINER:$IN_CONTAINER" "$TARGET"
-"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null
+chmod 600 "$TARGET"   # the engine copies the container file's mode (0644)
 
 if [ ! -s "$TARGET" ]; then
   echo "Dump is empty - check the container logs" >&2

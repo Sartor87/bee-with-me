@@ -199,3 +199,58 @@ def test_base_compose_publishes_db_and_tiles_on_loopback_only():
 def test_readme_says_database_listens_on_localhost_only():
     text = _read('README.md')
     assert re.search(r'only listens on localhost', text)
+
+
+# ── B8: dumps private to the user; temp dump always removed; backups ignored by git ──
+
+@pytest.mark.Trait("Bug", "B8")
+def test_backup_sh_creates_private_dumps():
+    text = _read('scripts/backup.sh')
+    umask = text.index('umask 077')
+    assert umask < text.index('mkdir -p "$OUT_DIR"')
+    copy = text.index('cp "$CONTAINER:$IN_CONTAINER" "$TARGET"')
+    assert copy < text.index('chmod 600 "$TARGET"')
+
+
+@pytest.mark.Trait("Bug", "B8")
+def test_backup_sh_traps_exit_to_remove_the_temp_dump():
+    text = _read('scripts/backup.sh')
+    traps = [l for l in text.splitlines() if l.strip().startswith('trap ')]
+    assert traps, 'no trap'
+    trap = traps[0]
+    assert 'EXIT' in trap and 'rm -f' in trap and 'IN_CONTAINER' in trap
+    # armed before the dump is written (so a failed copy still cleans up)
+    assert text.index(trap) < text.index('pg_dump -Fc')
+
+
+@pytest.mark.Trait("Bug", "B8")
+def test_backup_ps1_restricts_a_created_outdir_to_the_current_user():
+    text = _read('scripts/backup.ps1')
+    assert '/inheritance:r' in text
+    assert '/grant:r "${env:USERNAME}:(OI)(CI)F"' in text
+    create = text.index('New-Item -ItemType Directory -Path $OutDir')
+    assert create < text.index('icacls')
+
+
+@pytest.mark.Trait("Bug", "B8")
+def test_backup_ps1_always_removes_the_temp_dump():
+    text = _read('scripts/backup.ps1')
+    m = re.search(r'try\s*\{(?P<body>.*?)\}\s*finally\s*\{(?P<fin>.*?)\}', text, re.DOTALL)
+    assert m, 'no try/finally'
+    assert 'pg_dump -Fc' in m['body'] and ' cp ' in m['body']
+    assert 'rm -f $inContainer' in m['fin']
+
+
+@pytest.mark.Trait("Bug", "B8")
+def test_gitignore_has_backup_rules():
+    lines = _read('.gitignore').splitlines()
+    assert '/backups/' in lines
+    assert '*.dump' in lines
+
+
+@pytest.mark.Trait("Bug", "B8")
+@pytest.mark.skipif(shutil.which('git') is None, reason='no git')
+@pytest.mark.parametrize('path', ['backups/x.dump', 'elsewhere/beewithme_1.dump'])
+def test_git_ignores_dumps(path):
+    res = subprocess.run(['git', '-C', str(ROOT), 'check-ignore', '-q', '--no-index', path])
+    assert res.returncode == 0, f'{path} is not ignored'
