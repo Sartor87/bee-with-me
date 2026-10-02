@@ -147,7 +147,7 @@ if (-not (Test-Path "$root\frontend\node_modules")) {
 Write-Step 'Starting backend (uvicorn) in a new window'
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command',
-    "Set-Location '$root'; & '$venvActivate'; uvicorn backend.main:app --reload"
+    "Set-Location '$root'; & '$venvActivate'; uvicorn backend.main:app"
 ) -WindowStyle Normal
 
 # -- Frontend (own window) ------------------------------------------------------

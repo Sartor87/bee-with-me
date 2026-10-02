@@ -76,6 +76,24 @@ start when they cannot check the database for 90 s. `-SkipContainers` (start.ps1
 (start.sh) also skips this check and the automatic pre-migration backup — take one manually with
 `scripts/backup.ps1` / `scripts/backup.sh` first.
 
+The backend itself also refuses to apply pending migrations to a database that already holds data
+unless a backup of *that* database was taken first: every backup writes `last-backup.json` next to the
+dump (server `system_identifier`, applied migrations, dump name, time), and the backend migrates only
+when `data/backups/last-backup.json` (setting `BACKUP_MARKER_PATH`) is of the same server, in the
+current migration state, and less than 24 h old. A fresh, empty database needs no backup. A refusal
+changes nothing; run the start script (or `scripts/backup.ps1 -OutDir data\backups` /
+`./scripts/backup.sh data/backups`) and start again. The start scripts run uvicorn without `--reload`,
+so a `git pull` never migrates a running field install behind your back. Developers who want hot
+reload start uvicorn by hand with `ALLOW_MIGRATE_WITHOUT_BACKUP=true` — on development data only:
+
+```powershell
+$env:ALLOW_MIGRATE_WITHOUT_BACKUP='true'; uvicorn backend.main:app --reload
+```
+
+```bash
+ALLOW_MIGRATE_WITHOUT_BACKUP=true uvicorn backend.main:app --reload
+```
+
 To reset to an empty database (**destroys all data**): stop the backend, run
 `cd docker && podman compose down && cd ..` (Docker: `docker compose down`), delete the
 `data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
@@ -144,6 +162,9 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload
 ```
+
+On a database that already holds data, pending migrations are only applied after a backup (see
+"2. Database"); for hot reload on development data set `ALLOW_MIGRATE_WITHOUT_BACKUP=true`.
 
 API: **http://localhost:8000**  
 Interactive API docs: **http://localhost:8000/docs**

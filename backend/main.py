@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import hash_password
 from .config import settings
 from .database import close_pool, get_pool, init_pool
-from .db.migrate import MigrationError, migrate
+from .db.migrate import BackupRequiredError, MigrationError, migrate
 from .routers import auth, devices, export, groups, locations, users, ws, test, hardware_reader, tiles
 from .ws import manager
 
@@ -83,6 +83,14 @@ async def _run_migrations() -> None:
     async with get_pool().acquire() as conn:
         try:
             applied = await migrate(conn)
+        except BackupRequiredError as exc:
+            logger.critical('=' * 72)
+            logger.critical('NOT MIGRATING THE DATABASE: %s', exc)
+            logger.critical('Nothing was changed. Start with start.ps1 / start.sh (they back up first), or '
+                            'run scripts/backup.ps1 / scripts/backup.sh -> data/backups, then start again.')
+            logger.critical('Development data only: ALLOW_MIGRATE_WITHOUT_BACKUP=true skips this check.')
+            logger.critical('=' * 72)
+            raise
         except MigrationError as exc:
             logger.critical('=' * 72)
             logger.critical('DATABASE MIGRATION FAILED: %s', exc)

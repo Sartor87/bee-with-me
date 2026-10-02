@@ -49,6 +49,7 @@ if (-not (Test-Path $OutDir)) {
     icacls "$OutDir" /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not restrict access to $OutDir (icacls failed)" }
 }
+$OutDir = (Resolve-Path $OutDir).Path   # .NET file calls below don't follow PowerShell's location
 
 $stamp  = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $target = Join-Path $OutDir "beewithme_$stamp.dump"
@@ -63,6 +64,21 @@ if (-not $container) {
 # Custom format (-Fc) is binary and compressed: write it inside the container, then copy it out.
 # Piping it through PowerShell would re-encode the bytes and corrupt the dump.
 $inContainer = "/tmp/beewithme_$stamp.dump"
+
+# State for the backup marker (last-backup.json, see below), read just before the dump: which server
+# this is and which migrations it has. The backend migrates only after a backup of this exact state.
+$createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+$systemId = (& $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+$') { throw "Could not read the database's system_identifier ($systemId)" }
+$hasMigrations = (& $engine exec $container psql -U $user -d $db -Atc "SELECT to_regclass('public.schema_migrations') IS NOT NULL" | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not read the migration state - check the container logs' }
+$applied = @()
+if ($hasMigrations -eq 't') {
+    $applied = @(& $engine exec $container psql -U $user -d $db -Atc 'SELECT version FROM schema_migrations ORDER BY version' |
+                 ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read schema_migrations - check the container logs' }
+}
+
 Write-Host "==> Dumping $db to $target ($engine)" -ForegroundColor Cyan
 try {
     & $engine exec $container pg_dump -Fc -U $user -d $db -f $inContainer
@@ -77,6 +93,19 @@ try {
 if ((Get-Item $target).Length -eq 0) { throw 'Dump is empty - check the container logs' }
 $size = [math]::Round((Get-Item $target).Length / 1MB, 2)
 Write-Host "==> Wrote $size MB" -ForegroundColor Green
+
+# Backup marker next to the dump: the backend applies pending migrations only when the marker in
+# data/backups (BACKUP_MARKER_PATH) is of this server, in its current state, and under 24 h old.
+$marker = Join-Path $OutDir 'last-backup.json'
+$markerJson = [ordered]@{
+    system_identifier = $systemId
+    applied           = $applied
+    dump              = (Split-Path $target -Leaf)
+    created_at        = $createdAt
+} | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText("$marker.tmp", $markerJson)   # UTF-8 without BOM
+Move-Item -LiteralPath "$marker.tmp" -Destination $marker -Force
+Write-Host "==> Marker $marker" -ForegroundColor Green
 
 # Prune old dumps (custom-format .dump; older plain .sql dumps are left alone)
 Get-ChildItem $OutDir -Filter 'beewithme_*.dump' |

@@ -11,6 +11,12 @@ each file are recorded in schema_migrations.
                                           # 3 database not reachable, 1 bad files / failed migration
     python -m backend.db.migrate up
 
+Pending migrations are applied (by `up` and at start-up) only when the database has no user tables
+yet (fresh install), when ALLOW_MIGRATE_WITHOUT_BACKUP=true (dev data only; logs a WARNING), or when
+the backup marker (settings.backup_marker_path, written by scripts/backup.ps1 / backup.sh) shows a
+backup of THIS server (same system_identifier) in its current state (same applied versions) taken
+less than 24 h ago. `status` never checks the marker.
+
 Because the runner owns the transaction, a migration file must not contain transaction control
 (BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, PREPARE TRANSACTION)
 outside dollar-quoted bodies; load_migrations rejects such files. For the same reason, statements
@@ -23,10 +29,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
@@ -41,6 +49,8 @@ EXIT_FAILED = 1
 EXIT_NEWER_DB = 2
 EXIT_UNREACHABLE = 3   # could not connect (Postgres down or still starting): worth retrying
 EXIT_PENDING = 10
+
+BACKUP_MAX_AGE = timedelta(hours=24)
 
 _NAME_RE = re.compile(r'^(\d{4})_[a-z0-9_]+\.sql$')
 _UP_RE = re.compile(r'^--\s*migrate:up\s*$', re.MULTILINE)
@@ -62,6 +72,10 @@ _CREATE_TABLE = """
 
 class MigrationError(RuntimeError):
     pass
+
+
+class BackupRequiredError(MigrationError):
+    """Pending migrations, existing data, and no valid backup marker for this database."""
 
 
 @dataclass(frozen=True)
@@ -185,6 +199,7 @@ async def migrate(conn: asyncpg.Connection, migrations: list[Migration] | None =
         )
     for version in current.changed:
         logger.warning('Migration %s was changed after it was applied; the change is NOT re-applied', version)
+    await _require_backup(conn, current)
 
     applied_now = []
     for mig in migrations:
@@ -205,6 +220,72 @@ async def migrate(conn: asyncpg.Connection, migrations: list[Migration] | None =
         applied_now.append(mig.version)
         logger.info('Applied migration %s', mig.name)
     return applied_now
+
+
+_USER_TABLES_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+          -- tables an extension created (postgis spatial_ref_sys, topology, tiger ...) are not data
+          AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                          WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+    )
+"""
+
+
+async def _require_backup(conn: asyncpg.Connection, current: Status) -> None:
+    """Refuse pending migrations on a database with data unless a matching, recent backup exists."""
+    if not current.pending:
+        return
+    if not await conn.fetchval(_USER_TABLES_SQL):
+        return   # fresh install: nothing to lose
+    from ..config import settings
+    pending = ', '.join(current.pending)
+    if settings.allow_migrate_without_backup:
+        logger.warning('ALLOW_MIGRATE_WITHOUT_BACKUP=true: applying migration(s) %s WITHOUT checking for a '
+                       'backup - only acceptable on development data', pending)
+        return
+    problem = await _backup_marker_problem(conn, Path(settings.backup_marker_path), current.applied)
+    if problem:
+        raise BackupRequiredError(
+            f'Not applying pending migration(s) {pending}: they need a backup of THIS database first '
+            f'({problem}). Run scripts/backup.ps1 (Windows) or scripts/backup.sh into data/backups, or '
+            f'start with start.ps1 / start.sh, which back up before migrating; see README, Backup and restore.'
+        )
+
+
+async def _backup_marker_problem(conn: asyncpg.Connection, marker_path: Path, applied: list[str]) -> str | None:
+    """None when the marker shows a backup of this server in its current state, else what is wrong."""
+    try:
+        marker = json.loads(marker_path.read_text(encoding='utf-8-sig'))
+    except FileNotFoundError:
+        return f'no backup marker at {marker_path}'
+    except (OSError, ValueError) as exc:
+        return f'backup marker {marker_path} is unreadable: {exc}'
+    if not isinstance(marker, dict):
+        return f'backup marker {marker_path} is not a JSON object'
+    try:
+        here = str(await conn.fetchval('SELECT system_identifier FROM pg_control_system()'))
+    except asyncpg.PostgresError as exc:
+        return f"cannot read this server's system_identifier: {exc}"
+    if str(marker.get('system_identifier', '')).strip() != here:
+        return (f'the last backup ({marker.get("dump", "?")}) is of another database server '
+                f'(system_identifier {marker.get("system_identifier")!r}, this one is {here})')
+    marked = marker.get('applied')
+    if not isinstance(marked, list) or sorted(str(v) for v in marked) != sorted(applied):
+        return (f'the last backup ({marker.get("dump", "?")}) was taken with applied migrations {marked!r}, '
+                f'the database now has {applied!r}')
+    try:
+        created = datetime.fromisoformat(str(marker.get('created_at', '')).replace('Z', '+00:00'))
+    except ValueError:
+        return f'backup marker created_at {marker.get("created_at")!r} is not an ISO timestamp'
+    if created.tzinfo is None:
+        return f'backup marker created_at {marker.get("created_at")!r} has no time zone'
+    age = datetime.now(timezone.utc) - created
+    if age > BACKUP_MAX_AGE or age < -timedelta(minutes=5):
+        return f'the last backup ({marker.get("dump", "?")}, {marker.get("created_at")}) is not from the last 24 h'
+    return None
 
 
 def _connect_kwargs() -> dict:

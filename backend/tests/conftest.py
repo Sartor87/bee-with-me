@@ -137,9 +137,31 @@ def _dsn(database: str) -> dict:
     )
 
 
+def _allow_without_backup(mp):
+    mp.setenv('ALLOW_MIGRATE_WITHOUT_BACKUP', 'true')
+    mp.setattr(settings, 'allow_migrate_without_backup', True)
+
+
+@pytest.fixture()
+def allow_migrate_without_backup(monkeypatch):
+    """ALLOW_MIGRATE_WITHOUT_BACKUP=true for one test (migrate() skips the backup-marker guard)."""
+    _allow_without_backup(monkeypatch)
+
+
 @pytest_asyncio.fixture()
 async def scratch_db(request):
-    """A fresh, empty database for one test, dropped afterwards."""
+    """A fresh, empty database for one test, dropped afterwards.
+
+    Scratch databases are throwaway, so the backup-marker guard is off while one exists
+    (ALLOW_MIGRATE_WITHOUT_BACKUP=true); the guard's own tests switch it back on with monkeypatch.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        _allow_without_backup(mp)
+        async for dsn in _scratch_db(request):
+            yield dsn
+
+
+async def _scratch_db(request):
     try:
         admin = await asyncpg.connect(**_dsn(settings.postgres_db), timeout=3)
     except (OSError, asyncpg.PostgresError, asyncio.TimeoutError) as exc:

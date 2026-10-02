@@ -155,12 +155,12 @@ if ! grep -rqsi 'hidraw' /etc/udev/rules.d/ 2>/dev/null; then
 fi
 
 # -- Backend + frontend (this terminal) ---------------------------------------------
-# On Ctrl+C / exit, kill the whole process group: uvicorn --reload and npm/vite
+# On Ctrl+C / exit, kill the whole process group: uvicorn and npm/vite
 # both spawn children that would otherwise be orphaned and keep the ports busy.
 trap 'trap - INT TERM EXIT; echo; step "Stopping backend and frontend"; kill 0 2>/dev/null; wait 2>/dev/null' INT TERM EXIT
 
 step 'Starting backend (uvicorn)'
-( cd "$ROOT" && exec "$ROOT/.venv/bin/uvicorn" backend.main:app --reload ) 2>&1 \
+( cd "$ROOT" && exec "$ROOT/.venv/bin/uvicorn" backend.main:app ) 2>&1 \
     | sed -u 's/^/[backend]  /' &
 
 step 'Starting frontend (vite)'

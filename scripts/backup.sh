@@ -57,6 +57,19 @@ fi
 IN_CONTAINER="/tmp/beewithme_$STAMP.dump"
 # Always remove the temp dump inside the container, also when the dump or the copy fails.
 trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true' EXIT
+
+# State for the backup marker (last-backup.json, see below), read just before the dump: which server
+# this is and which migrations it has. The backend migrates only after a backup of this exact state.
+psql_at() { "$ENGINE" exec "$CONTAINER" psql -U "$USER_NAME" -d "$DB" -Atc "$1" | tr -d '\r'; }
+CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SYSTEM_ID="$(psql_at 'SELECT system_identifier FROM pg_control_system()')"
+[[ "$SYSTEM_ID" =~ ^[0-9]+$ ]] || { echo "Could not read the database's system_identifier ($SYSTEM_ID)" >&2; exit 1; }
+APPLIED=""
+if [ "$(psql_at "SELECT to_regclass('public.schema_migrations') IS NOT NULL")" = t ]; then
+  APPLIED="$(psql_at 'SELECT version FROM schema_migrations ORDER BY version' | paste -sd, -)"
+fi
+[[ "$APPLIED" =~ ^[0-9,]*$ ]] || { echo "Unexpected schema_migrations versions: $APPLIED" >&2; exit 1; }
+
 echo "==> Dumping $DB to $TARGET ($ENGINE)"
 "$ENGINE" exec "$CONTAINER" pg_dump -Fc -U "$USER_NAME" -d "$DB" -f "$IN_CONTAINER"
 "$ENGINE" cp "$CONTAINER:$IN_CONTAINER" "$TARGET"
@@ -68,6 +81,15 @@ if [ ! -s "$TARGET" ]; then
   exit 1
 fi
 echo "==> Wrote $(du -h "$TARGET" | cut -f1)"
+
+# Backup marker next to the dump: the backend applies pending migrations only when the marker in
+# data/backups (BACKUP_MARKER_PATH) is of this server, in its current state, and under 24 h old.
+MARKER="$OUT_DIR/last-backup.json"
+APPLIED_JSON="$(printf '%s' "$APPLIED" | awk -F, '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? ", " : ""), $i }')"
+printf '{"system_identifier": "%s", "applied": [%s], "dump": "%s", "created_at": "%s"}\n' \
+  "$SYSTEM_ID" "$APPLIED_JSON" "$(basename "$TARGET")" "$CREATED_AT" > "$MARKER.tmp"
+mv -f "$MARKER.tmp" "$MARKER"
+echo "==> Marker $MARKER"
 
 # Prune old dumps, keeping the most recent $KEEP (older plain .sql dumps are left alone)
 ls -1t "$OUT_DIR"/beewithme_*.dump 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
