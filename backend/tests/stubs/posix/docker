@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Stub container engine for start.sh tests (see ../engine_stub.py).
+exec "$BWM_STUB_PYTHON" "$(dirname "$0")/../engine_stub.py" "$@"

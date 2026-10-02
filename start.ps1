@@ -162,6 +162,8 @@ if (-not $SkipContainers) {
     # `podman machine start`): retry for up to 90 s rather than let the backend migrate later
     # without the backup this check exists for. Any other code is final at once.
     $migDeadline = (Get-Date).AddSeconds(90)
+    # BWM_MIGRATE_WAIT_S: shorter deadline for the script tests (backend/tests/test_scripts_behaviour.py)
+    if ($env:BWM_MIGRATE_WAIT_S -match '^\d+$') { $migDeadline = (Get-Date).AddSeconds([int]$env:BWM_MIGRATE_WAIT_S) }
     while ($true) {
         & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status
         $migExit = $LASTEXITCODE
@@ -180,6 +182,12 @@ if (-not $SkipContainers) {
         2  { throw 'The database is newer than this version of Bee With Me. Update the app (git pull) instead of starting an older one.' }
         default { throw "Could not check database migrations (database not reachable?) - not starting, so the database is never migrated without a backup. Check: $engine compose -f docker\docker-compose.yaml -p bee-with-me logs" }
     }
+}
+
+# BWM_START_DRY_RUN=1 (script tests): stop after the database and migration decisions.
+if ($env:BWM_START_DRY_RUN -eq '1') {
+    Write-Host 'DRY RUN: would start backend and frontend'
+    exit 0
 }
 
 # -- Frontend deps -------------------------------------------------------------
