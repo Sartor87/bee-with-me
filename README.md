@@ -58,6 +58,9 @@ cd docker && podman compose up -d && cd ..
 
 (Docker: `docker compose up -d`)
 
+Podman on Windows/macOS also needs the `docker-compose.podman-machine.yaml` override — see
+"Podman on Windows/macOS (podman machine)" below.
+
 The backend creates and upgrades the schema itself on start-up: numbered files in
 `backend/db/migrations/` are applied in order and recorded in the `schema_migrations` table.
 Check the state at any time with:
@@ -66,7 +69,10 @@ Check the state at any time with:
 python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app
 ```
 
-The start scripts take a backup (`data/backups/`) before applying pending migrations.
+The start scripts take a backup (`data/backups/`) before applying pending migrations, and refuse to
+start when they cannot check the database for 90 s. `-SkipContainers` (start.ps1) / `--skip-containers`
+(start.sh) also skips this check and the automatic pre-migration backup — take one manually with
+`scripts/backup.ps1` / `scripts/backup.sh` first.
 
 To reset to an empty database (**destroys all data**): stop the backend, run
 `cd docker && podman compose down && cd ..` (Docker: `docker compose down`), delete the

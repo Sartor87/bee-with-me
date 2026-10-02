@@ -123,3 +123,54 @@ def test_readme_names_the_compose_project_and_volume():
     text = _read('README.md')
     assert 'bee-with-me-db-1' in text
     assert 'bee-with-me_pgdata' in text
+
+
+# ── B5: never start (and migrate) without the pre-migration backup ───────────
+
+_REFUSE = ('Could not check database migrations (database not reachable?) - not starting, '
+           'so the database is never migrated without a backup.')
+
+
+@pytest.mark.Trait("Bug", "B5")
+@pytest.mark.parametrize('rel,deadline,pause', [
+    ('start.ps1', 'AddSeconds(90)', 'Start-Sleep -Seconds 3'),
+    ('start.sh', 'SECONDS + 90', 'sleep 3'),
+])
+def test_start_script_retries_migration_check_for_90_seconds(rel, deadline, pause):
+    text = _read(rel)
+    section = text[text.index('Checking database migrations'):text.index("'Starting backend")]
+    assert deadline in section
+    assert pause in section
+    assert 'backend.db.migrate status' in section
+
+
+@pytest.mark.Trait("Bug", "B5")
+@pytest.mark.parametrize('rel,keyword', [('start.ps1', 'throw'), ('start.sh', 'die')])
+def test_start_script_refuses_when_migration_check_keeps_failing(rel, keyword):
+    text = _read(rel)
+    lines = [l.strip() for l in text.splitlines() if _REFUSE in l]
+    assert lines, 'refusal message missing'
+    assert all(keyword in l.split(_REFUSE)[0] for l in lines)
+    assert 'compose -f docker' in lines[0] and 'logs' in lines[0]
+    # the old warn-and-continue branch is gone
+    assert 'the backend will report the problem on start' not in text
+
+
+@pytest.mark.Trait("Bug", "B5")
+def test_start_ps1_wraps_backup_in_try_catch():
+    text = _read('start.ps1')
+    assert re.search(
+        r"try\s*\{\s*&\s*\"\$root\\scripts\\backup\.ps1\"[^}]*\}\s*catch\s*\{\s*"
+        r"throw 'Backup failed - not starting, so the database is never migrated without a backup\.'",
+        text,
+    )
+    assert 'if (-not $?)' not in text
+
+
+@pytest.mark.Trait("Bug", "B5")
+def test_readme_says_skip_containers_skips_the_backup():
+    text = _read('README.md')
+    assert re.search(r'-SkipContainers.{0,400}backup', text, re.DOTALL)
+    assert re.search(r'--skip-containers.{0,400}backup', text, re.DOTALL)
+    section = text[text.index('### 2. Database'):text.index('The backend creates')]
+    assert 'podman-machine' in section
