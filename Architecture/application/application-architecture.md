@@ -213,12 +213,12 @@ sequenceDiagram
 
     P->>E: WFS GetFeature (bounding box only)
     E-->>P: GeoJSON (bounded size, timeout)
-    P->>DB: upsert hotspots, burnt areas; prune
+    P->>DB: upsert hotspots, burnt areas, prune
     P->>DB: pg_notify('fire_data_updated')
     P-->>A: request evaluation
     A->>DB: load settings, rescuer positions, hotspots, zones, open alerts
     A->>A: haversine distances (pure)
-    A->>DB: INSERT fire_alerts; pg_notify('fire_alert')
+    A->>DB: INSERT fire_alerts, pg_notify('fire_alert')
     DB-->>W: NOTIFY
     W->>B: fire_alert, then fire_alert_repeat until acknowledged
     B->>DB: POST /api/fire/alerts/{id}/acknowledge (via REST)
