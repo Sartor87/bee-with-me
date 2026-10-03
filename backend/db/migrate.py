@@ -229,7 +229,13 @@ async def migrate(conn: asyncpg.Connection, migrations: list[Migration] | None =
             already = await conn.fetchval('SELECT 1 FROM schema_migrations WHERE version = $1', mig.version)
             if already:
                 continue
-            await conn.execute("SELECT set_config('lock_timeout', $1, true)", settings.migration_lock_timeout)
+            try:
+                await conn.execute("SELECT set_config('lock_timeout', $1, true)", settings.migration_lock_timeout)
+            except Exception as exc:  # noqa: BLE001 - any failure here is a runner error, not a raw driver trace
+                raise MigrationError(
+                    f'Migration {mig.name}: could not set lock_timeout to {settings.migration_lock_timeout!r}: '
+                    f'{exc}. Check MIGRATION_LOCK_TIMEOUT; nothing was changed.'
+                ) from exc
             try:
                 await conn.execute(mig.up_sql)
             except asyncpg.LockNotAvailableError as exc:

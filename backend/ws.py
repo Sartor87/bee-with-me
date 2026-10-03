@@ -47,7 +47,14 @@ class WSManager:
         self._clients -= dead
 
     async def _forward(self, _con, _pid, channel: str, payload: str) -> None:
-        await self.broadcast({'type': channel, **json.loads(payload)})
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            logger.warning('Dropped a non-object notification on channel %s', channel)
+            return
+        await self.broadcast({**data, 'type': channel})   # the channel wins: a payload key cannot spoof the type
 
     async def listen_notifications(self) -> None:
         """Dedicated asyncpg connection that listens for pg_notify events.

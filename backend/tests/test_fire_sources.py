@@ -105,3 +105,15 @@ async def test_client_is_built_with_follow_redirects_explicitly_off(monkeypatch)
     monkeypatch.setattr(s.httpx, 'AsyncClient', spy)
     await _feed(lambda r: httpx.Response(200, json=EMPTY)).fetch()
     assert seen.get('follow_redirects') is False
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_request_asks_for_an_uncompressed_body():
+    seen = {}
+
+    def handler(request):
+        seen['accept_encoding'] = request.headers['accept-encoding']
+        return httpx.Response(200, json=EMPTY)
+
+    await _feed(handler).fetch()
+    assert seen['accept_encoding'] == 'identity'

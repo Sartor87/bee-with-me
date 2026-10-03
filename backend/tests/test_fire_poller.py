@@ -275,3 +275,120 @@ async def test_full_count_response_logs_truncation_and_notes_it(pool, caplog):
     assert state.upstream_state == 'live' and state.count == limit
     assert 'truncated' in state.last_error
     assert 'probably truncated' in caplog.text
+
+
+# ---- B30: no connection or lock held during the network fetch; explicit unlock ----
+
+class _ProbingSource:
+    """Records how many pool connections are checked out while fetch() runs."""
+
+    def __init__(self, pool, payload):
+        self._pool, self._payload, self.checked_out = pool, payload, []
+
+    async def fetch(self):
+        self.checked_out.append(self._pool.get_size() - self._pool.get_idle_size())
+        return self._payload
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_no_pool_connection_is_held_while_fetching(pool):
+    hs = _ProbingSource(pool, _hotspots(('h1', 42.5, 24.5, '2026-10-02 10:00:00')))
+    ba = _ProbingSource(pool, AREAS)
+    assert await poller.refresh_once(pool, hs, ba, now=lambda: NOW)
+    assert hs.checked_out == [0] and ba.checked_out == [0]
+    assert poller.FEEDS['hotspots'].upstream_state == 'live'
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_advisory_lock_is_free_while_fetching(pool, scratch_db):
+    holder = await asyncpg.connect(**scratch_db)
+    seen = []
+    try:
+        class _LockProbe:
+            async def fetch(self):
+                got = await holder.fetchval('SELECT pg_try_advisory_lock($1)', poller.REFRESH_LOCK_KEY)
+                if got:
+                    await holder.execute('SELECT pg_advisory_unlock($1)', poller.REFRESH_LOCK_KEY)
+                seen.append(got)
+                return _hotspots()
+
+        await poller.refresh_once(pool, _LockProbe(), FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+        assert seen == [True]
+    finally:
+        await holder.close()
+
+
+class _CheckedOutPool:
+    """Before the pool takes the connection back, asks another session whether the refresh lock is free.
+
+    asyncpg resets a released connection (pg_advisory_unlock_all), which would hide a missing explicit unlock.
+    """
+
+    def __init__(self, pool, probe):
+        self._pool, self._probe, self.lock_free_at_release = pool, probe, []
+
+    def acquire(self):
+        outer = self
+        inner = self._pool.acquire()
+
+        class _Ctx:
+            async def __aenter__(self):
+                return await inner.__aenter__()
+
+            async def __aexit__(self, *exc):
+                got = await outer._probe.fetchval('SELECT pg_try_advisory_lock($1)', poller.REFRESH_LOCK_KEY)
+                if got:
+                    await outer._probe.execute('SELECT pg_advisory_unlock($1)', poller.REFRESH_LOCK_KEY)
+                outer.lock_free_at_release.append(got)
+                return await inner.__aexit__(*exc)
+
+        return _Ctx()
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_lock_is_explicitly_unlocked_before_the_connection_is_released(pool, scratch_db):
+    probe = await asyncpg.connect(**scratch_db)
+    try:
+        checking = _CheckedOutPool(pool, probe)
+        hs = FixtureSource('hotspots', _hotspots(('h1', 42.5, 24.5, '2026-10-02 10:00:00')))
+        assert await poller.refresh_once(checking, hs, FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+        assert checking.lock_free_at_release == [True]
+    finally:
+        await probe.close()
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_lock_is_released_when_the_store_phase_is_cancelled(pool, scratch_db, monkeypatch):
+    probe = await asyncpg.connect(**scratch_db)
+    try:
+        async def cancelled(conn, rows):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(repository, 'upsert_hotspots', cancelled)
+        checking = _CheckedOutPool(pool, probe)
+        hs = FixtureSource('hotspots', _hotspots(('h1', 42.5, 24.5, '2026-10-02 10:00:00')))
+        with pytest.raises(asyncio.CancelledError):
+            await poller.refresh_once(checking, hs, FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+        assert checking.lock_free_at_release == [True]
+    finally:
+        await probe.close()
+
+
+@pytest.mark.Trait("Bug", "B30")
+async def test_only_one_refresh_runs_at_a_time_in_this_process(pool):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _Blocking:
+        async def fetch(self):
+            started.set()
+            await release.wait()
+            return _hotspots()
+
+    first = asyncio.create_task(
+        poller.refresh_once(pool, _Blocking(), FixtureSource('burnt_areas', AREAS), now=lambda: NOW))
+    await asyncio.wait_for(started.wait(), timeout=3)
+    second = await poller.refresh_once(pool, FixtureSource('hotspots', _hotspots()),
+                                       FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    release.set()
+    assert second is False
+    assert await asyncio.wait_for(first, timeout=5) is True

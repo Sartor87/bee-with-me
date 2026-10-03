@@ -68,3 +68,27 @@ def test_lock_timeout_setting_rejects_junk(bad):
 @pytest.mark.parametrize('ok', ['200ms', '5s', '1min'])
 def test_lock_timeout_setting_accepts_intervals(ok):
     assert Settings(_env_file=None, migration_lock_timeout=ok).migration_lock_timeout == ok
+
+
+@pytest.mark.Trait("Bug", "B30")
+@pytest.mark.parametrize('bad', ['0s', '0ms', '0min', '00s', '99999999999s', '3601s', '61min', '3600001ms'])
+def test_lock_timeout_setting_rejects_zero_and_out_of_range(bad):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, migration_lock_timeout=bad)
+
+
+@pytest.mark.Trait("Bug", "B30")
+@pytest.mark.parametrize('ok', ['1ms', '3600s', '60min', '3600000ms'])
+def test_lock_timeout_setting_accepts_up_to_one_hour(ok):
+    assert Settings(_env_file=None, migration_lock_timeout=ok).migration_lock_timeout == ok
+
+
+@pytest.mark.Trait("Bug", "B30")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_failing_set_config_becomes_a_migration_error(migrated_conn, fk_migs, monkeypatch):
+    # bypasses the validator on purpose: a value Postgres itself rejects must still be a runner error
+    monkeypatch.setattr(settings, 'migration_lock_timeout', '99999999999s')
+    with pytest.raises(m.MigrationError, match=r'0900_b24_fk.*lock_timeout'):
+        await m.migrate(migrated_conn, fk_migs)
+    assert not await migrated_conn.fetchval("SELECT 1 FROM schema_migrations WHERE version = '0900'")

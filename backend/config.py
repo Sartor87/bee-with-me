@@ -48,8 +48,13 @@ class Settings(BaseSettings):
 
     @field_validator("migration_lock_timeout")
     def validate_lock_timeout(cls, v):
-        if not re.fullmatch(r'\d+(ms|s|min)', v):
+        match = re.fullmatch(r'(\d{1,10})(ms|s|min)', v)
+        if not match:
             raise ValueError("migration_lock_timeout must look like 200ms, 5s or 1min")
+        milliseconds = int(match.group(1)) * {'ms': 1, 's': 1000, 'min': 60_000}[match.group(2)]
+        # 0 disables lock_timeout (undoing the fail-loud guard); more than an hour is a typo, not a wait
+        if not 0 < milliseconds <= 3_600_000:
+            raise ValueError("migration_lock_timeout must be more than 0 and at most 1h")
         return v
 
     @field_validator("backup_marker_path")
