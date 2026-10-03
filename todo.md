@@ -1,6 +1,13 @@
 # TODO/RoadMap:
 
-- [ ] implement Copernicus EFFIS burnt areas - reference: https://github.com/bilawalsidhu/gods-eye-view/pull/852. Ask for local development first.
+- [ ] **in progress** — Copernicus EFFIS burnt areas + active hotspots with proximity alarm (reference: https://github.com/bilawalsidhu/gods-eye-view/pull/852), branch `feature/effis-fire-layers`. Plan: docs/superpowers/plans/2026-10-02-effis-fire-layers.md (kit workspace)
+  - [x] P-1 dev tooling + PDF export escaping / no URL fetching
+  - [x] P0 migration runner, `0001_baseline`, Podman-first start/backup/restore scripts, backup-before-migrate guard
+  - [ ] P1 fire data: migration `0002`, GWIS fetch, poller, read endpoints
+  - [ ] P2 fire layers on the map
+  - [ ] P3 settings page + HQ location in the database
+  - [ ] P4 fire proximity alarm (HQ / rescuers, repeat until acknowledged)
+  - [ ] P5 dismiss, suppression zones, field reports
 - [ ] wind-shift alerts for forest-fire ops (draft spec: docs/superpowers/specs/2026-10-02-wind-shift-alerts-design.md in the kit workspace)
 - [ ] move the logout button away from the language so nobody log outs accidentally
 - [ ] think if an account page is needed?
@@ -13,19 +20,23 @@
 - [ ] tighten CORS allow_origins=['*'] in main.py
 - [ ] add support for serial devices
 - [ ] orphaned files are not being deleted
-- [ ] think if db migration (maybe alembic?) makes sense
+- [x] ~~think if db migration (maybe alembic?) makes sense~~ — done without Alembic: `backend/db/migrate.py` + numbered SQL files in `backend/db/migrations/`, applied at start-up after a backup (feature/effis-fire-layers)
 - [ ] pg_notify has no reconnect logic at the moment
 - [ ] access tokens never expire (currently on purpose)
 - [ ] CRC check has no integrity check
 - [ ] endpoints accessible to any user not just admin (are we going to have other users?)
-- [ ] the headquarters location is stored in localstorage (per browser), instead it should be stored in the database
+- [ ] the headquarters location is stored in localstorage (per browser), instead it should be stored in the database — planned in EFFIS P3 (settings)
 - [ ] drop redundant columns: latitude/longitude/mgrs duplicate what's in the geometry. should save a lot of db rows
 - [ ] fetchtrail () should only fetch a device if the row is in view, should make the json smaller
 - [ ] `/api/locations/live` query cost grows with the whole `location_events` table (DISTINCT ON, no skip scan in PG16) — rewrite as a per-device LATERAL probe on `idx_location_events_device_received`. See docs/research/2026-10-02-data-volume-archival.md (kit workspace)
 - [ ] retention cleanup deletes by `recorded_at` (device GNSS clock — a wrong clock deletes rows early or never) with no supporting index and no batching — key on `received_at`, batch the DELETE, add a BRIN index on `received_at`
 - [ ] export (CSV/GeoJSON/PDF) has no row cap and builds the whole result in memory — add a cap and stream the response; first limit users will hit at ~0.5–1M rows
-- [ ] backups (`scripts/backup.sh` / `backup.ps1`) write uncompressed plain SQL — switch to `pg_dump -Fc` (compressed, faster restore)
+- [x] ~~backups (`scripts/backup.sh` / `backup.ps1`) write uncompressed plain SQL — switch to `pg_dump -Fc`~~ — done: `-Fc` dumps, checked with `pg_restore -l`, plus `scripts/restore.ps1|sh` that restore into a side database and swap it in (feature/effis-fire-layers)
 - [ ] `idx_location_events_device_time` overlaps `idx_location_events_device_received` — drop the redundant index (~45 B/row) after checking query plans
 - [ ] partitioning plan: when `location_events` exceeds ~5 GB / ~12M rows or the retention DELETE takes >30 s, move to monthly RANGE partitions on `received_at` (runtime-created, DEFAULT partition, dump detached partitions before drop). No sharding needed for this deployment model
 - [ ] confirm the RescuerBee frame interval with the hardware owner — it drives every data-volume estimate
 - [ ] `docker-compose.yaml` tiles service: `maptiler/tileserver-gl:latest` no longer accepts `--no-config` (container restart-loops with "unknown option '--no-config'"). Pin the image to a known version and fix the command; is the service still used at all (BG Mountains tiles are served by FastAPI)?
+- [ ] PDF export on Windows: WeasyPrint needs the GTK/Pango runtime, which is not installed by `pip`; without it PDF export fails. Document the install (or bundle it) and test a real PDF render on Windows
+- [ ] UI for bright daylight: the interface is dark-only; operators also work outdoors in sun — add a daylight / high-contrast mode
+- [ ] keyboard focus is invisible on buttons (no focus ring) — add one
+- [ ] after a restore the previous database is kept as `<db>_before_restore_<time>` (a second copy of all personal data) — remind the operator to drop it, or offer a cleanup command
