@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend.auth import create_access_token, hash_password, get_current_user
 from backend.database import get_conn
-from backend.routers import auth, devices, export, groups, locations, users
+from backend.routers import auth, devices, export, fire, groups, locations, users
 from backend.routers import test as test_router
 
 # ── Minimal app without lifespan ──────────────────────────────────────────────
@@ -26,6 +26,7 @@ _app.include_router(groups.router)
 _app.include_router(devices.router)
 _app.include_router(locations.router)
 _app.include_router(export.router)
+_app.include_router(fire.router)
 _app.include_router(test_router.router)
 
 
@@ -82,6 +83,12 @@ def client(mock_conn, admin_user):
         yield c
 
     _app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def test_app():
+    """The lifespan-free FastAPI app, for tests that manage dependency overrides themselves."""
+    return _app
 
 
 @pytest.fixture()
