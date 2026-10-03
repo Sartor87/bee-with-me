@@ -43,13 +43,38 @@ async def _sysid(conn):
     return str(await conn.fetchval('SELECT system_identifier FROM pg_control_system()'))
 
 
-def _marker(path, *, system_identifier, applied, created_at=None, dump='beewithme_x.dump'):
+_SAME_DB = object()
+
+
+def _marker(path, *, system_identifier, applied, created_at=None, dump='beewithme_x.dump', database=_SAME_DB,
+            dump_bytes=b'PGDMP stub dump'):
+    """Marker like the backup scripts write it; `database` defaults to the scratch database (set by
+    the `guard` fixture) and the named dump file is created next to it unless dump_bytes is None."""
     path.parent.mkdir(parents=True, exist_ok=True)
     created_at = created_at or datetime.now(timezone.utc)
-    path.write_text(json.dumps({
+    payload = {
         'system_identifier': system_identifier, 'applied': applied, 'dump': dump,
         'created_at': created_at.strftime('%Y-%m-%dT%H:%M:%SZ'),
-    }), encoding='utf-8')
+    }
+    if database is _SAME_DB:
+        database = _marker.database
+    if database is not None:
+        payload['database'] = database
+    if dump_bytes is not None and dump and '/' not in dump and '\\' not in dump and '..' not in dump:
+        (path.parent / dump).write_bytes(dump_bytes)
+    path.write_text(json.dumps(payload), encoding='utf-8')
+
+
+_marker.database = None
+
+
+@pytest.fixture(autouse=True)
+def _marker_database(request):
+    """The marker's `database` is the scratch database of the test (when it has one)."""
+    if 'scratch_db' in request.fixturenames or 'scratch_conn' in request.fixturenames:
+        _marker.database = request.getfixturevalue('scratch_db')['database']
+    yield
+    _marker.database = None
 
 
 async def _with_data(conn):
@@ -137,7 +162,9 @@ async def test_valid_marker_written_with_bom_and_numeric_id_applies(scratch_conn
     await _with_data(scratch_conn)
     guard.parent.mkdir(parents=True)
     payload = {'system_identifier': int(await _sysid(scratch_conn)), 'applied': [], 'dump': 'x.dump',
-               'created_at': datetime.now(timezone.utc).isoformat()}
+               'created_at': datetime.now(timezone.utc).isoformat(),
+               'database': await scratch_conn.fetchval('SELECT current_database()')}
+    (guard.parent / 'x.dump').write_bytes(b'PGDMP stub dump')
     guard.write_bytes(b'\xef\xbb\xbf' + json.dumps(payload).encode('utf-8'))
     assert await m.migrate(scratch_conn, migs) == ['0001']
 
@@ -257,3 +284,61 @@ async def test_startup_refusal_says_nothing_changed_and_how_to_back_up(monkeypat
     assert 'NOT MIGRATING' in caplog.text and 'Nothing was changed' in caplog.text
     assert 'scripts/backup.ps1' in caplog.text and 'ALLOW_MIGRATE_WITHOUT_BACKUP' in caplog.text
     assert 'rolled back' not in caplog.text
+
+
+# ── B18: marker hardening (future dates, database name, the dump file itself) ─
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_future_dated_marker_is_refused(scratch_conn, guard, migs):
+    await _with_data(scratch_conn)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[],
+            created_at=datetime.now(timezone.utc) + timedelta(minutes=10))
+    with pytest.raises(m.BackupRequiredError, match='24 h'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize('database', ['some_other_db', None])
+async def test_marker_of_another_or_unnamed_database_is_refused(scratch_conn, guard, migs, database):
+    await _with_data(scratch_conn)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[], database=database)
+    with pytest.raises(m.BackupRequiredError, match='database'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize('dump_bytes', [None, b''], ids=['missing', 'empty'])
+async def test_marker_whose_dump_is_missing_or_empty_is_refused(scratch_conn, guard, migs, dump_bytes):
+    await _with_data(scratch_conn)
+    if dump_bytes is not None:
+        guard.parent.mkdir(parents=True, exist_ok=True)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[], dump_bytes=dump_bytes)
+    if dump_bytes is not None:
+        (guard.parent / 'beewithme_x.dump').write_bytes(dump_bytes)
+    with pytest.raises(m.BackupRequiredError, match='dump'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize('dump', ['../outside.dump', 'sub/inner.dump', 'sub\\inner.dump', '..', ''])
+async def test_marker_dump_name_with_a_path_is_refused(scratch_conn, guard, migs, dump, tmp_path):
+    await _with_data(scratch_conn)
+    # the file exists where the path points: only the name itself is wrong
+    (tmp_path / 'outside.dump').write_bytes(b'PGDMP stub dump')
+    (guard.parent / 'sub').mkdir(parents=True, exist_ok=True)
+    (guard.parent / 'sub' / 'inner.dump').write_bytes(b'PGDMP stub dump')
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[], dump=dump)
+    with pytest.raises(m.BackupRequiredError, match='dump'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)

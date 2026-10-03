@@ -47,10 +47,10 @@ if [ -z "$ENGINE" ]; then
 fi
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value.
+# " # comment" are not part of the value; a leading `export ` is accepted.
 env_value() {
   local line value
-  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -63,8 +63,9 @@ env_value() {
 }
 
 # Read DB settings out of .env so this never drifts from the running config
-DB="$(env_value POSTGRES_DB rescuer_locator)"
-USER_NAME="$(env_value POSTGRES_USER rescuer)"
+# A process environment variable wins over the file (the same precedence as the backend's settings).
+DB="${POSTGRES_DB:-$(env_value POSTGRES_DB rescuer_locator)}"
+USER_NAME="${POSTGRES_USER:-$(env_value POSTGRES_USER rescuer)}"
 
 # The swap renames databases in SQL: plain lower-case names only, short enough for the
 # _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.

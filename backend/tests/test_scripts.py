@@ -227,9 +227,10 @@ def test_backup_sh_traps_exit_to_remove_the_temp_dump():
 def test_backup_ps1_restricts_a_created_outdir_to_the_current_user():
     text = _read('scripts/backup.ps1')
     assert '/inheritance:r' in text
-    assert '/grant:r "${env:USERNAME}:(OI)(CI)F"' in text
+    # B18: granted by SID (was ${env:USERNAME}), through Set-PrivateAcl right after the folder is created
+    assert '/grant:r "*${mySid}:(OI)(CI)F"' in text
     create = text.index('New-Item -ItemType Directory -Path $OutDir')
-    assert create < text.index('icacls')
+    assert create < text.index('Set-PrivateAcl $OutDir', create) < create + 200
 
 
 @pytest.mark.Trait("Bug", "B8")
@@ -654,3 +655,126 @@ def test_restore_never_drops_the_live_database(rel):
         if i < check_line:
             assert re.search(r'restoreDb|RESTORE_DB', line), line   # before the check: cleanup only
     assert '--force' in body
+
+
+# ── B18: gate re-run minors ──────────────────────────────────────────────────
+
+@pytest.mark.Trait("Bug", "B18")
+def test_start_ps1_runs_pip_and_migrate_status_through_invoke_native():
+    text = _read('start.ps1')
+    for marker in ('-m pip install', '-m backend.db.migrate status'):
+        line = next(l for l in _code_lines(text) if marker in l and 'python.exe' in l)
+        assert 'Invoke-Native {' in line, line
+    after_pip = text[text.index('-m pip install'):][:400]
+    assert '$LASTEXITCODE' in after_pip and 'pip install failed' in after_pip
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_start_sh_reports_a_failing_pip_install():
+    text = _read('start.sh')
+    pip = text.index('-m pip install')
+    window = text[pip - 80:pip + 300]
+    assert re.search(r'if\s+!\s+"\$ROOT/\.venv/bin/python" -m pip install', window) and 'pip install failed' in window
+
+
+_ENV_EXPORT_SAMPLE = 'export POSTGRES_DB=exported_db\r\n  export   POSTGRES_USER="exp_user"\r\nexporter=x\r\n'
+_ENV_EXPORT_EXPECTED = {'POSTGRES_DB': 'exported_db', 'POSTGRES_USER': 'exp_user', 'exporter': 'x'}
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')
+@pytest.mark.parametrize('rel', PS_SCRIPTS)
+def test_ps_dotenv_parsing_accepts_export_lines(rel, tmp_path):
+    fn = _block(_read(rel), 'function Read-DotEnv')
+    (tmp_path / '.env').write_bytes(_ENV_EXPORT_SAMPLE.encode('utf-8'))
+    script = tmp_path / 'probe.ps1'
+    keys = ', '.join(f"'{k}'" for k in _ENV_EXPORT_EXPECTED)
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + fn +
+                      f"$v = Read-DotEnv '{tmp_path / '.env'}'\n"
+                      f"foreach ($k in @({keys})) {{ \"$k=[$($v[$k])]\" }}\n", encoding='utf-8')
+    res = subprocess.run([_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    for key, value in _ENV_EXPORT_EXPECTED.items():
+        assert f'{key}=[{value}]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.parametrize('rel', SH_SCRIPTS)
+def test_sh_dotenv_parsing_accepts_export_lines(rel, tmp_path):
+    fn = _block(_read(rel), 'env_value() {')
+    (tmp_path / '.env').write_bytes(_ENV_EXPORT_SAMPLE.encode('utf-8'))
+    probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
+             ''.join(f'printf "%s=[%s]\\n" {k} "$(env_value {k} DEFAULT)"\n' for k in _ENV_EXPORT_EXPECTED))
+    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    for key, value in _ENV_EXPORT_EXPECTED.items():
+        assert f'{key}=[{value}]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.parametrize('rel,env_first', [
+    ('scripts/backup.ps1', r'\$env:POSTGRES_DB'), ('scripts/backup.sh', r'\$\{POSTGRES_DB:-'),
+    ('scripts/restore.ps1', r'\$env:POSTGRES_DB'), ('scripts/restore.sh', r'\$\{POSTGRES_DB:-'),
+])
+def test_process_env_overrides_the_dotenv_file(rel, env_first):
+    text = _read(rel)
+    assert re.search(env_first, text), 'POSTGRES_DB from the environment is not read first'
+    assert re.search(env_first.replace('DB', 'USER'), text), 'POSTGRES_USER from the environment is not read first'
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.parametrize('rel', ['scripts/backup.ps1', 'scripts/backup.sh'])
+def test_backup_marker_records_the_database(rel):
+    text = _read(rel)
+    assert 'current_database()' in text
+    assert re.search(r'["\']?database["\']?\s*[=:]', text)
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_backup_ps1_grants_the_dump_folder_by_sid_and_reapplies_when_unrestricted():
+    text = _read('scripts/backup.ps1')
+    assert '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value' in text
+    icacls = [l for l in _code_lines(text) if 'icacls' in l and '/grant' in l]
+    assert icacls and all('*$' in l or '"*' in l for l in icacls), icacls
+    assert '${env:USERNAME}:' not in text
+    assert 'AreAccessRulesProtected' in text
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_backup_sh_notes_that_modes_are_not_enforced_under_git_bash():
+    text = _read('scripts/backup.sh')
+    i = text.index('not enforced on NTFS')
+    assert 'MINGW*|MSYS*' in text[i - 400:i] and 'backup.ps1' in text[i:i + 300]
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_backup_ps1_restore_hint_is_double_quoted():
+    text = _read('scripts/backup.ps1')
+    hint = next(l for l in text.splitlines() if 'restore.ps1' in l and 'Write-Host' in l)
+    assert "'$root" not in hint and "'$target'" not in hint, hint
+    assert '""$target""' in hint and 'restore.ps1""' in hint, hint
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_gitignore_ignores_partial_dumps():
+    assert '*.dump.partial' in _read('.gitignore').splitlines()
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_readme_reset_commands_name_the_project_and_no_field_start_uses_reload():
+    text = _read('README.md')
+    for line in text.splitlines():
+        if re.search(r'compose (down|up)\b', line) or re.search(r'compose\b.*\b(down -v)\b', line):
+            assert '-p bee-with-me' in line or '-p docker' in line or 'docker compose -p' in line, line
+        if re.search(r'uvicorn backend\.main:app --reload', line):
+            assert 'ALLOW_MIGRATE_WITHOUT_BACKUP' in line, line
+
+
+@pytest.mark.Trait("Bug", "B18")
+def test_readme_backup_section_has_the_security_notes():
+    text = _read('README.md')
+    section = text[text.index('#### Backup and restore'):text.index('### 3. Backend')]
+    assert 'trusted' in section and 'superuser' in section
+    assert 'FAT' in section and 'exFAT' in section and 'creates the folder' in section

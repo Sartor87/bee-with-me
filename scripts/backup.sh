@@ -39,10 +39,10 @@ if [ -z "$ENGINE" ]; then
 fi
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value.
+# " # comment" are not part of the value; a leading `export ` is accepted.
 env_value() {
   local line value
-  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -55,8 +55,9 @@ env_value() {
 }
 
 # Read DB settings out of .env so this never drifts from the running config
-DB="$(env_value POSTGRES_DB rescuer_locator)"
-USER_NAME="$(env_value POSTGRES_USER rescuer)"
+# A process environment variable wins over the file (the same precedence as the backend's settings).
+DB="${POSTGRES_DB:-$(env_value POSTGRES_DB rescuer_locator)}"
+USER_NAME="${POSTGRES_USER:-$(env_value POSTGRES_USER rescuer)}"
 
 # Git Bash/MSYS on Windows: stop it rewriting container paths (/tmp/...) into Windows paths,
 # and give the engine the output folder as a Windows path it understands.
@@ -66,6 +67,12 @@ esac
 
 # Dumps hold every position and name of a callout: readable by this user only.
 umask 077
+case "$(uname -s)" in
+  MINGW*|MSYS*)
+    echo "NOTE: under Git Bash the file modes (umask 077, chmod 600) are not enforced on NTFS - the dumps" >&2
+    echo "      inherit the folder's Windows permissions. On Windows use scripts/backup.ps1, which restricts" >&2
+    echo "      the dump folder to this user." >&2 ;;
+esac
 mkdir -p "$OUT_DIR"
 # Random suffix: two runs in the same second never share a file name (here or in the container).
 STAMP="$(date +%Y-%m-%d_%H%M%S)_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
@@ -96,6 +103,11 @@ psql_at() { "$ENGINE" exec "$CONTAINER" psql -U "$USER_NAME" -d "$DB" -Atc "$1" 
 CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SYSTEM_ID="$(psql_at 'SELECT system_identifier FROM pg_control_system()')"
 [[ "$SYSTEM_ID" =~ ^[0-9]+$ ]] || { echo "Could not read the database's system_identifier ($SYSTEM_ID)" >&2; exit 1; }
+DATABASE="$(psql_at 'SELECT current_database()')"
+# written into JSON below as it is: no quotes, backslashes or control characters
+case "$DATABASE" in
+  ''|*'"'*|*'\'*|*[[:cntrl:]]*) echo "Unexpected database name: $DATABASE" >&2; exit 1 ;;
+esac
 APPLIED=""
 if [ "$(psql_at "SELECT to_regclass('public.schema_migrations') IS NOT NULL")" = t ]; then
   APPLIED="$(psql_at 'SELECT version FROM schema_migrations ORDER BY version' | paste -sd, -)"
@@ -120,11 +132,12 @@ TARGET="$FINAL"
 echo "==> Wrote $(du -h "$TARGET" | cut -f1)"
 
 # Backup marker next to the dump: the backend applies pending migrations only when the marker in
-# data/backups (BACKUP_MARKER_PATH) is of this server, in its current state, and under 24 h old.
+# data/backups (BACKUP_MARKER_PATH) is of this server and database, in its current state, under 24 h
+# old, and its dump is there.
 MARKER="$OUT_DIR/last-backup.json"
 APPLIED_JSON="$(printf '%s' "$APPLIED" | awk -F, '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? ", " : ""), $i }')"
-printf '{"system_identifier": "%s", "applied": [%s], "dump": "%s", "created_at": "%s"}\n' \
-  "$SYSTEM_ID" "$APPLIED_JSON" "$(basename "$TARGET")" "$CREATED_AT" > "$MARKER.tmp"
+printf '{"system_identifier": "%s", "database": "%s", "applied": [%s], "dump": "%s", "created_at": "%s"}\n' \
+  "$SYSTEM_ID" "$DATABASE" "$APPLIED_JSON" "$(basename "$TARGET")" "$CREATED_AT" > "$MARKER.tmp"
 mv -f "$MARKER.tmp" "$MARKER"
 echo "==> Marker $MARKER"
 

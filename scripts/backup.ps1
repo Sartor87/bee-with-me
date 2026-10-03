@@ -42,12 +42,13 @@ function Invoke-Native([scriptblock]$Command) {
     & $Command
 }
 
-# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
+# a leading `export ` (shell-style .env) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }
@@ -66,15 +67,32 @@ $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
 
 # Read DB settings out of .env so this never drifts from the running config
 $envVars = Read-DotEnv (Join-Path $root '.env')
-$db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
-$user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
+# A process environment variable wins over the file (the same precedence as the backend's settings).
+$db   = if ($env:POSTGRES_DB)   { $env:POSTGRES_DB }   elseif ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
+$user = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } elseif ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
+# Dumps hold every position and name of a callout: the dump folder is for this user only (no inherited
+# ACEs; the dumps inside inherit this). Granted by SID, which also works for domain and renamed accounts.
+$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+function Set-PrivateAcl([string]$Dir) {
+    icacls "$Dir" /inheritance:r /grant:r "*${mySid}:(OI)(CI)F" | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
 if (-not (Test-Path $OutDir)) {
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-    # Dumps hold every position and name of a callout: a folder we create is for this user only
-    # (no inherited ACEs; the dumps inside inherit this). An existing folder is left as it is.
-    icacls "$OutDir" /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not restrict access to $OutDir (icacls failed)" }
+    if (-not (Set-PrivateAcl $OutDir)) { throw "Could not restrict access to $OutDir (icacls failed)" }
+} else {
+    # An existing folder that still inherits its permissions is restricted too, but only when it holds
+    # nothing but dumps (a folder of ours); anything else is left as it is, with a warning.
+    $protected = try { (Get-Acl -LiteralPath $OutDir).AreAccessRulesProtected } catch { $false }
+    if (-not $protected) {
+        $other = @(Get-ChildItem -LiteralPath $OutDir -Force |
+                   Where-Object { $_.Name -notlike 'beewithme_*' -and $_.Name -notlike 'last-backup.json*' })
+        if ($other.Count -gt 0 -or -not (Set-PrivateAcl $OutDir)) {
+            Write-Host ("WARNING: $OutDir is not restricted to this user (it holds other files, or the drive has no " +
+                        'ACLs, e.g. FAT/exFAT). The dumps in it hold personal data: keep the folder private.') -ForegroundColor Yellow
+        }
+    }
 }
 $OutDir = (Resolve-Path $OutDir).Path   # .NET file calls below don't follow PowerShell's location
 
@@ -102,6 +120,8 @@ $inContainer = "/tmp/beewithme_${stamp}_$suffix.dump"
 $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $systemId = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+$') { throw "Could not read the database's system_identifier ($systemId)" }
+$database = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT current_database()' } | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $database) { throw "Could not read the database name ($database)" }
 $hasMigrations = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc "SELECT to_regclass('public.schema_migrations') IS NOT NULL" } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not read the migration state - check the container logs' }
 $applied = @()
@@ -138,10 +158,12 @@ $size = [math]::Round((Get-Item $target).Length / 1MB, 2)
 Write-Host "==> Wrote $size MB" -ForegroundColor Green
 
 # Backup marker next to the dump: the backend applies pending migrations only when the marker in
-# data/backups (BACKUP_MARKER_PATH) is of this server, in its current state, and under 24 h old.
+# data/backups (BACKUP_MARKER_PATH) is of this server and database, in its current state, under 24 h
+# old, and its dump is there.
 $marker = Join-Path $OutDir 'last-backup.json'
 $markerJson = [ordered]@{
     system_identifier = $systemId
+    database          = $database
     applied           = $applied
     dump              = (Split-Path $target -Leaf)
     created_at        = $createdAt
@@ -159,4 +181,4 @@ Get-ChildItem -LiteralPath $OutDir -Filter 'beewithme_*.dump' |
 
 Write-Host ''
 Write-Host 'To restore (replaces the whole database; stop the backend first):' -ForegroundColor Gray
-Write-Host "  powershell -ExecutionPolicy Bypass -File '$root\scripts\restore.ps1' '$target'" -ForegroundColor Gray
+Write-Host "  powershell -ExecutionPolicy Bypass -File ""$root\scripts\restore.ps1"" ""$target""" -ForegroundColor Gray

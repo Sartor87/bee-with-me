@@ -1,7 +1,7 @@
 """Stub `python -m backend.db.migrate` for the start-script tests (runs from the temp project copy).
 
 Exits with the next code of $BWM_STUB_MIGRATE_EXITS (comma-separated; the last one repeats) and logs
-"migrate <args>" to $BWM_STUB_LOG.
+"migrate <args>" to $BWM_STUB_LOG. BWM_STUB_MIGRATE_WARN=1 also writes a warning to stderr.
 """
 
 import os
@@ -15,5 +15,7 @@ n = int(counter.read_text()) if counter.exists() else 0
 counter.write_text(str(n + 1))
 with log.open('a', encoding='utf-8') as f:
     f.write('migrate ' + ' '.join(sys.argv[1:]) + '\n')
+if os.environ.get('BWM_STUB_MIGRATE_WARN') == '1':
+    print('WARNING: stub migrate: something on stderr', file=sys.stderr)
 print(f'stub migrate: exit {codes[min(n, len(codes) - 1)]}')
 sys.exit(codes[min(n, len(codes) - 1)])

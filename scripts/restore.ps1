@@ -48,12 +48,13 @@ function Invoke-Native([scriptblock]$Command) {
     & $Command
 }
 
-# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
+# a leading `export ` (shell-style .env) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }
@@ -72,8 +73,9 @@ $engine = if ($env:CONTAINER_ENGINE) { $env:CONTAINER_ENGINE }
 
 # Read DB settings out of .env so this never drifts from the running config
 $envVars = Read-DotEnv (Join-Path $root '.env')
-$db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
-$user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
+# A process environment variable wins over the file (the same precedence as the backend's settings).
+$db   = if ($env:POSTGRES_DB)   { $env:POSTGRES_DB }   elseif ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
+$user = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } elseif ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
 # The swap renames databases in SQL: plain lower-case names only, short enough for the
 # _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.

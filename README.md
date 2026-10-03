@@ -53,10 +53,10 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 ### 2. Database
 
 ```bash
-cd docker && podman compose up -d && cd ..
+podman compose -p bee-with-me -f docker/docker-compose.yaml up -d
 ```
 
-(Docker: `docker compose up -d`)
+(Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml up -d`)
 
 Podman on Windows/macOS also needs the `docker-compose.podman-machine.yaml` override — see
 "Podman on Windows/macOS (podman machine)" below.
@@ -95,12 +95,12 @@ ALLOW_MIGRATE_WITHOUT_BACKUP=true uvicorn backend.main:app --reload
 ```
 
 To reset to an empty database (**destroys all data**): stop the backend, run
-`cd docker && podman compose down && cd ..` (Docker: `docker compose down`), delete the
-`data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
-`cd docker && podman compose up -d && cd ..` (Docker: `docker compose up -d`).
+`podman compose -p bee-with-me -f docker/docker-compose.yaml down` (Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml down`),
+delete the `data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
+`podman compose -p bee-with-me -f docker/docker-compose.yaml up -d` (Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml up -d`).
 
 **Coming back after a reboot.** `restart: unless-stopped` only helps while the container engine runs:
-- Podman on Windows/macOS: `podman machine start` (once per boot), then `podman compose up -d` or the start script.
+- Podman on Windows/macOS: `podman machine start` (once per boot), then `podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d` or the start script.
 - Podman on Linux (rootless): `systemctl --user enable --now podman-restart.service` restarts
   `unless-stopped` containers at login; for start at boot without login also run `loginctl enable-linger $USER`.
 - Docker: Docker Desktop / the docker service restarts the container by itself.
@@ -134,13 +134,14 @@ is never backed up or stopped: the start script stops instead and prints the bac
 here yourself.
 
 **Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
-`podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
+`podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
 (the start scripts do this automatically). It keeps the Postgres data in a named volume inside the
 Podman VM — Postgres can't set permissions on a Windows-drive folder — and puts Postgres on the VM's
 host network so `localhost:5432` reaches it from Windows. **The data then lives in the VM: `podman
 machine rm` or a reset deletes it — back up with `scripts/backup.ps1` onto another disk.**
-To reset to an empty database in this mode, `down -v` with both `-f` files removes the named volume
-instead of deleting `data/pgdata`.
+To reset to an empty database in this mode,
+`podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml down -v`
+removes the named volume instead of deleting `data/pgdata`.
 
 The database only listens on localhost (`127.0.0.1`, in both modes; the tile server too) — the
 backend, the hardware reader and the scripts all run on this machine. To reach it from another
@@ -154,6 +155,17 @@ Schema changes: add a new numbered file; never edit a file that has already been
 Back up with `scripts/backup.ps1 -OutDir E:\bee-backups` (Windows) or `./scripts/backup.sh /media/usb/bee-backups`
 (Linux/macOS) — onto another disk. Both find the database container (`bee-with-me-db-1`) through the
 chosen engine: Podman first, Docker when Podman is not installed (`CONTAINER_ENGINE=docker` to force it).
+They read `POSTGRES_DB` / `POSTGRES_USER` from the environment first, then from `.env` (like the backend).
+
+Dumps hold every name and position of a callout. `backup.ps1` restricts the dump folder to the current
+user (by SID, no inherited permissions) when it creates the folder, and also when it finds an existing
+folder that still inherits its permissions and holds nothing but dumps; any other existing folder is
+left as it is, with a warning. FAT/exFAT USB sticks have no ACLs at all: there the dumps are readable by
+anyone who has the stick, so keep it with you. `backup.sh` makes the dumps `600` (not enforced under
+Git Bash on NTFS — use `backup.ps1` on Windows).
+
+**Restore only dumps you made yourself and kept on trusted media.** `pg_restore` runs as the database
+superuser inside the container, so a crafted dump can do anything the database server can.
 
 To restore a dump (**replaces the whole database**): stop the backend first (close its window / Ctrl+C), then
 
@@ -188,7 +200,7 @@ as the backup (Podman, then Docker).
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
-uvicorn backend.main:app --reload
+uvicorn backend.main:app
 ```
 
 On a database that already holds data, pending migrations are only applied after a backup (see
@@ -238,7 +250,7 @@ Setup is otherwise the same as macOS/Linux:
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r backend\requirements.txt
-uvicorn backend.main:app --reload
+uvicorn backend.main:app
 ```
 
 `pip install -r backend/requirements.txt` pulls prebuilt wheels for `hidapi` and `mgrs` on Windows (win_amd64), so no C compiler / Visual Studio Build Tools should be required for a supported Python version (3.10–3.13 as of writing).

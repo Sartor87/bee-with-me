@@ -20,8 +20,9 @@ of the up section, including a comment, does and is logged as "changed after app
 Pending migrations are applied (by `up` and at start-up) only when the database has no user tables
 yet (fresh install), when ALLOW_MIGRATE_WITHOUT_BACKUP=true (dev data only; logs a WARNING), or when
 the backup marker (settings.backup_marker_path, written by scripts/backup.ps1 / backup.sh) shows a
-backup of THIS server (same system_identifier) in its current state (same applied versions) taken
-less than 24 h ago. `status` never checks the marker.
+backup of THIS server (same system_identifier) and database (same name) in its current state (same
+applied versions), taken less than 24 h ago (and not in the future), and its dump (a plain file name
+next to the marker) exists and is not empty. `status` never checks the marker.
 
 Because the runner owns the transaction, a migration file must not contain transaction control
 (BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT, SAVEPOINT, RELEASE, PREPARE TRANSACTION)
@@ -284,6 +285,23 @@ async def _backup_marker_problem(conn: asyncpg.Connection, marker_path: Path, ap
     if str(marker.get('system_identifier', '')).strip() != here:
         return (f'the last backup ({marker.get("dump", "?")}) is of another database server '
                 f'(system_identifier {marker.get("system_identifier")!r}, this one is {here})')
+    try:
+        this_db = await conn.fetchval('SELECT current_database()')
+    except asyncpg.PostgresError as exc:
+        return f"cannot read this connection's database name: {exc}"
+    if marker.get('database') != this_db:
+        return (f'the last backup ({marker.get("dump", "?")}) is of database {marker.get("database")!r}, '
+                f'this one is {this_db!r}')
+    dump = marker.get('dump')
+    if not isinstance(dump, str) or not dump or dump in ('.', '..') or any(c in dump for c in '/\\:') \
+            or '..' in dump:
+        return f'backup marker dump {dump!r} is not a plain file name'
+    dump_path = marker_path.parent / dump
+    try:
+        if not dump_path.is_file() or dump_path.stat().st_size == 0:
+            return f'the dump named by the backup marker ({dump_path}) is missing or empty'
+    except OSError as exc:
+        return f'the dump named by the backup marker ({dump_path}) cannot be read: {exc}'
     marked = marker.get('applied')
     if not isinstance(marked, list) or sorted(str(v) for v in marked) != sorted(applied):
         return (f'the last backup ({marker.get("dump", "?")}) was taken with applied migrations {marked!r}, '

@@ -322,3 +322,23 @@ def test_old_container_without_inspect_information_is_left_alone(kind, project, 
     assert _backups(res) == [] and not _old_stopped(res), res.calls
     assert not any('up -d' in c for c in res.calls)
     assert DRY not in res.out
+
+
+# ── B18: pip failures are reported (not fatal), stderr from native calls never aborts ─
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.parametrize('kind', KINDS)
+def test_failing_pip_install_warns_and_the_start_continues(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0', pip_fail='1')
+    assert res.returncode == 0, res.out
+    assert any(c.startswith('pip ') for c in res.calls)
+    assert 'pip install failed' in res.out
+    assert res.out.index('pip install failed') < res.out.index(DRY)
+
+
+@pytest.mark.Trait("Bug", "B18")
+@pytest.mark.parametrize('kind', KINDS)
+def test_migrate_status_warning_on_stderr_does_not_abort(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='10', migrate_warn='1')
+    assert res.returncode == 0, res.out
+    assert len(_backups(res)) == 1 and DRY in res.out

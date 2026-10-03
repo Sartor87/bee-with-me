@@ -44,10 +44,10 @@ cd "$ROOT"
 step "Using project folder: $ROOT"
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value.
+# " # comment" are not part of the value; a leading `export ` is accepted.
 env_value() {
   local line value
-  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -185,7 +185,10 @@ if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
 fi
 
 step 'Installing/checking backend dependencies'
-"$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/backend/requirements.txt"
+if ! "$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/backend/requirements.txt"; then
+    # Offline laptops still start with what is installed; a missing package shows up when the backend starts.
+    warn 'pip install failed (offline?) - continuing with the packages already in .venv.'
+fi
 
 # -- Database migrations: back up first if any are pending ---------------------------
 if [[ $SKIP_CONTAINERS -eq 0 ]]; then

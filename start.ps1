@@ -43,12 +43,13 @@ function Invoke-Native([scriptblock]$Command) {
     & $Command
 }
 
-# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value.
+# .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
+# a leading `export ` (shell-style .env) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }
@@ -190,7 +191,11 @@ if (-not (Test-Path $venvActivate)) {
 }
 
 Write-Step 'Installing/checking backend dependencies'
-& "$root\.venv\Scripts\python.exe" -m pip install -q -r "$root\backend\requirements.txt"
+Invoke-Native { & "$root\.venv\Scripts\python.exe" -m pip install -q -r "$root\backend\requirements.txt" }
+if ($LASTEXITCODE -ne 0) {
+    # Offline laptops still start with what is installed; a missing package shows up when the backend starts.
+    Write-Warn "pip install failed (exit $LASTEXITCODE; offline?) - continuing with the packages already in .venv."
+}
 
 # -- Database migrations: back up first if any are pending ---------------------
 if (-not $SkipContainers) {
@@ -202,7 +207,7 @@ if (-not $SkipContainers) {
     # BWM_MIGRATE_WAIT_S: shorter deadline for the script tests (backend/tests/test_scripts_behaviour.py)
     if ($env:BWM_MIGRATE_WAIT_S -match '^\d+$') { $migDeadline = (Get-Date).AddSeconds([int]$env:BWM_MIGRATE_WAIT_S) }
     while ($true) {
-        & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status
+        Invoke-Native { & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status }
         $migExit = $LASTEXITCODE
         if ($migExit -ne 3 -or (Get-Date) -gt $migDeadline) { break }
         Write-Warn 'Database not reachable yet - retrying in 3 s'
