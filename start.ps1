@@ -59,6 +59,26 @@ function Read-DotEnv([string]$Path) {
     return $vars
 }
 
+# A folder path in one comparable form: / separators, no trailing /, WSL /mnt/<drive>/... as
+# <drive>:/..., case-insensitive (Windows).
+function ConvertTo-ComparablePath([string]$Path) {
+    if (-not $Path) { return '' }
+    $p = $Path.Trim() -replace '\\', '/'
+    if ($p -match '^/mnt/([a-zA-Z])(/.*)?$') { $p = "$($matches[1]):$($matches[2])" }
+    return $p.TrimEnd('/').ToLowerInvariant()
+}
+
+# Does the old compose-project-"docker" container belong to this folder? Its compose working_dir is
+# <root>\docker or its data mount is <root>\data\pgdata. Missing information counts as "not ours".
+function Test-OldContainerIsOurs([string]$Id) {
+    $wd = (Invoke-Native { & $engine inspect --format '{{ index .Config.Labels `com.docker.compose.project.working_dir` }}' $Id 2>$null } | Out-String).Trim()
+    $mnt = (Invoke-Native { & $engine inspect --format '{{range .Mounts}}{{if eq .Destination `/var/lib/postgresql/data`}}{{.Source}}{{end}}{{end}}' $Id 2>$null } | Out-String).Trim()
+    if ($wd -eq '<no value>') { $wd = '' }
+    $ours = ($wd -and (ConvertTo-ComparablePath $wd) -eq (ConvertTo-ComparablePath "$root\docker")) -or
+            ($mnt -and (ConvertTo-ComparablePath $mnt) -eq (ConvertTo-ComparablePath "$root\data\pgdata"))
+    return [pscustomobject]@{ Ours = [bool]$ours; WorkingDir = $wd; Mount = $mnt }
+}
+
 if (-not (Test-Path $ProjectPath)) {
     throw "Project folder not found: $ProjectPath`nPass the real location with -ProjectPath, e.g.:`n  powershell -ExecutionPolicy Bypass -File .\start.ps1 -ProjectPath 'C:\path\to\bee-with-me'"
 }
@@ -97,9 +117,26 @@ if (-not $SkipContainers) {
     # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
     # same port and, on the base file, the same data folder. Back that database up, then stop the old
     # project (no -v: data\pgdata stays and the new project reuses it), before the new one starts.
+    # Only when that container belongs to THIS folder: another folder's copy or another app's "docker"
+    # project is never stopped (see Test-OldContainerIsOurs).
     $oldDb = Invoke-Native { & $engine ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' } | Select-Object -First 1
     $oldDump = $null
     if ($oldDb) {
+        $old = Test-OldContainerIsOurs $oldDb
+        if (-not $old.Ours) {
+            $wd = if ($old.WorkingDir) { $old.WorkingDir } else { 'unknown' }
+            $mnt = if ($old.Mount) { $old.Mount } else { 'unknown' }
+            throw ("A database container of compose project 'docker' (container $oldDb) is running, but it does not`n" +
+                   "belong to this folder ($root): it is from another folder or another app`n" +
+                   "(working_dir '$wd', data '$mnt'). It probably holds port 5432, so nothing was stopped and`n" +
+                   "Bee With Me is not started. If it is an older Bee With Me install whose data you want here, back`n" +
+                   "it up, stop it yourself, then start this one and restore the dump:`n" +
+                   "  powershell -ExecutionPolicy Bypass -File `"$root\scripts\backup.ps1`" -Container $oldDb -OutDir `"$root\data\backups`"`n" +
+                   "  $engine stop $oldDb`n" +
+                   "  powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
+                   "  then, with the backend stopped: powershell -ExecutionPolicy Bypass -File `"$root\scripts\restore.ps1`" `"$root\data\backups\<the new dump>`"`n" +
+                   "Otherwise stop that app (or move one of them to another port) and start again.")
+        }
         Write-Step "Found the database of an older install (compose project 'docker', container $oldDb): backing it up, then stopping it"
         try { & "$root\scripts\backup.ps1" -OutDir "$root\data\backups" -Container $oldDb }
         catch { throw 'Backup of the old database failed - not continuing; the old install is left running.' + " $($_.Exception.Message)" }

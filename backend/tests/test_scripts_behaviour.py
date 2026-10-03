@@ -106,6 +106,8 @@ def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, **
         'BWM_STUB_LOG': log.as_posix(),
         'BWM_STUB_PYTHON': Path(sys.executable).as_posix(),
         'BWM_STUB_MIGRATE_EXITS': migrate,
+        # Git Bash would rewrite /mnt/... values into C:/Program Files/Git/mnt/... for the native stub
+        'MSYS2_ENV_CONV_EXCL': 'BWM_STUB_',
     })
     if wait is not None:
         env['BWM_MIGRATE_WAIT_S'] = str(wait)
@@ -201,7 +203,8 @@ def test_database_coming_up_late_is_retried_then_backed_up(kind, project, tmp_pa
 @pytest.mark.Trait("Bug", "B12")
 @pytest.mark.parametrize('kind', KINDS)
 def test_old_docker_project_is_backed_up_and_stopped_before_compose_up(kind, project, tmp_path):
-    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123')
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=str(project / 'docker'))
     assert res.returncode == 0, res.out
     backups = _backups(res)
     flag = '-Container olddb123' if kind == 'ps' else '--container olddb123'
@@ -217,7 +220,8 @@ def test_old_docker_project_is_backed_up_and_stopped_before_compose_up(kind, pro
 @pytest.mark.Trait("Bug", "B12")
 @pytest.mark.parametrize('kind', KINDS)
 def test_old_project_backup_failure_leaves_it_running(kind, project, tmp_path):
-    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123', backup_fail='1')
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123', backup_fail='1',
+               old_workdir=str(project / 'docker'))
     assert res.returncode != 0
     assert not any(' down' in c for c in res.calls if c.startswith('engine '))
     assert not any('up -d' in c for c in res.calls)
@@ -231,7 +235,8 @@ def test_old_podman_machine_volume_stops_with_restore_steps(project, tmp_path):
     kind = 'ps' if (os.name == 'nt' and PS_EXE) else 'sh'
     if kind == 'sh' and (BASH is None or os.name != 'nt'):
         pytest.skip('podman-machine mode needs Windows (or macOS)')
-    res = _run(kind, project, tmp_path, engine='podman', migrate='0', old_db='olddb123')
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0', old_db='olddb123',
+               old_workdir=str(project / 'docker'), old_mount='/var/lib/containers/storage/volumes/docker_pgdata/_data')
     assert res.returncode != 0
     assert DRY not in res.out
     assert 'docker_pgdata' in res.out and 'restore.' in res.out and 'beewithme_stub.dump' in res.out
@@ -245,3 +250,75 @@ def test_engine_warning_on_stderr_does_not_abort(kind, project, tmp_path):
     res = _run(kind, project, tmp_path, migrate='0', info_warn='1')
     assert res.returncode == 0, res.out
     assert DRY in res.out
+
+
+# ── B17: only an old install of THIS folder is backed up and stopped ──────────
+
+def _old_stopped(res):
+    return any(' compose -p docker -f ' in c and c.rstrip().endswith('down') for c in res.calls)
+
+
+def _wsl_form(path):
+    """C:/Users/x -> /mnt/c/Users/x (how podman machine records a Windows folder)."""
+    p = Path(path).as_posix()
+    return f'/mnt/{p[0].lower()}{p[2:]}' if len(p) > 1 and p[1] == ':' else p
+
+
+def _variants(project):
+    """working_dir spellings that all mean <project>/docker."""
+    base = str(project / 'docker')
+    out = [base, base + os.sep]
+    if os.name == 'nt':
+        out += [base.upper(), base.replace(os.sep, '/') + '/', _wsl_form(base)]
+    return out
+
+
+@pytest.mark.Trait("Bug", "B17")
+@pytest.mark.parametrize('kind', KINDS)
+@pytest.mark.parametrize('variant', range(5))
+def test_old_container_of_this_folder_by_working_dir_is_backed_up_and_stopped(kind, variant, project, tmp_path):
+    variants = _variants(project)
+    if variant >= len(variants):
+        pytest.skip('Windows-only path spelling')
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=variants[variant], old_mount='/somewhere/else')
+    assert res.returncode == 0, res.out
+    assert _backups(res) and _old_stopped(res), res.calls
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B17")
+@pytest.mark.parametrize('kind', KINDS)
+def test_old_container_of_this_folder_by_data_mount_is_backed_up_and_stopped(kind, project, tmp_path):
+    mount = str(project / 'data' / 'pgdata')
+    if os.name == 'nt':
+        mount = _wsl_form(mount) + '/'
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir='/home/other/app/docker', old_mount=mount)
+    assert res.returncode == 0, res.out
+    assert _backups(res) and _old_stopped(res), res.calls
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B17")
+@pytest.mark.parametrize('kind', KINDS)
+def test_old_container_of_another_folder_is_left_alone_with_instructions(kind, project, tmp_path):
+    other = tmp_path / 'other-app'
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=str(other / 'docker'), old_mount=str(other / 'data' / 'pgdata'))
+    assert res.returncode != 0
+    assert _backups(res) == [] and not _old_stopped(res), res.calls
+    assert not any('up -d' in c for c in res.calls)
+    assert DRY not in res.out
+    flag = '-Container olddb123' if kind == 'ps' else '--container olddb123'
+    assert flag in res.out and 'restore.' in res.out and 'another folder' in res.out, res.out
+
+
+@pytest.mark.Trait("Bug", "B17")
+@pytest.mark.parametrize('kind', KINDS)
+def test_old_container_without_inspect_information_is_left_alone(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123')
+    assert res.returncode != 0
+    assert _backups(res) == [] and not _old_stopped(res), res.calls
+    assert not any('up -d' in c for c in res.calls)
+    assert DRY not in res.out

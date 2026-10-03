@@ -125,6 +125,13 @@ and the new project reuses it. With the Podman-machine override the old data is 
 the backend and prints the restore command for the backup it just took
 (`scripts/restore.ps1 '<dump>'` / `./scripts/restore.sh <dump>`); run it, then start again. The old
 volume is left in place until you remove it yourself.
+This happens only when the old container belongs to **this folder**: its compose `working_dir` label
+is `<this folder>/docker` or its data mount is `<this folder>/data/pgdata` (compared without regard to
+`\` vs `/`, a trailing slash, letter case on Windows, or the WSL `/mnt/<drive>/…` form). A project
+`docker` from another folder (for example a copy of the app installed elsewhere) or from another app
+is never backed up or stopped: the start script stops instead and prints the backup command
+(`-Container <id>` / `--container <id>`), the stop command and the restore command to move that data
+here yourself.
 
 **Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
 `podman compose -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`

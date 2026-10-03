@@ -59,6 +59,32 @@ env_value() {
   printf '%s' "${value:-$2}"
 }
 
+# A folder path in one comparable form: / separators, no trailing /, WSL /mnt/<drive>/... as
+# <drive>:/..., Git Bash /c/... via cygpath; case-insensitive on Windows (only the drive letter elsewhere).
+norm_path() {
+    local p
+    p="$(printf '%s' "$1" | tr '\\' '/')"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) [[ "$p" == /* && ! "$p" =~ ^/mnt/[a-zA-Z](/|$) ]] && p="$(cygpath -m "$p")" ;;
+    esac
+    while [[ "$p" == */ ]]; do p="${p%/}"; done
+    if [[ "$p" =~ ^/mnt/([a-zA-Z])(/.*)?$ ]]; then p="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"; fi
+    if [[ "$p" =~ ^([a-zA-Z]):(.*)$ ]]; then p="${BASH_REMATCH[1],,}:${BASH_REMATCH[2]}"; fi
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) p="${p,,}" ;; esac
+    printf '%s' "$p"
+}
+
+# 0 when the old compose-project-"docker" container $1 belongs to this folder: its compose working_dir
+# is <root>/docker or its data mount is <root>/data/pgdata. Missing information counts as "not ours".
+old_container_is_ours() {
+    OLD_WORKDIR="$("$ENGINE" inspect --format '{{ index .Config.Labels `com.docker.compose.project.working_dir` }}' "$1" 2>/dev/null | tr -d '\r' || true)"
+    OLD_MOUNT="$("$ENGINE" inspect --format '{{range .Mounts}}{{if eq .Destination `/var/lib/postgresql/data`}}{{.Source}}{{end}}{{end}}' "$1" 2>/dev/null | tr -d '\r' || true)"
+    [[ "$OLD_WORKDIR" == "<no value>" ]] && OLD_WORKDIR=""
+    if [[ -n "$OLD_WORKDIR" && "$(norm_path "$OLD_WORKDIR")" == "$(norm_path "$ROOT/docker")" ]]; then return 0; fi
+    if [[ -n "$OLD_MOUNT" && "$(norm_path "$OLD_MOUNT")" == "$(norm_path "$ROOT/data/pgdata")" ]]; then return 0; fi
+    return 1
+}
+
 # Returns 0 once something is listening on localhost:$1 (bash /dev/tcp - no nc needed)
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
@@ -100,8 +126,21 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
     # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
     # same port and, on the base file, the same data folder. Back that database up, then stop the old
     # project (no -v: data/pgdata stays and the new project reuses it), before the new one starts.
+    # Only when that container belongs to THIS folder: another folder's copy or another app's "docker"
+    # project is never stopped (see old_container_is_ours).
     OLD_DB="$("$ENGINE" ps -q --filter 'label=com.docker.compose.project=docker' --filter 'label=com.docker.compose.service=db' | head -n1)"
     OLD_DUMP=""
+    if [[ -n "$OLD_DB" ]] && ! old_container_is_ours "$OLD_DB"; then
+        die "A database container of compose project 'docker' (container $OLD_DB) is running, but it does not
+belong to this folder ($ROOT): it is from another folder or another app
+(working_dir '${OLD_WORKDIR:-unknown}', data '${OLD_MOUNT:-unknown}'). It probably holds port 5432, so
+nothing was stopped and Bee With Me is not started. If it is an older Bee With Me install whose data
+you want here, back it up, stop it yourself, then start this one and restore the dump:
+  \"$ROOT/scripts/backup.sh\" --container $OLD_DB \"$ROOT/data/backups\"
+  $ENGINE stop $OLD_DB
+  \"$ROOT/start.sh\"   then, with the backend stopped:   \"$ROOT/scripts/restore.sh\" \"$ROOT/data/backups/<the new dump>\"
+Otherwise stop that app (or move one of them to another port) and start again."
+    fi
     if [[ -n "$OLD_DB" ]]; then
         step "Found the database of an older install (compose project 'docker', container $OLD_DB): backing it up, then stopping it"
         "$ROOT/scripts/backup.sh" --container "$OLD_DB" "$ROOT/data/backups" \
