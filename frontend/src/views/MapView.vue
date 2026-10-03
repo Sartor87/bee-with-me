@@ -47,12 +47,21 @@
       <button :class="['bm-btn', { active: measureOn }]" @click="toggleMeasure">
         {{ t('map.measure') }}
       </button>
-      <button v-if="isAdmin" :class="['bm-btn', { active: hqMode }]" @click="toggleHQMode">
+      <button v-if="isAdmin" :class="['bm-btn', { active: hqMode }]" :disabled="!settingsReady" @click="toggleHQMode">
         {{ hqLocation ? t('map.hqMove') : t('map.hqSet') }}
       </button>
-      <button v-if="isAdmin && hqLocation" class="bm-btn bm-btn-danger" @click="clearHQ">
+      <button v-if="isAdmin && hqLocation && !hqClearAsk" class="bm-btn bm-btn-danger" @click="hqClearAsk = true">
         {{ t('map.hqClear') }}
       </button>
+      <span v-if="isAdmin && hqLocation && hqClearAsk" class="bm-hq-confirm" role="alertdialog">
+        <span>{{ t('map.hqClearConfirm') }}</span>
+        <button class="bm-btn bm-btn-danger" @click="clearHQ">{{ t('map.hqClearYes') }}</button>
+        <button class="bm-btn" @click="hqClearAsk = false">{{ t('map.hqClearCancel') }}</button>
+      </span>
+      <span v-if="settingsFailed" class="bm-hq-note" role="status">
+        {{ t('map.settingsUnavailable') }}
+        <button class="bm-btn" @click="loadSettings">{{ t('map.settingsRetry') }}</button>
+      </span>
       <span v-if="hqError" class="bm-hq-error" role="alert">{{ t('map.hqSaveFailed') }}</span>
       <button
         v-for="name in FIRE_LAYER_BUTTONS" :key="name"
@@ -335,6 +344,20 @@ const isAdmin    = computed(() => authStore.user?.role === 'admin')
 const hqLocation = computed(() => settingsStore.hq)
 const hqMode     = ref(false)
 const hqError    = ref(false)
+const hqClearAsk = ref(false)       // the Clear HQ confirmation is showing
+const settingsFailed = ref(false)   // settings could not be loaded: HQ is unknown, not absent
+const settingsReady  = computed(() => !!settingsStore.settings)
+
+async function loadSettings() {
+  settingsFailed.value = false
+  try {
+    await settingsStore.fetchSettings()
+  } catch {
+    settingsFailed.value = true
+    return
+  }
+  await settingsStore.migrateLocalHQ()   // handles role and failures itself
+}
 
 async function saveHQ(action) {
   hqError.value = false
@@ -435,16 +458,15 @@ onMounted(async () => {
   const m = map()
   if (m) m.on('moveend', scheduleWeatherFetch)
 
-  // HQ comes from the database. A local copy from before the move is uploaded once (admin).
-  try {
-    await settingsStore.fetchSettings()
-    await settingsStore.migrateLocalHQ(isAdmin.value)
-  } catch { /* HQ stays undrawn; the map and live data do not depend on it */ }
+  // HQ comes from the database. A failure shows an amber note with a retry; the map and live
+  // data do not depend on it.
+  await loadSettings()
 
   tickTimer = setInterval(() => { nowTick.value = Date.now() }, 10_000)
 })
 
 // Redraw only when the point moves, not on every settings save.
+watch(hqLocation, (v) => { if (!v) hqClearAsk.value = false })
 watch(() => hqLocation.value && `${hqLocation.value.lat},${hqLocation.value.lon}`,
   () => setHQ(hqLocation.value), { immediate: true })
 
@@ -509,6 +531,7 @@ function toggleHQMode() {
   setHQPlacementMode(hqMode.value)
 }
 function clearHQ() {
+  hqClearAsk.value = false
   saveHQ(() => settingsStore.clearHQ())
   if (hqMode.value) {
     hqMode.value = false
@@ -792,6 +815,10 @@ function batClass(v) {
 .bm-btn-danger { color: #f87171; border-color: rgba(248,113,113,0.35); }
 .bm-btn-danger:hover { background: rgba(248,113,113,0.1); color: #fca5a5; }
 .bm-hq-error { font-size: 12px; color: var(--warning); align-self: center; }
+.bm-hq-confirm, .bm-hq-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; align-self: center; }
+.bm-hq-confirm { color: var(--text); }
+.bm-hq-note { color: var(--warning); }
+.bm-btn:disabled { opacity: .45; cursor: not-allowed; }
 .bm-row-break { flex-basis: 100%; height: 0; }
 
 /* Fire data freshness. Neutral when live, muted when quiet or unknown, amber (never red)

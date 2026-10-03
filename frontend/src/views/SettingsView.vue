@@ -118,13 +118,15 @@
         </button>
         <span v-if="saveState === 'ok'" class="msg-ok" role="status">{{ t('settings.saved') }}</span>
         <span v-if="saveState === 'fail'" class="msg-warn" role="alert">{{ t('settings.saveFailed') }}</span>
+        <span v-if="saveState === 'stale'" class="msg-warn" role="alert">{{ t('settings.saveStale') }}</span>
+        <span v-if="saveState === 'missing'" class="msg-warn" role="alert">{{ t('settings.saveMissing') }}</span>
       </div>
     </form>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
@@ -139,10 +141,8 @@ const saveState = ref('')
 const confirmOff = ref([])
 const confirmClear = ref(false)
 
-function reset() {
-  const s = store.settings
-  if (!s) return
-  draft.value = {
+function draftFrom(s) {
+  return {
     is_hq_alarm_enabled: s.is_hq_alarm_enabled,
     is_rescuer_alarm_enabled: s.is_rescuer_alarm_enabled,
     hq_radius_km: mToKm(s.hq_radius_m),
@@ -150,14 +150,40 @@ function reset() {
     alarm_max_age_hours: s.alarm_max_age_hours,
     repeat_minutes: s.repeat_minutes,
   }
+}
+
+// What the form showed when it last matched the server. A field still equal to it is
+// untouched, so a fresher server value may replace it; an edited field is never overwritten.
+let baseline = null
+
+function reset() {
+  const s = store.settings
+  if (!s) return
+  baseline = draftFrom(s)
+  draft.value = { ...baseline }
   confirmOff.value = []
+}
+
+// After any refetch: adopt the server's values for untouched fields only, so a slow load
+// cannot wipe what the operator already typed, and a stale page cannot carry old values back.
+function adoptFresh() {
+  const s = store.settings
+  if (!s) return
+  if (!baseline) { reset(); return }
+  const fresh = draftFrom(s)
+  const next = { ...draft.value }
+  for (const k of Object.keys(fresh)) {
+    if (Object.is(draft.value[k], baseline[k])) next[k] = fresh[k]
+  }
+  baseline = fresh
+  draft.value = next
 }
 
 async function load() {
   loadFailed.value = false
   try {
     await store.fetchSettings()
-    reset()
+    adoptFresh()
   } catch {
     loadFailed.value = true
   }
@@ -186,12 +212,33 @@ const dirty = computed(() => {
   return Object.entries(patch.value).some(([k, v]) => s[k] !== v)
 })
 
-function onSave() {
-  if (!valid.value || !dirty.value) return
+// The decision to ask "turn off alarms?" is made against the server's state right now, not
+// against what this page loaded earlier (BP-02): a stale page cannot switch an alarm off
+// without the confirmation.
+async function onSave() {
+  if (busy.value || !valid.value || !dirty.value) return
   saveState.value = ''
+  busy.value = true
+  try {
+    await store.fetchSettings()
+  } catch {
+    busy.value = false
+    saveState.value = 'fail'
+    return
+  }
+  adoptFresh()
+  busy.value = false
+  await nextTick()
+  if (!valid.value || !dirty.value) return
   const off = alarmsTurnedOff(store.settings, patch.value)
   if (off.length) { confirmOff.value = off; return }
   doSave()
+}
+
+function failState(err) {
+  if (err === 'settings_stale') return 'stale'
+  if (err === 'settings_missing') return 'missing'
+  return 'fail'
 }
 
 async function doSave() {
@@ -201,8 +248,11 @@ async function doSave() {
     await store.saveSettings(patch.value)
     reset()
     saveState.value = 'ok'
-  } catch {
-    saveState.value = 'fail'
+  } catch (err) {
+    const state = failState(err)
+    if (state === 'stale') adoptFresh()   // the store already reloaded; keep the operator's edits
+    await nextTick()                      // the draft watcher clears saveState; set it after
+    saveState.value = state
   } finally {
     busy.value = false
   }
@@ -214,8 +264,8 @@ async function onClearHQ() {
   try {
     await store.clearHQ()
     confirmClear.value = false
-  } catch {
-    saveState.value = 'fail'
+  } catch (err) {
+    saveState.value = failState(err)
   } finally {
     busy.value = false
   }

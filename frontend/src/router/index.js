@@ -21,7 +21,7 @@ const routes = [
 
 const router = createRouter({ history: createWebHistory(), routes })
 
-router.beforeEach(async (to) => {
+export async function guard(to) {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.token) return '/login'
   // The guard is the control; hiding the nav item is cosmetic. The API enforces the role too.
@@ -33,6 +33,8 @@ router.beforeEach(async (to) => {
     }
     if (auth.user?.role !== 'admin') return '/map'
   }
-})
+}
+
+router.beforeEach(guard)
 
 export default router
