@@ -13,6 +13,7 @@ from .version import APP_VERSION
 from .database import close_pool, get_pool, init_pool
 from .db.migrate import BackupRequiredError, MigrationError, migrate
 from .routers import auth, devices, export, fire, groups, locations, users, ws, test, hardware_reader, tiles
+from .routers import settings as settings_router
 from .ws import manager
 from .fire import poller as fire_poller
 from .fire.repository import prune_fire_data
@@ -188,6 +189,7 @@ app.include_router(devices.router)
 app.include_router(locations.router)
 app.include_router(export.router)
 app.include_router(fire.router)
+app.include_router(settings_router.router)
 app.include_router(ws.router)
 if settings.enable_test_endpoints:
     app.include_router(test.router)
