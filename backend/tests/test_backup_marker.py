@@ -61,7 +61,7 @@ def scratch_in_container(request):
                        capture_output=True, timeout=120)
 
 
-def _run_backup(kind, s, tmp_path, out_dir):
+def _run_backup(kind, s, tmp_path, out_dir, out_arg=None):
     proj = tmp_path / 'proj'
     (proj / 'scripts').mkdir(parents=True, exist_ok=True)
     for rel in ('scripts/backup.ps1', 'scripts/backup.sh'):
@@ -74,9 +74,9 @@ def _run_backup(kind, s, tmp_path, out_dir):
     env = script_env(CONTAINER_ENGINE=s['engine'], POSTGRES_DB=s['name'])
     if kind == 'ps':
         cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / 'backup.ps1'),
-               '-OutDir', str(out_dir)]
+               '-OutDir', out_arg or str(out_dir)]
     else:
-        cmd = [BASH, (proj / 'scripts' / 'backup.sh').as_posix(), out_dir.as_posix()]
+        cmd = [BASH, (proj / 'scripts' / 'backup.sh').as_posix(), out_arg or out_dir.as_posix()]
     res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=600)
     res.out = res.stdout + res.stderr
     return res
@@ -195,4 +195,17 @@ def test_backup_ps1_created_folder_has_no_foreign_rule_warning(scratch_in_contai
     res = _run_backup('ps', scratch_in_container, tmp_path, out_dir)
     assert res.returncode == 0, res.out
     assert 'also grants access to' not in res.out, res.out
+    assert _acl(out_dir) == (True, {_my_sid()})
+
+
+# ── B20: a dump folder given with a space and a trailing separator is still restricted ────────
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_backup_ps1_restricts_an_out_dir_with_a_space_and_a_trailing_separator(scratch_in_container, tmp_path):
+    out_dir = tmp_path / 'my backups'
+    res = _run_backup('ps', scratch_in_container, tmp_path, out_dir, out_arg=str(out_dir) + os.sep)
+    assert res.returncode == 0, res.out
+    _check_marker(scratch_in_container, out_dir)
     assert _acl(out_dir) == (True, {_my_sid()})

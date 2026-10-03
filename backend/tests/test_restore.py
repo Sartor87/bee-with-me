@@ -364,4 +364,141 @@ def test_plain_sql_hint_warns_to_restore_only_own_dumps(rel):
     start = text.index('plain SQL dump')
     hint = text[start:text.index('nothing restored', start)]
     assert 'only restore dumps you made yourself' in hint.lower(), hint
-    assert 'superuser' in hint and '\!' in hint, hint
+    assert 'superuser' in hint and '\\!' in hint, hint
+
+
+# ── B20: restore failures after the pre-check leave the live database as it was ─────────────
+
+import threading  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _restore_side_dbs(s):
+    """Side databases <db>_restore_* left behind (not the kept <db>_before_restore_* ones)."""
+    return s['databases'](s['name'] + '_restore_')
+
+
+def _change_after_backup(name):
+    async def go():
+        conn = await asyncpg.connect(**_dsn(name), timeout=5)
+        try:
+            await conn.execute('CREATE TABLE fire_after_backup (id int)')
+            await conn.execute("DELETE FROM users WHERE username = 'roundtrip'")
+        finally:
+            await conn.close()
+    asyncio.run(go())
+
+
+def _still_after_backup_state(name):
+    assert asyncio.run(_query(name, "SELECT count(*) FROM users WHERE username = 'roundtrip'")) == 0
+    assert asyncio.run(_query(name, "SELECT to_regclass('public.fire_after_backup') IS NOT NULL")) is True
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.parametrize('kind', SCRIPT_KINDS)
+def test_truncated_dump_that_lists_but_does_not_restore_leaves_the_live_database(kind, scratch, tmp_path):
+    name = scratch['name']
+    # enough uncompressed table data that cutting the file in half hits the data, not the table of contents
+    scratch['ex']('psql', '-v', 'ON_ERROR_STOP=1', '-U', scratch['user'], '-d', name, '-c',
+                  'CREATE TABLE big AS SELECT g, md5(g::text) AS m FROM generate_series(1, 200000) g')
+    in_container = f'/tmp/{name}.z0.dump'
+    full = tmp_path / f'{name}.full.dump'
+    try:
+        scratch['ex']('pg_dump', '-Fc', '-Z0', '-U', scratch['user'], '-d', name, '-f', in_container)
+        res = subprocess.run([scratch['engine'], 'cp', f'{scratch["container"]}:{in_container}', str(full)],
+                             capture_output=True, text=True, timeout=300)
+        assert res.returncode == 0, res.stderr
+    finally:
+        scratch['ex']('rm', '-f', in_container, check=False)
+    data = full.read_bytes()
+    truncated = tmp_path / f'{name}.truncated.dump'
+    truncated.write_bytes(data[:len(data) // 2])
+    _change_after_backup(name)
+
+    res = _run_restore(kind, scratch, tmp_path, truncated)
+    assert res.returncode != 0, res.out
+    assert 'pg_restore failed' in res.out, res.out          # it got past the pg_restore -l check
+    assert 'was not changed' in res.out, res.out
+    _still_after_backup_state(name)
+    assert asyncio.run(_query(name, 'SELECT count(*) FROM big')) == 200000
+    assert scratch['databases'](name + '_') == []          # no _restore_ and no _before_restore_ database
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.parametrize('kind', SCRIPT_KINDS)
+def test_connection_held_to_the_live_database_does_not_stop_the_swap(kind, scratch, tmp_path):
+    name = scratch['name']
+    dump = _dump_out(scratch, tmp_path, 'c')
+    _change_after_backup(name)
+    loop = asyncio.new_event_loop()
+    try:
+        held = loop.run_until_complete(asyncpg.connect(**_dsn(name), timeout=5))
+        assert loop.run_until_complete(held.fetchval('SELECT 1')) == 1
+        res = _run_restore(kind, scratch, tmp_path, dump)
+        assert res.returncode == 0, res.out
+        with pytest.raises((asyncpg.PostgresError, asyncpg.InterfaceError, ConnectionError, OSError)):
+            loop.run_until_complete(held.fetchval('SELECT 1'))   # terminated by the swap
+        loop.run_until_complete(held.close(timeout=5))
+    finally:
+        loop.close()
+    assert asyncio.run(_query(name, "SELECT count(*) FROM users WHERE username = 'roundtrip'")) == 1
+    assert len(scratch['databases'](name + '_before_restore_')) == 1
+    assert _restore_side_dbs(scratch) == []
+
+
+def _occupy_kept_names(name, stop, made, ready):
+    """Keeps <name>_before_restore_<UTC stamp> taken for the next few seconds until `stop` is set,
+    so the restore script's swap (rename the live database to that name) fails."""
+    async def worker():
+        conn = await asyncpg.connect(**_dsn('postgres'), timeout=5)
+        try:
+            while not stop.is_set():
+                now = datetime.now(timezone.utc)
+                for s in range(-1, 6):
+                    db = f'{name}_before_restore_{(now + timedelta(seconds=s)).strftime("%Y%m%d%H%M%S")}'
+                    if db not in made:
+                        await conn.execute(f'CREATE DATABASE {db} TEMPLATE template0')
+                        made.append(db)
+                ready.set()
+                await asyncio.sleep(0.2)
+        finally:
+            await conn.close()
+    try:
+        asyncio.run(worker())
+    finally:
+        ready.set()
+
+
+async def _drop_all(dbs):
+    conn = await asyncpg.connect(**_dsn('postgres'), timeout=5)
+    try:
+        for db in dbs:
+            await conn.execute(f'DROP DATABASE IF EXISTS {db} WITH (FORCE)')
+    finally:
+        await conn.close()
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.parametrize('kind', SCRIPT_KINDS)
+def test_failed_swap_leaves_the_live_database_and_drops_the_side_database(kind, scratch, tmp_path):
+    name = scratch['name']
+    dump = _dump_out(scratch, tmp_path, 'c')
+    _change_after_backup(name)
+    stop, ready, made = threading.Event(), threading.Event(), []
+    worker = threading.Thread(target=_occupy_kept_names, args=(name, stop, made, ready), daemon=True)
+    worker.start()
+    try:
+        assert ready.wait(30) and made, 'could not create the blocking databases'
+        res = _run_restore(kind, scratch, tmp_path, dump)
+    finally:
+        stop.set()
+        worker.join(30)
+        asyncio.run(_drop_all(list(made)))
+    assert res.returncode != 0, res.out
+    assert 'Swapping the restored database in failed' in res.out and 'was not changed' in res.out, res.out
+    _still_after_backup_state(name)
+    assert scratch['databases'](name + '_') == []   # side database dropped; nothing kept
+

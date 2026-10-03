@@ -88,7 +88,7 @@ def project(tmp_path, _venv, postgres_port):
     return proj
 
 
-def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, **stub):
+def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, args=(), **stub):
     log = tmp_path / 'calls.log'
     log.write_text('', encoding='utf-8')
     if kind == 'sh':
@@ -115,9 +115,10 @@ def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, **
         env['BWM_MIGRATE_WAIT_S'] = str(wait)
     env.update({f'BWM_STUB_{k.upper()}': v for k, v in stub.items()})
     if kind == 'ps':
-        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(project / 'start.ps1'), '-NoBrowser']
+        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(project / 'start.ps1'), '-NoBrowser',
+               *args]
     else:
-        cmd = [BASH, (project / 'start.sh').as_posix(), '--no-browser']
+        cmd = [BASH, (project / 'start.sh').as_posix(), '--no-browser', *args]
     res = subprocess.run(cmd, cwd=project, env=env, capture_output=True, text=True, timeout=300)
     res.calls = log.read_text(encoding='utf-8').splitlines()
     res.out = res.stdout + res.stderr
@@ -344,3 +345,30 @@ def test_migrate_status_warning_on_stderr_does_not_abort(kind, project, tmp_path
     res = _run(kind, project, tmp_path, migrate='10', migrate_warn='1')
     assert res.returncode == 0, res.out
     assert len(_backups(res)) == 1 and DRY in res.out
+
+
+# ── B20: a trailing or doubled separator in the project path or the old working_dir still matches ─
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.parametrize('kind', KINDS)
+def test_project_path_with_a_trailing_separator_still_matches_the_old_container(kind, project, tmp_path):
+    if kind == 'ps':
+        args = ('-ProjectPath', str(project) + '\\')
+    else:
+        args = ('--project-path', project.as_posix() + '/')
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=str(project / 'docker'), old_mount='/somewhere/else', args=args)
+    assert res.returncode == 0, res.out
+    assert _backups(res) and _old_stopped(res), res.calls
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.parametrize('kind', KINDS)
+def test_old_working_dir_with_doubled_separators_still_matches(kind, project, tmp_path):
+    doubled = str(project).replace(os.sep, os.sep * 2) + os.sep * 2 + 'docker'
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=doubled, old_mount='/somewhere/else')
+    assert res.returncode == 0, res.out
+    assert _backups(res) and _old_stopped(res), res.calls
+    assert DRY in res.out

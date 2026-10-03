@@ -161,10 +161,10 @@ async def test_valid_marker_written_with_bom_and_numeric_id_applies(scratch_conn
     # Windows PowerShell 5.1 may write a BOM; the id may come back as a number
     await _with_data(scratch_conn)
     guard.parent.mkdir(parents=True)
-    payload = {'system_identifier': int(await _sysid(scratch_conn)), 'applied': [], 'dump': 'x.dump',
+    payload = {'system_identifier': int(await _sysid(scratch_conn)), 'applied': [], 'dump': 'beewithme_x.dump',
                'created_at': datetime.now(timezone.utc).isoformat(),
                'database': await scratch_conn.fetchval('SELECT current_database()')}
-    (guard.parent / 'x.dump').write_bytes(b'PGDMP stub dump')
+    (guard.parent / 'beewithme_x.dump').write_bytes(b'PGDMP stub dump')
     guard.write_bytes(b'\xef\xbb\xbf' + json.dumps(payload).encode('utf-8'))
     assert await m.migrate(scratch_conn, migs) == ['0001']
 
@@ -342,3 +342,43 @@ async def test_marker_dump_name_with_a_path_is_refused(scratch_conn, guard, migs
     with pytest.raises(m.BackupRequiredError, match='dump'):
         await m.migrate(scratch_conn, migs)
     assert not await _a_exists(scratch_conn)
+
+
+# ── B20: the marker's dump is a backup-script dump: beewithme_*.dump that starts with PGDMP ─────
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize('dump', ['last-backup.json', 'notes.dump', 'beewithme_x.sql', 'beewithme_.dump',
+                                  'beewithme_x.dump.partial'])
+async def test_marker_dump_that_is_not_a_backup_dump_name_is_refused(scratch_conn, guard, migs, dump):
+    await _with_data(scratch_conn)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[], dump=dump)
+    if dump == 'last-backup.json':
+        assert guard.stat().st_size > 0   # the marker itself: an existing, non-empty file
+    with pytest.raises(m.BackupRequiredError, match='dump'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize('dump_bytes', [b'-- PostgreSQL database dump\n', b'PGDM', b'not a dump at all'],
+                         ids=['plain-sql', 'short', 'text'])
+async def test_marker_dump_that_is_not_a_custom_format_dump_is_refused(scratch_conn, guard, migs, dump_bytes):
+    await _with_data(scratch_conn)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[], dump_bytes=dump_bytes)
+    with pytest.raises(m.BackupRequiredError, match='PGDMP|custom-format'):
+        await m.migrate(scratch_conn, migs)
+    assert not await _a_exists(scratch_conn)
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_marker_with_a_real_looking_dump_applies(scratch_conn, guard, migs):
+    await _with_data(scratch_conn)
+    _marker(guard, system_identifier=await _sysid(scratch_conn), applied=[],
+            dump='beewithme_2026-10-02_101500_ab12cd.dump')
+    assert await m.migrate(scratch_conn, migs) == ['0001']

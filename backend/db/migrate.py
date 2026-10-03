@@ -58,6 +58,8 @@ EXIT_UNREACHABLE = 3   # could not connect (Postgres down or still starting): wo
 EXIT_PENDING = 10
 
 BACKUP_MAX_AGE = timedelta(hours=24)
+# Names the backup scripts give their dumps: beewithme_<stamp>_<suffix>.dump
+_BACKUP_DUMP_NAME = re.compile(r'beewithme_[A-Za-z0-9_-]+\.dump')
 
 _NAME_RE = re.compile(r'^(\d{4})_[a-z0-9_]+\.sql$')
 _UP_RE = re.compile(r'^--\s*migrate:up\s*$', re.MULTILINE)
@@ -296,12 +298,18 @@ async def _backup_marker_problem(conn: asyncpg.Connection, marker_path: Path, ap
     if not isinstance(dump, str) or not dump or dump in ('.', '..') or any(c in dump for c in '/\\:') \
             or '..' in dump:
         return f'backup marker dump {dump!r} is not a plain file name'
+    if not _BACKUP_DUMP_NAME.fullmatch(dump):
+        return f'backup marker dump {dump!r} is not a backup-script dump (beewithme_*.dump)'
     dump_path = marker_path.parent / dump
     try:
         if not dump_path.is_file() or dump_path.stat().st_size == 0:
             return f'the dump named by the backup marker ({dump_path}) is missing or empty'
+        with dump_path.open('rb') as fh:
+            magic = fh.read(5)
     except OSError as exc:
         return f'the dump named by the backup marker ({dump_path}) cannot be read: {exc}'
+    if magic != b'PGDMP':
+        return f'the dump named by the backup marker ({dump_path}) is not a pg_dump custom-format dump (no PGDMP header)'
     marked = marker.get('applied')
     if not isinstance(marked, list) or sorted(str(v) for v in marked) != sorted(applied):
         return (f'the last backup ({marker.get("dump", "?")}) was taken with applied migrations {marked!r}, '

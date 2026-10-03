@@ -34,6 +34,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
+if ($Keep -lt 1) { throw "Keep must be a whole number of at least 1 (got $Keep): it is how many dumps stay in the folder." }
+# A trailing separator would reach icacls as an escaped quote ("E:\my backups\" -> E:\my backups").
+$OutDir = $OutDir.TrimEnd('\', '/')
+if (-not $OutDir -or $OutDir -match '^[A-Za-z]:\z') { $OutDir += '\.' }   # a drive root: E:\.
+
 # Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop' as soon
 # as stderr is redirected (a warning from podman with exit code 0 would abort the backup). Native calls
 # run through this with 'Continue' (local to the function); the script decides on $LASTEXITCODE.

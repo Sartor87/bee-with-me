@@ -82,6 +82,9 @@ $user = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } elseif ($envVars['POSTGRE
 if ($db -cnotmatch '^[a-z_][a-z0-9_]*\z' -or $db.Length -gt 33) {
     throw "POSTGRES_DB '$db': restore supports database names of up to 33 lower-case letters, digits and _ only."
 }
+if (@('postgres', 'template0', 'template1') -contains $db) {
+    throw "POSTGRES_DB '$db' is a system database - restore never replaces it. Set POSTGRES_DB to the app's database."
+}
 $restoreDb = "${db}_restore_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 
 # Find the db container by its compose labels (project + service), like the backup script.

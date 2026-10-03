@@ -778,3 +778,95 @@ def test_readme_backup_section_has_the_security_notes():
     section = text[text.index('#### Backup and restore'):text.index('### 3. Backend')]
     assert 'trusted' in section and 'superuser' in section
     assert 'FAT' in section and 'exFAT' in section and 'creates the folder' in section
+
+
+# ── B20: .env keys in any case, KEEP >= 1, no restore over a system database ──────────────────
+
+_ENV_LOWER_SAMPLE = 'postgres_db=lower_db\r\nPostgres_User=mixed_user\r\n'
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.parametrize('rel', SH_SCRIPTS)
+def test_sh_dotenv_keys_match_in_any_case(rel, tmp_path):
+    fn = _block(_read(rel), 'env_value() {')
+    (tmp_path / '.env').write_bytes(_ENV_LOWER_SAMPLE.encode('utf-8'))
+    probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
+             'printf "DB=[%s] USER=[%s]\\n" "$(env_value POSTGRES_DB DEFAULT)" "$(env_value POSTGRES_USER DEFAULT)"\n')
+    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert 'DB=[lower_db] USER=[mixed_user]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')
+@pytest.mark.parametrize('rel', PS_SCRIPTS)
+def test_ps_dotenv_keys_match_in_any_case(rel, tmp_path):
+    fn = _block(_read(rel), 'function Read-DotEnv')
+    (tmp_path / '.env').write_bytes(_ENV_LOWER_SAMPLE.encode('utf-8'))
+    script = tmp_path / 'probe.ps1'
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + fn +
+                      f"$v = Read-DotEnv '{tmp_path / '.env'}'\n"
+                      "\"DB=[$($v['POSTGRES_DB'])] USER=[$($v['POSTGRES_USER'])]\"\n", encoding='utf-8')
+    res = subprocess.run([_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert 'DB=[lower_db] USER=[mixed_user]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B20")
+def test_readme_says_an_empty_environment_variable_counts_as_unset():
+    text = _read('README.md')
+    section = text[text.index('#### Backup and restore'):text.index('### 3. Backend')]
+    assert 'empty string' in section and 'unset' in section
+
+
+def _run_script(kind, rel, tmp_path, args, **env_overrides):
+    """Runs a copy of a backup/restore script with an engine that does not exist (stops before any container)."""
+    from backend.tests.script_env import script_env
+    proj = tmp_path / 'proj'
+    (proj / 'scripts').mkdir(parents=True, exist_ok=True)
+    ext = 'ps1' if kind == 'ps' else 'sh'
+    src = ROOT / f'{rel}.{ext}'
+    dst = proj / f'{rel}.{ext}'
+    dst.write_text(src.read_text(encoding='utf-8').replace('\r\n', '\n'), encoding='utf-8',
+                   newline='\n' if kind == 'sh' else '\r\n')
+    env = script_env(CONTAINER_ENGINE='bwm-no-such-engine', **env_overrides)
+    if kind == 'ps':
+        cmd = [_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(dst), *args]
+    else:
+        cmd = [shutil.which('bash'), dst.as_posix(), *args]
+    res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=120)
+    res.out = res.stdout + res.stderr
+    return res
+
+
+_KINDS = [
+    pytest.param('ps', marks=pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')),
+    pytest.param('sh', marks=pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')),
+]
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.parametrize('kind', _KINDS)
+@pytest.mark.parametrize('keep', ['0', '-1', 'abc'])
+def test_backup_refuses_a_keep_below_one(kind, keep, tmp_path):
+    out_dir = tmp_path / 'out'
+    args = ['-OutDir', str(out_dir), '-Keep', keep] if kind == 'ps' else [out_dir.as_posix(), keep]
+    res = _run_script(kind, 'scripts/backup', tmp_path, args)
+    assert res.returncode != 0, res.out
+    if not (kind == 'ps' and keep == 'abc'):   # PowerShell's own [int] binding refuses 'abc'
+        assert 'Keep must be a whole number of at least 1' in res.out, res.out
+    assert not out_dir.exists()   # refused before anything was created
+
+
+@pytest.mark.Trait("Bug", "B20")
+@pytest.mark.parametrize('kind', _KINDS)
+@pytest.mark.parametrize('db', ['postgres', 'template0', 'template1'])
+def test_restore_refuses_a_system_database(kind, db, tmp_path):
+    dump = tmp_path / 'stub.dump'
+    dump.write_bytes(b'PGDMP not really')
+    args = [str(dump), '-Yes', '-Force'] if kind == 'ps' else ['--yes', '--force', dump.as_posix()]
+    res = _run_script(kind, 'scripts/restore', tmp_path, args, POSTGRES_DB=db, POSTGRES_USER='rescuer')
+    assert res.returncode != 0, res.out
+    assert 'system database' in res.out, res.out

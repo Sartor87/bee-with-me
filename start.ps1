@@ -60,11 +60,11 @@ function Read-DotEnv([string]$Path) {
     return $vars
 }
 
-# A folder path in one comparable form: / separators, no trailing /, WSL /mnt/<drive>/... as
-# <drive>:/..., case-insensitive (Windows).
+# A folder path in one comparable form: / separators (repeated ones collapsed), no trailing /,
+# WSL /mnt/<drive>/... as <drive>:/..., case-insensitive (Windows).
 function ConvertTo-ComparablePath([string]$Path) {
     if (-not $Path) { return '' }
-    $p = $Path.Trim() -replace '\\', '/'
+    $p = ($Path.Trim() -replace '\\', '/') -replace '/{2,}', '/'
     if ($p -match '^/mnt/([a-zA-Z])(/.*)?$') { $p = "$($matches[1]):$($matches[2])" }
     return $p.TrimEnd('/').ToLowerInvariant()
 }
@@ -83,7 +83,9 @@ function Test-OldContainerIsOurs([string]$Id) {
 if (-not (Test-Path $ProjectPath)) {
     throw "Project folder not found: $ProjectPath`nPass the real location with -ProjectPath, e.g.:`n  powershell -ExecutionPolicy Bypass -File .\start.ps1 -ProjectPath 'C:\path\to\bee-with-me'"
 }
+# Resolve-Path keeps a trailing separator ('D:\bee-with-me\'); "$root\docker" must not get two.
 $root = (Resolve-Path $ProjectPath).Path
+if ($root -notmatch '^[A-Za-z]:\\\z') { $root = $root.TrimEnd('\', '/') }
 Set-Location $root
 Write-Step "Using project folder: $root"
 

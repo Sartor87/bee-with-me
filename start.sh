@@ -44,10 +44,11 @@ cd "$ROOT"
 step "Using project folder: $ROOT"
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value; a leading `export ` is accepted.
+# " # comment" are not part of the value; a leading `export ` is accepted; keys match in any case
+# (like the backend's settings and the PowerShell scripts).
 env_value() {
   local line value
-  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  line="$(grep -iE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -59,11 +60,12 @@ env_value() {
   printf '%s' "${value:-$2}"
 }
 
-# A folder path in one comparable form: / separators, no trailing /, WSL /mnt/<drive>/... as
-# <drive>:/..., Git Bash /c/... via cygpath; case-insensitive on Windows (only the drive letter elsewhere).
+# A folder path in one comparable form: / separators (repeated ones collapsed), no trailing /, WSL
+# /mnt/<drive>/... as <drive>:/..., Git Bash /c/... via cygpath; case-insensitive on Windows (only the
+# drive letter elsewhere).
 norm_path() {
     local p
-    p="$(printf '%s' "$1" | tr '\\' '/')"
+    p="$(printf '%s' "$1" | tr '\\' '/' | tr -s '/')"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) [[ "$p" == /* && ! "$p" =~ ^/mnt/[a-zA-Z](/|$) ]] && p="$(cygpath -m "$p")" ;;
     esac

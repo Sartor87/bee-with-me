@@ -28,6 +28,11 @@ while [ $# -gt 0 ]; do
 done
 OUT_DIR="${POSITIONAL[0]:-$ROOT/backups}"
 KEEP="${POSITIONAL[1]:-30}"
+if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [ "$((10#$KEEP))" -lt 1 ]; then
+  echo "Keep must be a whole number of at least 1 (got '$KEEP'): it is how many dumps stay in the folder." >&2
+  exit 1
+fi
+KEEP="$((10#$KEEP))"
 
 # Container engine: Podman first, Docker as the alternative. Override with CONTAINER_ENGINE.
 ENGINE="${CONTAINER_ENGINE:-}"
@@ -39,10 +44,11 @@ if [ -z "$ENGINE" ]; then
 fi
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value; a leading `export ` is accepted.
+# " # comment" are not part of the value; a leading `export ` is accepted; keys match in any case
+# (like the backend's settings and the PowerShell scripts).
 env_value() {
   local line value
-  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  line="$(grep -iE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
