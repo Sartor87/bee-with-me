@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.tests.script_env import script_env
+
 ROOT = Path(__file__).resolve().parents[2]
 STUBS = Path(__file__).resolve().parent / 'stubs'
 PS_EXE = shutil.which('powershell') or shutil.which('pwsh')
@@ -98,7 +100,7 @@ def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, **
         stub_dir = posix
     else:
         stub_dir = STUBS / 'win'
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('BWM_', 'CONTAINER_ENGINE'))}
+    env = {k: v for k, v in script_env().items() if not k.startswith('BWM_')}
     env.update({
         'PATH': str(stub_dir) + os.pathsep + os.environ.get('PATH', ''),
         'CONTAINER_ENGINE': engine,

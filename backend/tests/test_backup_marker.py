@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import subprocess
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import pytest
 
 from backend.config import settings
 from backend.db import migrate as m
+from backend.tests.script_env import scratch_db_name, script_env
 from backend.tests.test_restore import _container, _dsn, _engine
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,7 +40,7 @@ def scratch_in_container(request):
     if container is None:
         pytest.skip('no bee-with-me db container is running')
     user = settings.postgres_user
-    name = f'bwm_test_{uuid.uuid4().hex[:12]}'
+    name = scratch_db_name()
 
     def psql(database, sql):
         res = subprocess.run([engine, 'exec', container, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', user,
@@ -70,8 +70,8 @@ def _run_backup(kind, s, tmp_path, out_dir):
     # .env names another database: the process environment must win (pydantic-settings precedence)
     (proj / '.env').write_text(f'export POSTGRES_DB=not_this_one\nexport POSTGRES_USER={s["user"]}\n',
                                encoding='utf-8')
-    env = {k: v for k, v in os.environ.items() if k not in ('CONTAINER_ENGINE', 'POSTGRES_USER')}
-    env.update(CONTAINER_ENGINE=s['engine'], POSTGRES_DB=s['name'])
+    # Every POSTGRES_* of the test process is dropped; POSTGRES_USER comes from the temp .env.
+    env = script_env(CONTAINER_ENGINE=s['engine'], POSTGRES_DB=s['name'])
     if kind == 'ps':
         cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / 'backup.ps1'),
                '-OutDir', str(out_dir)]
@@ -157,3 +157,42 @@ def test_backup_ps1_restricts_an_existing_unrestricted_dump_folder(foreign, scra
         assert _acl(out_dir)[0] is False and 'not restricted' in res.out
     else:
         assert _acl(out_dir) == (True, {_my_sid()})
+
+
+# ── B19: rules for other accounts on a restricted dump folder are named, not removed ──────────
+
+_USERS_SID = 'S-1-5-32-545'   # BUILTIN\Users
+
+
+@pytest.mark.Trait("Bug", "B19")
+@pytest.mark.db
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+@pytest.mark.parametrize('extra', [False, True], ids=['only-me', 'users-can-read'])
+def test_backup_ps1_warns_about_foreign_rules_on_a_restricted_folder(extra, scratch_in_container, tmp_path):
+    out_dir = tmp_path / 'backups'
+    out_dir.mkdir()
+    grants = ['/grant:r', f'*{_my_sid()}:(OI)(CI)F'] + (['/grant', f'*{_USERS_SID}:(OI)(CI)R'] if extra else [])
+    res = subprocess.run(['icacls', str(out_dir), '/inheritance:r', *grants], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stdout + res.stderr
+    res = _run_backup('ps', scratch_in_container, tmp_path, out_dir)
+    assert res.returncode == 0, res.out
+    _check_marker(scratch_in_container, out_dir)
+    protected, sids = _acl(out_dir)
+    assert protected
+    if extra:
+        assert 'also grants access to' in res.out and _USERS_SID in res.out, res.out
+        assert _USERS_SID in sids   # named, not removed
+    else:
+        assert 'also grants access to' not in res.out, res.out
+        assert sids == {_my_sid()}
+
+
+@pytest.mark.Trait("Bug", "B19")
+@pytest.mark.db
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_backup_ps1_created_folder_has_no_foreign_rule_warning(scratch_in_container, tmp_path):
+    out_dir = tmp_path / 'fresh-backups'
+    res = _run_backup('ps', scratch_in_container, tmp_path, out_dir)
+    assert res.returncode == 0, res.out
+    assert 'also grants access to' not in res.out, res.out
+    assert _acl(out_dir) == (True, {_my_sid()})

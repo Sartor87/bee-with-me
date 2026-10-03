@@ -94,6 +94,23 @@ if (-not (Test-Path $OutDir)) {
         }
     }
 }
+# Rules for anyone but this user, SYSTEM and Administrators on a restricted folder are not removed
+# (they may be deliberate), but named, so a dump folder others can read does not go unnoticed.
+function Write-ForeignAclWarning([string]$Dir) {
+    $acl = try { Get-Acl -LiteralPath $Dir } catch { $null }
+    if (-not $acl -or -not $acl.AreAccessRulesProtected) { return }   # unrestricted: warned about above
+    $allowed = @($mySid, 'S-1-5-18', 'S-1-5-32-544')
+    $foreign = @(foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($rule.IdentityReference)" }
+        if ($allowed -notcontains $sid) { "$($rule.IdentityReference) ($sid)" }
+    }) | Select-Object -Unique
+    if (@($foreign).Count -gt 0) {
+        Write-Host ("WARNING: $Dir also grants access to: $(@($foreign) -join ', '). The dumps in it hold personal " +
+                    'data: remove those rules unless they are meant to be there.') -ForegroundColor Yellow
+    }
+}
+Write-ForeignAclWarning $OutDir
 $OutDir = (Resolve-Path $OutDir).Path   # .NET file calls below don't follow PowerShell's location
 
 # Random suffix: two runs in the same second never share a file name (here or in the container).
@@ -119,7 +136,7 @@ $inContainer = "/tmp/beewithme_${stamp}_$suffix.dump"
 # this is and which migrations it has. The backend migrates only after a backup of this exact state.
 $createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $systemId = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' } | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+$') { throw "Could not read the database's system_identifier ($systemId)" }
+if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+\z') { throw "Could not read the database's system_identifier ($systemId)" }
 $database = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT current_database()' } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $database) { throw "Could not read the database name ($database)" }
 $hasMigrations = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc "SELECT to_regclass('public.schema_migrations') IS NOT NULL" } | Out-String).Trim()
@@ -139,7 +156,7 @@ try {
     Invoke-Native { & $engine exec $container pg_restore -l $inContainer } | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'pg_restore -l cannot read the dump - not kept as a backup' }
     $expected = (Invoke-Native { & $engine exec $container stat -c %s $inContainer } | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $expected -notmatch '^\d+$') { throw 'Could not read the dump size in the container' }
+    if ($LASTEXITCODE -ne 0 -or $expected -notmatch '^\d+\z') { throw 'Could not read the dump size in the container' }
     Invoke-Native { & $engine cp "${container}:$inContainer" $partial }
     if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
     if ((Get-Item -LiteralPath $partial).Length -ne [int64]$expected) { throw "$engine cp copied an incomplete dump" }

@@ -16,6 +16,7 @@ import pytest
 
 from backend.config import settings
 from backend.db import migrate as m
+from backend.tests.script_env import scratch_db_name, script_env
 
 # The restore steps, exactly as both restore scripts run them inside the container.
 DROP_CMD = ['dropdb', '--if-exists', '--force']
@@ -59,7 +60,7 @@ async def test_restore_round_trip_removes_later_objects_and_keeps_the_backed_up_
     if container is None:
         pytest.skip('no bee-with-me db container is running')
     user = settings.postgres_user
-    name = f'bwm_test_{uuid.uuid4().hex[:12]}'
+    name = scratch_db_name()
     in_container = f'/tmp/{name}.dump'
 
     def ex(*args):
@@ -147,7 +148,7 @@ def scratch(request):
     if container is None:
         pytest.skip('no bee-with-me db container is running')
     user = settings.postgres_user
-    name = f'bwm_test_{uuid.uuid4().hex[:12]}'
+    name = scratch_db_name()
 
     def ex(*args, check=True):
         res = subprocess.run([engine, 'exec', container, *args], capture_output=True, text=True, timeout=300)
@@ -213,8 +214,8 @@ def _run_restore(kind, s, tmp_path, dump):
         text = (ROOT / rel).read_text(encoding='utf-8').replace('\r\n', '\n')
         (proj / rel).write_text(text, encoding='utf-8', newline='\n' if rel.endswith('.sh') else '\r\n')
     (proj / '.env').write_text(f'POSTGRES_DB={s["name"]}\nPOSTGRES_USER={s["user"]}\n', encoding='utf-8')
-    env = {k: v for k, v in os.environ.items() if k != 'CONTAINER_ENGINE'}
-    env['CONTAINER_ENGINE'] = s['engine']
+    # No POSTGRES_* of the test process reaches the script (it would win over .env): only the scratch names.
+    env = script_env(CONTAINER_ENGINE=s['engine'], POSTGRES_DB=s['name'], POSTGRES_USER=s['user'])
     if kind == 'ps':
         cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / 'restore.ps1'),
                str(dump), '-Yes', '-Force']
@@ -277,3 +278,90 @@ def test_valid_dump_is_swapped_in_and_the_old_database_is_kept(kind, scratch, tm
     assert asyncio.run(_query(kept[0], "SELECT to_regclass('public.fire_after_backup') IS NOT NULL")) is True
     assert asyncio.run(_query(kept[0], "SELECT count(*) FROM users WHERE username = 'roundtrip'")) == 0
     assert scratch['databases'](name + '_restore_') == []
+
+
+# ── B19: an exported POSTGRES_* in the test process never reaches the scripts; name and hint hardening ─
+
+def _drop_like(s, prefix):
+    for db in s['databases'](prefix):
+        subprocess.run([s['engine'], 'exec', s['container'], *DROP_CMD, '-U', s['user'], db],
+                       capture_output=True, timeout=120)
+
+
+@pytest.mark.Trait("Bug", "B19")
+@pytest.mark.db
+@pytest.mark.parametrize('kind', SCRIPT_KINDS)
+def test_exported_postgres_db_never_reaches_the_restore_script(kind, scratch, tmp_path, monkeypatch):
+    name = scratch['name']
+    dump = _dump_out(scratch, tmp_path, 'c')
+    monkeypatch.setenv('POSTGRES_DB', 'not_this_one')
+    monkeypatch.setenv('POSTGRES_USER', 'not_this_user')
+    try:
+        res = _run_restore(kind, scratch, tmp_path, dump)
+        assert res.returncode == 0, res.out
+        assert scratch['databases']('not_this_one') == []          # nothing else was created or renamed
+        assert len(scratch['databases'](name + '_before_restore_')) == 1   # only the scratch DB was swapped
+        assert asyncio.run(_query(name, "SELECT count(*) FROM users WHERE username = 'roundtrip'")) == 1
+    finally:
+        _drop_like(scratch, 'not_this_one')
+
+
+@pytest.mark.Trait("Bug", "B19")
+def test_scratch_database_name_is_never_the_configured_database(monkeypatch):
+    from backend.tests import script_env as se
+    name = se.scratch_db_name()
+    assert name.startswith('bwm_test_') and name != settings.postgres_db
+    monkeypatch.setattr(se.uuid, 'uuid4', lambda: uuid.UUID(int=0))
+    monkeypatch.setattr(settings, 'postgres_db', 'bwm_test_' + '0' * 12)
+    with pytest.raises(AssertionError, match='configured database'):
+        se.scratch_db_name()
+
+
+@pytest.mark.Trait("Bug", "B19")
+def test_script_env_drops_every_postgres_variable(monkeypatch):
+    from backend.tests.script_env import script_env
+    monkeypatch.setenv('POSTGRES_DB', 'rescuer_locator')
+    monkeypatch.setenv('POSTGRES_PASSWORD', 'x')
+    monkeypatch.setenv('CONTAINER_ENGINE', 'docker')
+    env = script_env(POSTGRES_DB='bwm_test_abc', CONTAINER_ENGINE='podman')
+    assert {k for k in env if k.upper().startswith('POSTGRES_')} == {'POSTGRES_DB'}
+    assert env['POSTGRES_DB'] == 'bwm_test_abc' and env['CONTAINER_ENGINE'] == 'podman'
+
+
+def _run_name_check(kind, tmp_path, db):
+    """Runs a restore script up to its database-name check (a stub dump, an engine that does not exist)."""
+    proj = tmp_path / 'proj'
+    (proj / 'scripts').mkdir(parents=True, exist_ok=True)
+    for rel in ('scripts/restore.ps1', 'scripts/restore.sh'):
+        text = (ROOT / rel).read_text(encoding='utf-8').replace('\r\n', '\n')
+        (proj / rel).write_text(text, encoding='utf-8', newline='\n' if rel.endswith('.sh') else '\r\n')
+    dump = tmp_path / 'stub.dump'
+    dump.write_bytes(b'PGDMP not really')
+    from backend.tests.script_env import script_env
+    env = script_env(POSTGRES_DB=db, POSTGRES_USER='rescuer', CONTAINER_ENGINE='bwm-no-such-engine')
+    if kind == 'ps':
+        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / 'restore.ps1'),
+               str(dump), '-Yes', '-Force']
+    else:
+        cmd = [BASH, (proj / 'scripts' / 'restore.sh').as_posix(), '--yes', '--force', dump.as_posix()]
+    res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=120)
+    res.out = res.stdout + res.stderr
+    return res
+
+
+@pytest.mark.Trait("Bug", "B19")
+@pytest.mark.parametrize('kind', SCRIPT_KINDS)
+def test_database_name_with_a_trailing_newline_is_rejected(kind, tmp_path):
+    res = _run_name_check(kind, tmp_path, 'abc\n')
+    assert res.returncode != 0, res.out
+    assert 'restore supports database names' in res.out, res.out
+
+
+@pytest.mark.Trait("Bug", "B19")
+@pytest.mark.parametrize('rel', ['scripts/restore.ps1', 'scripts/restore.sh'])
+def test_plain_sql_hint_warns_to_restore_only_own_dumps(rel):
+    text = (ROOT / rel).read_text(encoding='utf-8')
+    start = text.index('plain SQL dump')
+    hint = text[start:text.index('nothing restored', start)]
+    assert 'only restore dumps you made yourself' in hint.lower(), hint
+    assert 'superuser' in hint and '\!' in hint, hint

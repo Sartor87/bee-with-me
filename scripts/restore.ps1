@@ -79,7 +79,7 @@ $user = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } elseif ($envVars['POSTGRE
 
 # The swap renames databases in SQL: plain lower-case names only, short enough for the
 # _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.
-if ($db -cnotmatch '^[a-z_][a-z0-9_]*$' -or $db.Length -gt 33) {
+if ($db -cnotmatch '^[a-z_][a-z0-9_]*\z' -or $db.Length -gt 33) {
     throw "POSTGRES_DB '$db': restore supports database names of up to 33 lower-case letters, digits and _ only."
 }
 $restoreDb = "${db}_restore_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -134,7 +134,8 @@ try {
         if ((Get-FileMagic $Dump) -ne 'PGDMP') {
             Write-Host ("$Dump is not a pg_dump custom-format dump - it looks like a plain SQL dump (beewithme_*.sql from`n" +
                         "1.7.1 or earlier), which pg_restore cannot read. Load it into a scratch database with psql, check it,`n" +
-                        "then turn it into a .dump and restore that with this script:`n" +
+                        "then turn it into a .dump and restore that with this script. Only restore dumps you made yourself:`n" +
+                        "psql runs as the database superuser and runs any \! shell command in the file.`n" +
                         "  $engine exec $container createdb -U $user -O $user ${db}_from_sql`n" +
                         "  Get-Content -Raw `"$Dump`" | $engine exec -i $container psql -v ON_ERROR_STOP=1 -1 -U $user -d ${db}_from_sql`n" +
                         "  $engine exec $container pg_dump -Fc -U $user -d ${db}_from_sql -f /tmp/from_sql.dump`n" +

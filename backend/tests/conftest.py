@@ -168,7 +168,8 @@ async def _scratch_db(request):
         if request.config.getoption('--require-db'):
             pytest.fail(f'PostgreSQL required but not reachable: {exc}')
         pytest.skip(f'PostgreSQL not reachable: {exc}')
-    name = f'bwm_test_{uuid.uuid4().hex[:12]}'
+    from backend.tests.script_env import scratch_db_name
+    name = scratch_db_name()
     try:
         await admin.execute(f'CREATE DATABASE {name}')
         yield _dsn(name)

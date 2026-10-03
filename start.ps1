@@ -152,7 +152,7 @@ if (-not $SkipContainers) {
 
     Write-Step 'Waiting for Postgres to accept connections'
     $pgPort = (Read-DotEnv "$root\.env")['POSTGRES_PORT']
-    if ($pgPort -notmatch '^\d+$') { $pgPort = '5432' }
+    if ($pgPort -notmatch '^\d+\z') { $pgPort = '5432' }
 
     $deadline = (Get-Date).AddSeconds(60)
     $ready = $false
@@ -205,7 +205,7 @@ if (-not $SkipContainers) {
     # without the backup this check exists for. Any other code is final at once.
     $migDeadline = (Get-Date).AddSeconds(90)
     # BWM_MIGRATE_WAIT_S: shorter deadline for the script tests (backend/tests/test_scripts_behaviour.py)
-    if ($env:BWM_MIGRATE_WAIT_S -match '^\d+$') { $migDeadline = (Get-Date).AddSeconds([int]$env:BWM_MIGRATE_WAIT_S) }
+    if ($env:BWM_MIGRATE_WAIT_S -match '^\d+\z') { $migDeadline = (Get-Date).AddSeconds([int]$env:BWM_MIGRATE_WAIT_S) }
     while ($true) {
         Invoke-Native { & "$root\.venv\Scripts\python.exe" -m backend.db.migrate status }
         $migExit = $LASTEXITCODE

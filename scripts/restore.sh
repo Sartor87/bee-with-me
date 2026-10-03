@@ -112,7 +112,8 @@ if ! "$ENGINE" exec "$CONTAINER" pg_restore -l "$IN_CONTAINER" >/dev/null; then
   if [ "$(LC_ALL=C head -c 5 "$DUMP")" != PGDMP ]; then
     echo "$DUMP is not a pg_dump custom-format dump - it looks like a plain SQL dump (beewithme_*.sql from" >&2
     echo "1.7.1 or earlier), which pg_restore cannot read. Load it into a scratch database with psql, check it," >&2
-    echo "then turn it into a .dump and restore that with this script:" >&2
+    echo "then turn it into a .dump and restore that with this script. Only restore dumps you made yourself:" >&2
+    echo 'psql runs as the database superuser and runs any \! shell command in the file.' >&2
     echo "  $ENGINE exec $CONTAINER createdb -U $USER_NAME -O $USER_NAME ${DB}_from_sql" >&2
     echo "  $ENGINE exec -i $CONTAINER psql -v ON_ERROR_STOP=1 -1 -U $USER_NAME -d ${DB}_from_sql < \"$DUMP\"" >&2
     echo "  $ENGINE exec $CONTAINER pg_dump -Fc -U $USER_NAME -d ${DB}_from_sql -f /tmp/from_sql.dump" >&2
