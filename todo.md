@@ -17,6 +17,8 @@
 - [ ] build and compile
 - [ ] think about windows support?
 - [ ] **[SECURITY]** WebSocket endpoint (`/ws`) accepts connections from any client on the network with no authentication — anyone who can reach the server can receive all live position and SOS alert data. maybe (re)introduce JWT authentication? Note: the EFFIS fire feature adds `fire_alert` / `fire_data_updated` messages (rescuer names + distances) to this same unauthenticated channel — TODO: authenticate `/ws` before multi-user use.
+- [ ] **[SECURITY]** stored XSS in the map's tracker tooltip: `frontend/src/composables/useMap.js` (~549-572) builds the tooltip with `innerHTML` from group description, member full name, rank, phone, device name and display label. Anyone who can create or import users/groups can put `<img src=x onerror=...>` in a name; it runs in every operator's browser on hover and can read `token` / `refresh_token` from `localStorage`. Fix in its own PR: build the tooltip as a Vue component (like `FirePopup.vue`) or with DOM nodes + `textContent`, plus a test with an HTML payload in a name. Found by the security review of the EFFIS P2 gate (2026-10-03); pre-existing, not part of the EFFIS PR
+- [ ] add a Content-Security-Policy to `frontend/index.html` (none today; limits the damage of any XSS)
 - [ ] tighten CORS allow_origins=['*'] in main.py
 - [ ] add support for serial devices
 - [ ] orphaned files are not being deleted
