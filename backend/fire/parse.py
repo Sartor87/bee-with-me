@@ -51,11 +51,11 @@ def parse_utc(value) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.strip().replace(' ', 'T', 1))
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):   # '9999-12-31T23:59:59-01:00' overflows on conversion to UTC
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def parse_number(value) -> float | None:
@@ -84,7 +84,15 @@ def _features(collection) -> list:
 def _id(value) -> str | None:
     if value is None or value == '':
         return None
-    return str(value)
+    text = str(value)
+    return None if '\x00' in text else text     # Postgres TEXT rejects NUL: skip the feature
+
+
+def _class(value) -> str | None:
+    """CLASS only as a string (asyncpg rejects other types for TEXT); NUL stripped."""
+    if not isinstance(value, str):
+        return None
+    return value.replace('\x00', '') or None
 
 
 def _dict_parts(feature):
@@ -99,27 +107,30 @@ def parse_hotspots(collection, source: str = 'viirs', now: datetime | None = Non
     now = now or datetime.now(timezone.utc)
     rows, seen, future = [], set(), 0
     for feature in _features(collection):
-        if not isinstance(feature, dict):
+        try:
+            if not isinstance(feature, dict):
+                continue
+            parts = _dict_parts(feature)
+            if parts is None:
+                continue
+            geometry, props = parts
+            coords = geometry.get('coordinates')
+            if geometry.get('type') != 'Point' or not isinstance(coords, list) or len(coords) < 2:
+                continue
+            longitude, latitude = parse_number(coords[0]), parse_number(coords[1])
+            if longitude is None or latitude is None or not in_bbox(latitude, longitude):
+                continue
+            effis_id = _id(props.get('id'))
+            acquired_at = parse_utc(props.get('acq_at'))
+            if effis_id is None or acquired_at is None or effis_id in seen:
+                continue
+            if acquired_at - now > MAX_FUTURE_SKEW:
+                future += 1
+                continue
+            seen.add(effis_id)
+            rows.append(HotspotRow(source, effis_id, acquired_at, latitude, longitude, _class(props.get('CLASS'))))
+        except (ValueError, TypeError, OverflowError):   # last line of defence: skip this feature only
             continue
-        parts = _dict_parts(feature)
-        if parts is None:
-            continue
-        geometry, props = parts
-        coords = geometry.get('coordinates')
-        if geometry.get('type') != 'Point' or not isinstance(coords, list) or len(coords) < 2:
-            continue
-        longitude, latitude = parse_number(coords[0]), parse_number(coords[1])
-        if longitude is None or latitude is None or not in_bbox(latitude, longitude):
-            continue
-        effis_id = _id(props.get('id'))
-        acquired_at = parse_utc(props.get('acq_at'))
-        if effis_id is None or acquired_at is None or effis_id in seen:
-            continue
-        if acquired_at - now > MAX_FUTURE_SKEW:
-            future += 1
-            continue
-        seen.add(effis_id)
-        rows.append(HotspotRow(source, effis_id, acquired_at, latitude, longitude, props.get('CLASS') or None))
     if future:
         logger.warning('dropped %s %s detections dated more than 1 h in the future (clock skew)', future, source)
     return rows
@@ -168,31 +179,34 @@ def _polygons(geometry) -> list | None:
 def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
     rows, seen = [], set()
     for feature in _features(collection):
-        if not isinstance(feature, dict):
+        try:
+            if not isinstance(feature, dict):
+                continue
+            parts = _dict_parts(feature)
+            if parts is None:
+                continue
+            geometry, props = parts
+            polygons = _polygons(geometry)
+            if polygons is None:
+                continue
+            if not any(in_bbox(pos[1], pos[0]) for poly in polygons for ring in poly for pos in ring):
+                continue
+            effis_id = _id(props.get('id'))
+            if effis_id is None or effis_id in seen:
+                continue
+            seen.add(effis_id)
+            rows.append(BurntAreaRow(
+                source=source,
+                effis_id=effis_id,
+                effis_fire_id=_id(props.get('fire_id')),
+                started_at=parse_utc(props.get('initialdate')),
+                ended_at=parse_utc(props.get('finaldate')),
+                area_ha=parse_number(props.get('area')),
+                geometry={'type': geometry['type'],
+                          'coordinates': polygons[0] if geometry['type'] == 'Polygon' else polygons},
+            ))
+        except (ValueError, TypeError, OverflowError):   # last line of defence: skip this feature only
             continue
-        parts = _dict_parts(feature)
-        if parts is None:
-            continue
-        geometry, props = parts
-        polygons = _polygons(geometry)
-        if polygons is None:
-            continue
-        if not any(in_bbox(pos[1], pos[0]) for poly in polygons for ring in poly for pos in ring):
-            continue
-        effis_id = _id(props.get('id'))
-        if effis_id is None or effis_id in seen:
-            continue
-        seen.add(effis_id)
-        rows.append(BurntAreaRow(
-            source=source,
-            effis_id=effis_id,
-            effis_fire_id=_id(props.get('fire_id')),
-            started_at=parse_utc(props.get('initialdate')),
-            ended_at=parse_utc(props.get('finaldate')),
-            area_ha=parse_number(props.get('area')),
-            geometry={'type': geometry['type'],
-                      'coordinates': polygons[0] if geometry['type'] == 'Polygon' else polygons},
-        ))
     return rows
 
 

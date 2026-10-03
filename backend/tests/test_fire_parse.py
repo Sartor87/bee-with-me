@@ -175,3 +175,57 @@ def test_future_detections_are_dropped_and_never_make_a_feed_live(caplog):
     # defence in depth: rows built elsewhere with a far-future time cannot make the feed live either
     row = p.HotspotRow('viirs', 'x', now + timedelta(hours=5), 42, 24, None)
     assert p.upstream_state([row], now) == 'no_recent_detections'
+
+
+@pytest.mark.Trait("Bug", "B27")
+@pytest.mark.parametrize('acq', ['9999-12-31T23:59:59-01:00', '0001-01-01T00:00:00+01:00'])
+def test_parse_utc_overflow_is_none_not_an_exception(acq):
+    assert p.parse_utc(acq) is None
+
+
+@pytest.mark.Trait("Bug", "B27")
+@pytest.mark.parametrize('hostile', [
+    _pt(id_='bad1', acq='9999-12-31T23:59:59-01:00'),
+    _pt(id_='bad2', acq='0001-01-01T00:00:00+01:00'),
+    _pt(id_='bad\x00id'),
+])
+def test_hostile_hotspot_is_skipped_and_the_good_one_survives(hostile):
+    rows = p.parse_hotspots(_fc(_pt(id_='good'), hostile))
+    assert [r.effis_id for r in rows] == ['good']
+
+
+@pytest.mark.Trait("Bug", "B27")
+@pytest.mark.parametrize('cls,expected', [(5, None), ({'x': 1}, None), ([1], None), ('A\x00B', 'AB'), ('7DAYS_2', '7DAYS_2')])
+def test_hotspot_class_must_be_a_string_and_has_no_nul(cls, expected):
+    rows = p.parse_hotspots(_fc(_pt(id_='g', cls=cls)))
+    assert [r.effis_class for r in rows] == [expected]
+
+
+@pytest.mark.Trait("Bug", "B27")
+def test_burnt_area_overflow_dates_become_none_and_the_row_survives():
+    area = _area(id_='a1', initialdate='9999-12-31T23:59:59-01:00', finaldate='0001-01-01T00:00:00+01:00')
+    rows = p.parse_burnt_areas(_fc(_area(id_='good'), area))
+    assert [r.effis_id for r in rows] == ['good', 'a1']
+    assert rows[1].started_at is None and rows[1].ended_at is None
+
+
+@pytest.mark.Trait("Bug", "B27")
+@pytest.mark.parametrize('props', [{'id': 'bad\x00id'}, {'fire_id': 'f\x00x'}])
+def test_burnt_area_with_nul_ids_is_skipped_or_nulled(props):
+    rows = p.parse_burnt_areas(_fc(_area(id_='good'), _area(id_='other', **props)))
+    ids = [r.effis_id for r in rows]
+    assert 'good' in ids and all('\x00' not in (r.effis_id or '') + (r.effis_fire_id or '') for r in rows)
+
+
+@pytest.mark.Trait("Bug", "B27")
+def test_unexpected_per_feature_error_skips_only_that_feature(monkeypatch):
+    real = p.parse_number
+
+    def boom(value):
+        if value == 99.0:
+            raise TypeError('boom')
+        return real(value)
+
+    monkeypatch.setattr(p, 'parse_number', boom)
+    rows = p.parse_hotspots(_fc(_pt(id_='bad', lon=99.0), _pt(id_='good')))
+    assert [r.effis_id for r in rows] == ['good']
