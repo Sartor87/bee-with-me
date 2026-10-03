@@ -14,9 +14,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
-import asyncpg
-import httpx
-
 from ..database import get_pool
 from . import repository
 from .parse import FeedFormatError, parse_burnt_areas, parse_hotspots, upstream_state
@@ -27,6 +24,7 @@ logger = logging.getLogger(__name__)
 REFRESH_INTERVAL_S = 30 * 60
 FIRST_RUN_DELAY_S = 30
 REFRESH_LOCK_KEY = 7_342_101
+FEED_DEADLINE_S = 150   # overall cap per fetch; httpx's timeout is per operation, not per request
 
 after_refresh: Callable[[], None] | None = None   # set by the alarm service (Task 15)
 
@@ -49,13 +47,18 @@ def _utcnow() -> datetime:
 async def _refresh_feed(conn, name, source, parse, upsert, now) -> None:
     state = FEEDS[name]
     try:
-        rows = parse(await source.fetch())
+        try:
+            async with asyncio.timeout(FEED_DEADLINE_S):
+                payload = await source.fetch()
+        except TimeoutError:
+            raise FeedFetchError('%s: no complete response within %s s (deadline)' % (name, FEED_DEADLINE_S))
+        rows = parse(payload)
         async with conn.transaction():
             await upsert(conn, rows)
-    except (FeedFetchError, FeedFormatError, httpx.HTTPError, asyncpg.PostgresError, OSError) as exc:
-        state.last_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the other; CancelledError still propagates
+        state.last_error = str(exc) or type(exc).__name__
         state.upstream_state = 'error'
-        logger.warning('Fire feed %s refresh failed: %s', name, exc)
+        logger.warning('Fire feed %s refresh failed (%s): %s', name, type(exc).__name__, exc)
         return
     state.last_success_at = now()
     state.last_error = None

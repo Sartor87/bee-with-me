@@ -48,11 +48,15 @@ async def _cleanup_old_locations() -> None:
                 )
                 logger.info('Location cleanup: removed %d events older than %d days',
                             deleted or 0, settings.location_retention_days)
+        except Exception as exc:
+            logger.warning('Location cleanup failed: %s', exc)
+        try:
+            async with get_pool().acquire() as conn:
                 pruned = await prune_fire_data(conn)
                 logger.info('Fire data cleanup: removed %d hotspots, %d burnt areas',
                             pruned['fire_hotspots'], pruned['fire_burnt_areas'])
         except Exception as exc:
-            logger.warning('Location cleanup failed: %s', exc)
+            logger.warning('Fire data prune failed: %s', exc)
 
 
 def _warn_insecure_defaults() -> None:

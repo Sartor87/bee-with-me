@@ -125,3 +125,96 @@ async def test_last_seen_at_survives_restart(pool, migrated_conn):
     assert await repository.last_seen_at(migrated_conn, 'fire_hotspots') is not None
     with pytest.raises(ValueError):
         await repository.last_seen_at(migrated_conn, 'users; DROP TABLE users')
+
+
+# ---- B26: per-feed deadline, catch-all per feed, separate fire prune errors ----
+
+class _SlowSource:
+    async def fetch(self):
+        await asyncio.sleep(30)
+
+
+class _RaisingSource:
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def fetch(self):
+        raise self._exc
+
+
+@pytest.mark.Trait("Bug", "B26")
+async def test_slow_feed_hits_deadline_and_other_feed_still_refreshes(pool, migrated_conn, monkeypatch):
+    monkeypatch.setattr(poller, 'FEED_DEADLINE_S', 0.05)
+    await poller.refresh_once(pool, _SlowSource(), FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'error'
+    assert 'deadline' in poller.FEEDS['hotspots'].last_error
+    assert poller.FEEDS['burnt_areas'].upstream_state == 'live'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_burnt_areas') == 1
+
+
+@pytest.mark.Trait("Bug", "B26")
+@pytest.mark.parametrize('exc', [RecursionError('too deep'), ValueError('shape'), TypeError('shape')])
+async def test_unexpected_source_error_is_contained_per_feed(pool, migrated_conn, exc):
+    hs = _RaisingSource(exc)
+    assert await poller.refresh_once(pool, hs, FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'error'
+    assert poller.FEEDS['hotspots'].last_error
+    assert poller.FEEDS['burnt_areas'].upstream_state == 'live'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_burnt_areas') == 1
+
+
+@pytest.mark.Trait("Bug", "B26")
+async def test_cancelled_error_from_source_propagates(pool, migrated_conn, scratch_db):
+    with pytest.raises(asyncio.CancelledError):
+        await poller.refresh_once(pool, _RaisingSource(asyncio.CancelledError()),
+                                  FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    # the advisory lock must have been released on the way out
+    other = await asyncpg.connect(**scratch_db)
+    try:
+        assert await other.fetchval('SELECT pg_try_advisory_lock($1)', poller.REFRESH_LOCK_KEY)
+    finally:
+        await other.close()
+
+
+@pytest.mark.Trait("Bug", "B26")
+async def test_fire_prune_failure_has_own_message_and_location_prune_ran(monkeypatch, caplog):
+    from backend import main
+
+    calls = []
+
+    class _Conn:
+        async def fetchval(self, *a, **k):
+            calls.append('location')
+            return 3
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+
+    async def boom(_conn):
+        raise RuntimeError('fire prune exploded')
+
+    monkeypatch.setattr(main, 'get_pool', lambda: _Pool())
+    monkeypatch.setattr(main, 'prune_fire_data', boom)
+    monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
+    with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):
+        await main._cleanup_old_locations()
+    messages = [r.getMessage() for r in caplog.records]
+    assert calls == ['location']
+    assert any(m.startswith('Location cleanup: removed 3 events') for m in messages)
+    assert any(m == 'Fire data prune failed: fire prune exploded' for m in messages)
+    assert not any('Location cleanup failed' in m for m in messages)
