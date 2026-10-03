@@ -40,3 +40,4 @@
 - [ ] UI for bright daylight: the interface is dark-only; operators also work outdoors in sun — add a daylight / high-contrast mode
 - [ ] keyboard focus is invisible on buttons (no focus ring) — add one
 - [ ] after a restore the previous database is kept as `<db>_before_restore_<time>` (a second copy of all personal data) — remind the operator to drop it, or offer a cleanup command
+- [ ] 7 tests fail when the suite is run from PowerShell (`pytest backend\tests -q`): `backend/tests/test_backup_marker.py` `[ps]` cases (`test_real_backup_writes_a_marker_the_guard_accepts[ps]` and the six `test_backup_ps1_*` ACL tests) stop with `IndexError: list index out of range`; they pass under Git Bash. Find which helper indexes empty output and fix it (bug B23 in the EFFIS plan)
