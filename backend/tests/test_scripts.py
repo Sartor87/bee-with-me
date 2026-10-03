@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from backend.tests.shells import BASH, SKIP_REASON
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ['scripts/backup.ps1', 'scripts/backup.sh', 'start.ps1', 'start.sh']
 
@@ -90,12 +92,12 @@ def test_powershell_scripts_parse(rel):
 
 
 @pytest.mark.Trait("Task", "T5")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 @pytest.mark.parametrize('rel', ['scripts/backup.sh', 'start.sh'])
 def test_bash_scripts_parse(rel):
-    # Use the resolved path: on Windows a bare 'bash' resolves to System32\bash.exe (WSL) first,
-    # which can't read Windows paths.
-    assert subprocess.run([shutil.which('bash'), '-n', str(ROOT / rel)]).returncode == 0
+    # BASH comes from shells.find_bash(): on Windows a bare 'bash' resolves to System32\bash.exe
+    # (WSL) first, which can't read Windows paths, so Git Bash is used instead (B22).
+    assert subprocess.run([BASH, '-n', str(ROOT / rel)]).returncode == 0
 
 
 # ── B4: only this compose project's db container is ever picked ──────────────
@@ -423,9 +425,9 @@ def test_restore_ps1_parses():
 
 
 @pytest.mark.Trait("Bug", "B10")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 def test_restore_sh_parses():
-    assert subprocess.run([shutil.which('bash'), '-n', str(ROOT / 'scripts/restore.sh')]).returncode == 0
+    assert subprocess.run([BASH, '-n', str(ROOT / 'scripts/restore.sh')]).returncode == 0
 
 
 # ── B12: explicit compose project; upgrade from the old project "docker" ─────
@@ -572,14 +574,14 @@ def test_ps_dotenv_parsing_strips_quotes_cr_and_comments(rel, tmp_path):
 
 
 @pytest.mark.Trait("Bug", "B13")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 @pytest.mark.parametrize('rel', SH_SCRIPTS)
 def test_sh_dotenv_parsing_strips_quotes_cr_and_comments(rel, tmp_path):
     fn = _block(_read(rel), 'env_value() {')
     (tmp_path / '.env').write_bytes(_ENV_SAMPLE.encode('utf-8'))
     probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
              ''.join(f'printf "%s=[%s]\\n" {k} "$(env_value {k} DEFAULT)"\n' for k in _ENV_EXPECTED))
-    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([BASH, '-c', probe], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     for key, value in _ENV_EXPECTED.items():
         assert f'{key}=[{value}]' in res.stdout, res.stdout
@@ -700,14 +702,14 @@ def test_ps_dotenv_parsing_accepts_export_lines(rel, tmp_path):
 
 
 @pytest.mark.Trait("Bug", "B18")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 @pytest.mark.parametrize('rel', SH_SCRIPTS)
 def test_sh_dotenv_parsing_accepts_export_lines(rel, tmp_path):
     fn = _block(_read(rel), 'env_value() {')
     (tmp_path / '.env').write_bytes(_ENV_EXPORT_SAMPLE.encode('utf-8'))
     probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
              ''.join(f'printf "%s=[%s]\\n" {k} "$(env_value {k} DEFAULT)"\n' for k in _ENV_EXPORT_EXPECTED))
-    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([BASH, '-c', probe], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     for key, value in _ENV_EXPORT_EXPECTED.items():
         assert f'{key}=[{value}]' in res.stdout, res.stdout
@@ -786,14 +788,14 @@ _ENV_LOWER_SAMPLE = 'postgres_db=lower_db\r\nPostgres_User=mixed_user\r\n'
 
 
 @pytest.mark.Trait("Bug", "B20")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 @pytest.mark.parametrize('rel', SH_SCRIPTS)
 def test_sh_dotenv_keys_match_in_any_case(rel, tmp_path):
     fn = _block(_read(rel), 'env_value() {')
     (tmp_path / '.env').write_bytes(_ENV_LOWER_SAMPLE.encode('utf-8'))
     probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
              'printf "DB=[%s] USER=[%s]\\n" "$(env_value POSTGRES_DB DEFAULT)" "$(env_value POSTGRES_USER DEFAULT)"\n')
-    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([BASH, '-c', probe], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     assert 'DB=[lower_db] USER=[mixed_user]' in res.stdout, res.stdout
 
@@ -835,7 +837,7 @@ def _run_script(kind, rel, tmp_path, args, **env_overrides):
     if kind == 'ps':
         cmd = [_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(dst), *args]
     else:
-        cmd = [shutil.which('bash'), dst.as_posix(), *args]
+        cmd = [BASH, dst.as_posix(), *args]
     res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=120)
     res.out = res.stdout + res.stderr
     return res
@@ -843,7 +845,7 @@ def _run_script(kind, rel, tmp_path, args, **env_overrides):
 
 _KINDS = [
     pytest.param('ps', marks=pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')),
-    pytest.param('sh', marks=pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')),
+    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason=SKIP_REASON)),
 ]
 
 
@@ -896,9 +898,9 @@ def test_backup_ps1_appends_dot_only_to_a_bare_drive_letter():
 
 
 def _locale_available(name):
-    if shutil.which('bash') is None:
+    if BASH is None:
         return False
-    res = subprocess.run([shutil.which('bash'), '-c', 'locale -a'], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([BASH, '-c', 'locale -a'], capture_output=True, text=True, timeout=60)
     if res.returncode != 0:
         return False
     want = name.lower().replace('-', '')
@@ -959,7 +961,7 @@ _ENV_UPPER_EXPORT = 'EXPORT POSTGRES_DB=upper_export_db\r\nExport POSTGRES_USER=
 
 
 @pytest.mark.Trait("Bug", "B21")
-@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
 @pytest.mark.parametrize('rel', SH_SCRIPTS)
 def test_sh_dotenv_accepts_export_only_in_lower_case(rel, tmp_path):
     fn = _block(_read(rel), 'env_value() {')
@@ -967,7 +969,7 @@ def test_sh_dotenv_accepts_export_only_in_lower_case(rel, tmp_path):
     probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
              'printf "DB=[%s] USER=[%s] PORT=[%s]\n" "$(env_value POSTGRES_DB DEFAULT)" '
              '"$(env_value POSTGRES_USER DEFAULT)" "$(env_value POSTGRES_PORT DEFAULT)"\n')
-    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([BASH, '-c', probe], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     assert 'DB=[DEFAULT] USER=[DEFAULT] PORT=[7777]' in res.stdout, res.stdout
 

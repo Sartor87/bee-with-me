@@ -17,17 +17,18 @@ from pathlib import Path
 import pytest
 
 from backend.tests.script_env import script_env
+from backend.tests.shells import SKIP_REASON, find_bash
 
 ROOT = Path(__file__).resolve().parents[2]
 STUBS = Path(__file__).resolve().parent / 'stubs'
 PS_EXE = shutil.which('powershell') or shutil.which('pwsh')
-BASH = shutil.which('bash')
+BASH = find_bash()
 DRY = 'DRY RUN: would start backend and frontend'
 
 KINDS = [
     pytest.param('ps', marks=pytest.mark.skipif(PS_EXE is None or os.name != 'nt',
                                                  reason='needs Windows PowerShell')),
-    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason='no bash')),
+    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason=SKIP_REASON)),
 ]
 
 

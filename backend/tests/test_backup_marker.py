@@ -20,14 +20,15 @@ import pytest
 from backend.config import settings
 from backend.db import migrate as m
 from backend.tests.script_env import scratch_db_name, script_env
+from backend.tests.shells import SKIP_REASON, find_bash
 from backend.tests.test_restore import _container, _dsn, _engine
 
 ROOT = Path(__file__).resolve().parents[2]
 PS_EXE = shutil.which('powershell') or shutil.which('pwsh')
-BASH = shutil.which('bash')
+BASH = find_bash()
 KINDS = [
     pytest.param('ps', marks=pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')),
-    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason='no bash')),
+    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason=SKIP_REASON)),
 ]
 
 

@@ -17,6 +17,7 @@ import pytest
 from backend.config import settings
 from backend.db import migrate as m
 from backend.tests.script_env import scratch_db_name, script_env
+from backend.tests.shells import SKIP_REASON, find_bash
 
 # The restore steps, exactly as both restore scripts run them inside the container.
 DROP_CMD = ['dropdb', '--if-exists', '--force']
@@ -127,10 +128,10 @@ from pathlib import Path  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PS_EXE = shutil.which('powershell') or shutil.which('pwsh')
-BASH = shutil.which('bash')
+BASH = find_bash()
 SCRIPT_KINDS = [
     pytest.param('ps', marks=pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')),
-    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason='no bash')),
+    pytest.param('sh', marks=pytest.mark.skipif(BASH is None, reason=SKIP_REASON)),
 ]
 
 

@@ -391,6 +391,10 @@ source .venv/bin/activate
 pytest backend/tests/
 ```
 
+The `[sh]` script tests need a real bash. On Windows they use Git Bash (found next to `git.exe`, or
+`%ProgramFiles%\Git\bin\bash.exe`), never the WSL launcher `C:\Windows\System32\bash.exe`; set
+`BWM_TEST_BASH` to a bash path to override. Without one, the `[sh]` cases are skipped.
+
 ---
 
 ## Real-time architecture
