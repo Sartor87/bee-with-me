@@ -29,6 +29,10 @@ Because the runner owns the transaction, a migration file must not contain trans
 outside dollar-quoted bodies; load_migrations rejects such files. For the same reason, statements
 that cannot run inside a transaction block are not supported: CREATE INDEX CONCURRENTLY, and
 ALTER TYPE ... ADD VALUE when the new value is used in the same file.
+
+Every file also runs under a lock_timeout (settings.migration_lock_timeout, default 5s): when another
+session holds a lock the file needs, the file fails with a MigrationError instead of waiting forever
+and queueing every later writer behind it. The transaction rolls back and the version is not recorded.
 """
 
 from __future__ import annotations
@@ -216,6 +220,7 @@ async def migrate(conn: asyncpg.Connection, migrations: list[Migration] | None =
         logger.warning('Migration %s was changed after it was applied; the change is NOT re-applied', version)
     await _require_backup(conn, current)
 
+    from ..config import settings
     applied_now = []
     for mig in migrations:
         async with conn.transaction():
@@ -224,8 +229,15 @@ async def migrate(conn: asyncpg.Connection, migrations: list[Migration] | None =
             already = await conn.fetchval('SELECT 1 FROM schema_migrations WHERE version = $1', mig.version)
             if already:
                 continue
+            await conn.execute("SELECT set_config('lock_timeout', $1, true)", settings.migration_lock_timeout)
             try:
                 await conn.execute(mig.up_sql)
+            except asyncpg.LockNotAvailableError as exc:
+                raise MigrationError(
+                    f'Migration {mig.name} could not get a lock within {settings.migration_lock_timeout}: '
+                    f'another session holds a lock on a table it needs ({exc}). Stop the backend and any '
+                    f'other tools using the database, then start again; nothing was changed.'
+                ) from exc
             except asyncpg.PostgresError as exc:
                 raise MigrationError(f'Migration {mig.name} failed: {exc}') from exc
             await conn.execute(

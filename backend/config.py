@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +42,15 @@ class Settings(BaseSettings):
     backup_marker_path: Path = Path(__file__).resolve().parent.parent / 'data' / 'backups' / 'last-backup.json'
     # Developers on dev data only (e.g. uvicorn --reload): migrate without that backup, with a WARNING.
     allow_migrate_without_backup: bool = False
+    # Per-file lock_timeout of the migration runner: a migration that cannot get its table locks in
+    # this time fails the start-up with a clear error instead of waiting (and queueing writers) forever.
+    migration_lock_timeout: str = '5s'
+
+    @field_validator("migration_lock_timeout")
+    def validate_lock_timeout(cls, v):
+        if not re.fullmatch(r'\d+(ms|s|min)', v):
+            raise ValueError("migration_lock_timeout must look like 200ms, 5s or 1min")
+        return v
 
     @field_validator("backup_marker_path")
     def resolve_marker_path(cls, v):

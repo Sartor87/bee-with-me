@@ -69,6 +69,11 @@ Check the state at any time with:
 python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app, 3 = database not reachable, 1 = invalid migration files / failed migration
 ```
 
+Every migration file runs under a lock timeout (`MIGRATION_LOCK_TIMEOUT`, default `5s`, form `200ms`, `5s` or
+`1min`): if another session holds a lock on a table the file needs, the start-up fails with a clear
+error naming the file instead of hanging. Nothing is changed; stop the backend and other tools using
+the database, then start again.
+
 The start scripts retry only exit 3 (Postgres still starting) for up to 90 s; exit 1 and 2 refuse at once.
 
 The start scripts take a backup (`data/backups/`) before applying pending migrations, and refuse to
