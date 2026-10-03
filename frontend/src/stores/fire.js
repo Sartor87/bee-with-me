@@ -50,6 +50,10 @@ export const useFireStore = defineStore('fire', () => {
   const burntFailed    = ref(false)
   let hotspotsSeq = 0
   let burntSeq = 0
+  // The as-of time of the last payload the MAP accepted, per feed. A fetch sets the time
+  // optimistically; if the map then rejects the payload (markFeedFailed) the time goes back
+  // here, so the pill never claims an age for data that is not drawn (BP-01).
+  const accepted = { hotspots: { at: null, state: 'unknown' }, burnt: { at: null, state: 'unknown' } }
 
   async function fetchHotspots() {
     const seq = ++hotspotsSeq
@@ -57,6 +61,7 @@ export const useFireStore = defineStore('fire', () => {
       const fc = await getFireHotspots()
       if (seq !== hotspotsSeq) return
       hotspots.value = fc
+      accepted.hotspots = { at: fetchedAt.value, state: upstreamState.value }
       fetchedAt.value = fc.fetched_at ?? null
       upstreamState.value = fc.upstream_state ?? 'unknown'
       hotspotsFailed.value = false
@@ -72,6 +77,7 @@ export const useFireStore = defineStore('fire', () => {
       const fc = await getFireBurntAreas()
       if (seq !== burntSeq) return
       burntAreas.value = fc
+      accepted.burnt = { at: burntFetchedAt.value, state: burntUpstreamState.value }
       burntFetchedAt.value = fc.fetched_at ?? null
       burntUpstreamState.value = fc.upstream_state ?? 'unknown'
       burntFailed.value = false
@@ -90,8 +96,25 @@ export const useFireStore = defineStore('fire', () => {
   // The map could not draw a feed it received (unreadable GeoJSON): show it as failed, the
   // same as a failed fetch. The next successful fetch clears it.
   function markFeedFailed(name) {
-    if (name === 'hotspots') hotspotsFailed.value = true
-    if (name === 'burnt')    burntFailed.value = true
+    if (name === 'hotspots') {
+      hotspotsFailed.value = true
+      fetchedAt.value = accepted.hotspots.at
+      upstreamState.value = accepted.hotspots.state
+    }
+    if (name === 'burnt') {
+      burntFailed.value = true
+      burntFetchedAt.value = accepted.burnt.at
+      burntUpstreamState.value = accepted.burnt.state
+    }
+  }
+
+  // Resync tick: re-pull only the shown feeds that are in the failed state. Healthy feeds
+  // are left alone (the backend polls EFFIS every 30 min), failed ones recover on their own.
+  function retryFailed() {
+    const jobs = []
+    if (layers.value.hotspots && hotspotsFailed.value) jobs.push(fetchHotspots())
+    if (layers.value.burnt && burntFailed.value)       jobs.push(fetchBurntAreas())
+    return Promise.all(jobs).then(() => undefined)
   }
 
   function refreshVisible() {
@@ -112,16 +135,16 @@ export const useFireStore = defineStore('fire', () => {
   }
 
   function applyFireDataUpdated(msg) {
-    // fetched_at is null when the backend has never fetched successfully: keep what we
-    // know (possibly nothing) rather than inventing a time.
-    fetchedAt.value = msg.fetched_at ?? fetchedAt.value
-    upstreamState.value = msg.upstream_state ?? upstreamState.value
+    // The message only says "new data exists": the pill time comes from a fetch the map
+    // accepted, never from this message (a failed refetch would otherwise show the new
+    // time over old data, or over an empty map).
+    void msg
     return refreshVisible()
   }
 
   return {
     hotspots, burntAreas, fetchedAt, upstreamState, burntFetchedAt, burntUpstreamState, layers, anyLayerOn,
     shownFetchedAt, shownUpstreamState, fetchFailed,
-    fetchHotspots, fetchBurntAreas, refreshVisible, markFeedFailed, setLayer, applyFireDataUpdated,
+    fetchHotspots, fetchBurntAreas, refreshVisible, retryFailed, markFeedFailed, setLayer, applyFireDataUpdated,
   }
 })

@@ -9,6 +9,7 @@ vi.mock('../api', () => ({
 
 import { getFireHotspots, getFireBurntAreas } from '../api'
 import { useFireStore } from './fire'
+import { firePillState } from '../lib/fireStyle'
 
 const FC = (n, extra = {}) => ({ type: 'FeatureCollection', features: Array.from({ length: n }, (_, i) => ({ id: String(i) })), ...extra })
 
@@ -47,14 +48,12 @@ describe('useFireStore', () => {
     expect(useFireStore().layers).toEqual({ burnt: false, hotspots: false, zones: false })
   })
 
-  it('fire_data_updated updates status and refetches only visible layers [T11]', async () => {
+  it('fire_data_updated refetches only visible layers [T11]', async () => {
     const store = useFireStore()
     await store.setLayer('burnt', true)
     vi.clearAllMocks()
     getFireBurntAreas.mockResolvedValue(FC(3))
     await store.applyFireDataUpdated({ fetched_at: '2026-10-02T11:00:00+00:00', upstream_state: 'error' })
-    expect(store.fetchedAt).toBe('2026-10-02T11:00:00+00:00')
-    expect(store.upstreamState).toBe('error')
     expect(getFireBurntAreas).toHaveBeenCalledTimes(1)
     expect(getFireHotspots).not.toHaveBeenCalled()
     expect(store.burntAreas.features).toHaveLength(3)
@@ -166,6 +165,70 @@ describe('useFireStore', () => {
     expect(store.fetchFailed).toBe(true)
     await store.refreshVisible()
     expect(store.fetchFailed).toBe(false)
+  })
+
+  const pillOf = (s) => firePillState({
+    at: s.shownFetchedAt, upstreamState: s.shownUpstreamState, failed: s.fetchFailed, nowMs: Date.parse('2026-10-03T09:05:00Z'),
+  })
+
+  it('a WS update while the layer is off does not become the pill time of a later failed fetch [B35]', async () => {
+    const store = useFireStore()
+    await store.applyFireDataUpdated({ fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' })
+    getFireHotspots.mockRejectedValueOnce(new Error('503'))
+    await store.setLayer('hotspots', true).catch(() => {})
+    expect(store.hotspots.features).toHaveLength(0)
+    expect(pillOf(store)).toEqual({ kind: 'error', noteKey: 'fire.errorNoData' })
+  })
+
+  it('a failed refetch after a WS update keeps the time of the data on the map [B35]', async () => {
+    const store = useFireStore()
+    getFireHotspots.mockResolvedValueOnce(FC(3, { fetched_at: '2026-10-03T08:30:00Z', upstream_state: 'live' }))
+    await store.setLayer('hotspots', true)
+    getFireHotspots.mockRejectedValueOnce(new Error('503'))
+    await store.applyFireDataUpdated({ fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }).catch(() => {})
+    expect(store.shownFetchedAt).toBe('2026-10-03T08:30:00Z')
+    expect(pillOf(store)).toEqual({ kind: 'error', noteKey: 'fire.error' })
+  })
+
+  it('an unreadable payload keeps the previous time and marks the feed failed [B35]', async () => {
+    const store = useFireStore()
+    getFireHotspots.mockResolvedValueOnce(FC(1, { fetched_at: '2026-10-03T08:30:00Z', upstream_state: 'live' }))
+    await store.setLayer('hotspots', true)
+    getFireHotspots.mockResolvedValueOnce(FC(1, { fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }))
+    await store.refreshVisible()
+    store.markFeedFailed('hotspots')           // the map rejected the 09:00 payload
+    expect(store.shownFetchedAt).toBe('2026-10-03T08:30:00Z')
+    expect(store.fetchFailed).toBe(true)
+  })
+
+  it('an unreadable first payload leaves no time at all [B35]', async () => {
+    const store = useFireStore()
+    await store.setLayer('burnt', true)        // FC(1) without fetched_at
+    getFireBurntAreas.mockResolvedValueOnce(FC(1, { fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }))
+    await store.refreshVisible()
+    store.markFeedFailed('burnt')
+    expect(store.burntFetchedAt).toBe(null)
+  })
+
+  it('retryFailed refetches only shown feeds whose flag is set [B35]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    await store.setLayer('burnt', true)
+    vi.clearAllMocks()
+    await store.retryFailed()
+    expect(getFireHotspots).not.toHaveBeenCalled()
+    expect(getFireBurntAreas).not.toHaveBeenCalled()
+    store.markFeedFailed('burnt')
+    await store.retryFailed()
+    expect(getFireHotspots).not.toHaveBeenCalled()
+    expect(getFireBurntAreas).toHaveBeenCalledTimes(1)
+    expect(store.fetchFailed).toBe(false)
+    getFireHotspots.mockRejectedValueOnce(new Error('503'))
+    await store.refreshVisible().catch(() => {})
+    await store.setLayer('hotspots', false)    // hidden feed is not retried
+    vi.clearAllMocks()
+    await store.retryFailed()
+    expect(getFireHotspots).not.toHaveBeenCalled()
   })
 })
 

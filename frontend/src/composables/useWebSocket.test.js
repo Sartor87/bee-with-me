@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const loc  = { setConnected: vi.fn(), fetchLive: vi.fn(async () => {}), fetchSOS: vi.fn(async () => {}), fetchTrail: vi.fn(async () => {}) }
-const fire = { refreshVisible: vi.fn(async () => {}), applyFireDataUpdated: vi.fn(async () => {}) }
+const fire = { retryFailed: vi.fn(async () => {}), refreshVisible: vi.fn(async () => {}), applyFireDataUpdated: vi.fn(async () => {}) }
 vi.mock('../stores/locations', () => ({ useLocationsStore: () => loc }))
 vi.mock('../stores/fire', () => ({ useFireStore: () => fire }))
 vi.mock('vue', async (orig) => ({ ...(await orig()), onUnmounted: vi.fn() }))
@@ -37,5 +37,14 @@ describe('useWebSocket fire refetch', () => {
     connect()
     sockets[sockets.length - 1].onmessage({ data: JSON.stringify({ type: 'fire_data_updated', fetched_at: null }) })
     expect(fire.applyFireDataUpdated).toHaveBeenCalledTimes(1)
+  })
+
+  it('every resync tick retries failed fire feeds, also after the first connect [B35]', async () => {
+    const { connect } = useWebSocket()
+    connect()
+    sockets[0].onopen()
+    await vi.advanceTimersByTimeAsync(45_000 * 2)
+    expect(loc.fetchLive).toHaveBeenCalled()
+    expect(fire.retryFailed).toHaveBeenCalledTimes(loc.fetchLive.mock.calls.length)
   })
 })

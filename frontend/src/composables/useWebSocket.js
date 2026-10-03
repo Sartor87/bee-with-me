@@ -22,6 +22,9 @@ export function useWebSocket() {
     try {
       await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
     } catch { /* offline or backend restarting — the next tick tries again */ }
+    // Fire layers are not re-pulled here (the backend polls EFFIS every 30 min), but a shown
+    // feed whose last fetch failed is retried on every tick so it recovers by itself.
+    fireStore.retryFailed().catch(() => { /* fetchFailed drives the pill */ })
   }
 
   function connect() {
