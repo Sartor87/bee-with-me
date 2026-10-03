@@ -1,0 +1,80 @@
+"""GwisFeed: fixed request, bounded response, every failure as FeedFetchError."""
+
+import httpx
+import pytest
+
+from backend.fire import sources as s
+from backend.version import APP_VERSION
+
+pytestmark = [pytest.mark.Trait("Task", "T8"), pytest.mark.asyncio]
+
+EMPTY = {'type': 'FeatureCollection', 'features': []}
+
+
+def _feed(handler):
+    return s.GwisFeed('hotspots', 'ms:viirs.hs.week', transport=httpx.MockTransport(handler))
+
+
+async def test_request_is_fixed_and_identifies_the_app():
+    seen = {}
+
+    def handler(request):
+        seen['url'] = request.url
+        seen['ua'] = request.headers['user-agent']
+        return httpx.Response(200, json=EMPTY)
+
+    assert await _feed(handler).fetch() == EMPTY
+    url = seen['url']
+    assert (url.scheme, url.host, url.path) == ('https', 'maps.effis.emergency.copernicus.eu', '/gwis')
+    q = dict(url.params)
+    assert q == {**s.BASE_PARAMS, 'TYPENAMES': 'ms:viirs.hs.week'}
+    assert q['BBOX'] == '41.2,22.3,44.3,28.7,urn:ogc:def:crs:EPSG::4326'
+    assert q['COUNT'] == '5000' and q['OUTPUTFORMAT'] == 'GEOJSON'
+    assert seen['ua'] == f'BeeWithMe/{APP_VERSION}'
+
+
+async def test_module_feeds_use_the_agreed_layers():
+    assert s.HOTSPOTS.type_name == 'ms:viirs.hs.week'
+    assert s.BURNT_AREAS.type_name == 'ms:nrt.ba.poly.week'
+
+
+@pytest.mark.parametrize('status', [404, 500, 502, 503])
+async def test_http_errors_raise(status):
+    with pytest.raises(s.FeedFetchError, match=str(status)):
+        await _feed(lambda r: httpx.Response(status, text='down')).fetch()
+
+
+async def test_declared_oversize_body_is_refused(monkeypatch):
+    monkeypatch.setattr(s, 'MAX_BODY_BYTES', 10)
+    with pytest.raises(s.FeedFetchError, match='too large'):
+        await _feed(lambda r: httpx.Response(200, json=EMPTY)).fetch()
+
+
+async def test_streamed_oversize_body_is_refused(monkeypatch):
+    monkeypatch.setattr(s, 'MAX_BODY_BYTES', 10)
+
+    async def chunks():
+        yield b'{"type": '
+        yield b'"FeatureCollection"}'
+
+    with pytest.raises(s.FeedFetchError, match='too large'):
+        await _feed(lambda r: httpx.Response(200, content=chunks())).fetch()
+
+
+async def test_non_json_body_raises():
+    with pytest.raises(s.FeedFetchError, match='JSON'):
+        await _feed(lambda r: httpx.Response(200, text='<html>maintenance</html>')).fetch()
+
+
+async def test_network_errors_and_timeouts_raise():
+    def handler(request):
+        raise httpx.ReadTimeout('timed out', request=request)
+
+    with pytest.raises(s.FeedFetchError, match='timed out'):
+        await _feed(handler).fetch()
+
+
+async def test_fixture_source():
+    assert await s.FixtureSource('x', payload=EMPTY).fetch() == EMPTY
+    with pytest.raises(s.FeedFetchError):
+        await s.FixtureSource('x', error=s.FeedFetchError('boom')).fetch()

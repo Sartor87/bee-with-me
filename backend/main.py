@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .auth import hash_password
 from .config import settings
+from .version import APP_VERSION
 from .database import close_pool, get_pool, init_pool
 from .db.migrate import BackupRequiredError, MigrationError, migrate
 from .routers import auth, devices, export, groups, locations, users, ws, test, hardware_reader, tiles
@@ -158,7 +159,7 @@ async def lifespan(app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title='Bee With Me API', version='1.7.1', lifespan=lifespan)
+app = FastAPI(title='Bee With Me API', version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
