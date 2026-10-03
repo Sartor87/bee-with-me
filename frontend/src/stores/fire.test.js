@@ -67,4 +67,102 @@ describe('useFireStore', () => {
     await expect(store.refreshVisible()).rejects.toBe('Network Error')
     expect(store.hotspots.features).toHaveLength(2)
   })
+
+  it('tracks the burnt feed as-of time and the shown (visible-only, pessimistic) pair [B33]', async () => {
+    const store = useFireStore()
+    getFireBurntAreas.mockResolvedValue(FC(1, { fetched_at: '2026-10-02T09:00:00+00:00', upstream_state: 'no_recent_detections' }))
+    await store.setLayer('burnt', true)
+    expect(store.burntFetchedAt).toBe('2026-10-02T09:00:00+00:00')
+    expect(store.burntUpstreamState).toBe('no_recent_detections')
+    // Only burnt is on: the pill shows burnt's time, not hotspots' (never fetched).
+    expect(store.shownFetchedAt).toBe('2026-10-02T09:00:00+00:00')
+    expect(store.shownUpstreamState).toBe('no_recent_detections')
+    await store.setLayer('hotspots', true)
+    // Both on: oldest time, worst state.
+    expect(store.shownFetchedAt).toBe('2026-10-02T09:00:00+00:00')
+    expect(store.shownUpstreamState).toBe('no_recent_detections')
+    getFireHotspots.mockResolvedValue(FC(2, { fetched_at: '2026-10-02T08:00:00+00:00', upstream_state: 'error' }))
+    await store.refreshVisible()
+    expect(store.shownFetchedAt).toBe('2026-10-02T08:00:00+00:00')
+    expect(store.shownUpstreamState).toBe('error')
+  })
+
+  it('fetchFailed is set by a failure on a shown layer and cleared by the next success [B33]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    expect(store.fetchFailed).toBe(false)
+    getFireHotspots.mockRejectedValueOnce('Network Error')
+    await expect(store.refreshVisible()).rejects.toBe('Network Error')
+    expect(store.fetchFailed).toBe(true)
+    await store.refreshVisible()
+    expect(store.fetchFailed).toBe(false)
+  })
+
+  it('an older response arriving last does not overwrite newer data [B33]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    const old = deferred(), fresh = deferred()
+    getFireHotspots.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
+    const a = store.refreshVisible()
+    const b = store.applyFireDataUpdated({ fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' })
+    fresh.resolve(FC(9, { fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }))
+    await b
+    old.resolve(FC(1, { fetched_at: '2026-10-03T08:30:00Z', upstream_state: 'live' }))
+    await a
+    expect(store.hotspots.features).toHaveLength(9)
+    expect(store.fetchedAt).toBe('2026-10-03T09:00:00Z')
+  })
+
+  it('a late failure of an older request does not mark current data as failed [B33]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    const old = deferred()
+    getFireHotspots.mockReturnValueOnce(old.promise).mockResolvedValueOnce(FC(2, { fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }))
+    const a = store.refreshVisible().catch(() => {})
+    await store.refreshVisible()
+    old.reject('timeout')
+    await a
+    expect(store.fetchFailed).toBe(false)
+    expect(store.hotspots.features).toHaveLength(2)
+  })
+
+  it('a failure after its layer was turned off leaves no failed flag behind [B33]', async () => {
+    const store = useFireStore()
+    const d = deferred()
+    getFireHotspots.mockReturnValueOnce(d.promise)
+    const p = store.setLayer('hotspots', true).catch(() => {})
+    await store.setLayer('hotspots', false)
+    d.reject('boom')
+    await p
+    expect(store.fetchFailed).toBe(false)
+    // Turning another layer off later must not resurrect it either.
+    await store.setLayer('burnt', false)
+    expect(store.fetchFailed).toBe(false)
+    // And a response arriving after the layer was hidden is dropped.
+    const e = deferred()
+    getFireHotspots.mockReturnValueOnce(e.promise)
+    const q = store.setLayer('hotspots', true)
+    await store.setLayer('hotspots', false)
+    e.resolve(FC(5, { fetched_at: '2026-10-03T09:00:00Z', upstream_state: 'live' }))
+    await q
+    expect(store.hotspots.features).toHaveLength(0)
+  })
+
+  it('each feed fails independently and fetchFailed ignores a hidden layer [B33]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    await store.setLayer('burnt', true)
+    getFireBurntAreas.mockRejectedValueOnce('boom')
+    await expect(store.refreshVisible()).rejects.toBe('boom')
+    expect(store.fetchFailed).toBe(true)
+    expect(store.hotspots.features).toHaveLength(2)
+    await store.setLayer('burnt', false)
+    expect(store.fetchFailed).toBe(false)
+  })
 })
+
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((a, b) => { resolve = a; reject = b })
+  return { promise, resolve, reject }
+}

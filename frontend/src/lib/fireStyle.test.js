@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hotspotStyleKey, freshnessKind, isFireDataStale, worstUpstreamState, oldestFetchedAt } from './fireStyle'
+import { hotspotStyleKey, freshnessKind, isFireDataStale, worstUpstreamState, oldestFetchedAt, firePillState } from './fireStyle'
 
 const NOW = Date.parse('2026-10-02T12:00:00Z')
 const hoursAgo = (h) => new Date(NOW - h * 3600e3).toISOString()
@@ -49,5 +49,31 @@ describe('feed freshness helpers', () => {
     expect(worstUpstreamState([])).toBe('unknown')
     expect(oldestFetchedAt([hoursAgo(1), hoursAgo(3)])).toBe(hoursAgo(3))
     expect(oldestFetchedAt([hoursAgo(1), null])).toBe(null)
+  })
+})
+
+describe('firePillState', () => {
+  const fresh = hoursAgo(0.2)
+  const base = { at: fresh, upstreamState: 'live', failed: false, nowMs: NOW }
+
+  it('live and fresh has no note [B33]', () => {
+    expect(firePillState({ ...base, at: hoursAgo(0.2) })).toEqual({ kind: 'live', noteKey: '' })
+  })
+
+  it('a failure with data says last known; with no data it does not [B33]', () => {
+    expect(firePillState({ ...base, failed: true })).toEqual({ kind: 'error', noteKey: 'fire.error' })
+    expect(firePillState({ ...base, at: null, upstreamState: 'error' })).toEqual({ kind: 'error', noteKey: 'fire.errorNoData' })
+    expect(firePillState({ ...base, at: null, failed: true })).toEqual({ kind: 'error', noteKey: 'fire.errorNoData' })
+  })
+
+  it('a failure outranks never-fetched, stale and quiet [B33]', () => {
+    expect(firePillState({ ...base, at: hoursAgo(5), upstreamState: 'error' }).noteKey).toBe('fire.error')
+    expect(firePillState({ ...base, at: hoursAgo(5), upstreamState: 'no_recent_detections', failed: true }).noteKey).toBe('fire.error')
+  })
+
+  it('never fetched, stale and quiet in that order [B33]', () => {
+    expect(firePillState({ ...base, at: null, upstreamState: 'unknown' })).toEqual({ kind: 'unknown', noteKey: 'fire.neverFetched' })
+    expect(firePillState({ ...base, at: hoursAgo(5), upstreamState: 'no_recent_detections' })).toEqual({ kind: 'error', noteKey: 'fire.stale' })
+    expect(firePillState({ ...base, upstreamState: 'no_recent_detections' })).toEqual({ kind: 'quiet', noteKey: 'fire.quiet' })
   })
 })

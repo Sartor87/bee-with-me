@@ -50,3 +50,19 @@ export function oldestFetchedAt(times) {
   if (!times.length || times.some(t => !Number.isFinite(Date.parse(t)))) return null
   return times.reduce((a, b) => (Date.parse(a) <= Date.parse(b) ? a : b))
 }
+
+/** What the fire freshness pill says, as data (the view turns it into words and a time).
+ *  Order matters: a failure outranks everything, then never-fetched, then an as-of time
+ *  too old to trust, then the quiet and live cases. A failure with no as-of time means
+ *  nothing is on the map, so it must not claim "showing last known" (BP-01). */
+export function firePillState({ at, upstreamState, failed, nowMs = Date.now() }) {
+  const kind = freshnessKind(upstreamState)
+  const hasAt = Number.isFinite(Date.parse(at))
+  if (failed || kind === 'error') {
+    return { kind: 'error', noteKey: hasAt ? 'fire.error' : 'fire.errorNoData' }
+  }
+  if (!hasAt) return { kind: 'unknown', noteKey: 'fire.neverFetched' }
+  if (isFireDataStale(at, nowMs)) return { kind: 'error', noteKey: 'fire.stale' }
+  if (kind === 'quiet') return { kind: 'quiet', noteKey: 'fire.quiet' }
+  return { kind, noteKey: '' }
+}

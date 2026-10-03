@@ -225,6 +225,7 @@ export default {
     neverFetched: 'Fire data not fetched yet',
     quiet:        'No detections in the last 48 h',
     error:        'Fire data unavailable, showing last known',
+    errorNoData:  'Fire data unavailable',
     stale:        'not updated recently',
     attribution:  'Contains EFFIS / GWIS data, European Commission Joint Research Centre / Copernicus Emergency Management Service',
     close:        'Close',

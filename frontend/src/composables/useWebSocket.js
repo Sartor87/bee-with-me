@@ -20,7 +20,7 @@ export function useWebSocket() {
 
   async function resync() {
     try {
-      await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail(), fireStore.refreshVisible()])
+      await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
     } catch { /* offline or backend restarting — the next tick tries again */ }
   }
 
@@ -35,6 +35,10 @@ export function useWebSocket() {
         // pushes missed during the gap are gone, so pull a fresh snapshot instead of
         // trusting stale/partial state.
         resync()
+        // Fire layers refetch here, on `fire_data_updated` and on layer toggle, but not on the
+        // 45 s resync tick: the backend polls EFFIS every 30 min, and the tick would re-pull
+        // every hotspot and burnt-area polygon 40 times per poll.
+        fireStore.refreshVisible().catch(() => { /* fetchFailed drives the pill */ })
       }
       hasConnectedBefore = true
     }

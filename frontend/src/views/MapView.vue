@@ -230,7 +230,7 @@ import { useWebSocket } from '../composables/useWebSocket'
 import { useMap, BASEMAPS } from '../composables/useMap'
 import { getGroupsWithMembers, getSerialStatus } from '../api'
 import { ageMs, formatAge, freshnessOf, byUrgency } from '../lib/freshness'
-import { freshnessKind, isFireDataStale } from '../lib/fireStyle'
+import { firePillState } from '../lib/fireStyle'
 import SOSToast from '../components/SOSToast.vue'
 import FirePopup from '../components/FirePopup.vue'
 
@@ -375,21 +375,16 @@ function closeFirePopup() {
   fireOverlay?.setPosition(undefined)
 }
 
-// What the pill says. Order matters: a failure outranks everything, then never-fetched,
-// then an as-of time too old to trust, then the quiet and live cases.
+// What the pill says; the priority rules live in lib/fireStyle.js (firePillState).
 const firePill = computed(() => {
   const at = fireStore.shownFetchedAt
   const time = at
     ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : ''
-  const kind = freshnessKind(fireStore.shownUpstreamState)
-  if (fireStore.fetchFailed || kind === 'error') {
-    return { kind: 'error', time, note: t('fire.error') }
-  }
-  if (!at) return { kind: 'unknown', time: '', note: t('fire.neverFetched') }
-  if (isFireDataStale(at, nowTick.value)) return { kind: 'error', time, note: t('fire.stale') }
-  if (kind === 'quiet') return { kind: 'quiet', time, note: t('fire.quiet') }
-  return { kind, time, note: '' }
+  const state = firePillState({
+    at, upstreamState: fireStore.shownUpstreamState, failed: fireStore.fetchFailed, nowMs: nowTick.value,
+  })
+  return { kind: state.kind, time, note: state.noteKey ? t(state.noteKey) : '' }
 })
 
 onMounted(() => {
@@ -417,8 +412,10 @@ onMounted(() => {
   fireStore.refreshVisible().catch(() => { /* fetchFailed drives the pill */ })
 })
 
-watch(() => fireStore.hotspots,   (fc) => setHotspots(fc))
-watch(() => fireStore.burntAreas, (fc) => setBurntAreas(fc))
+// immediate: a remounted MapView shows what the store already holds even if its own first
+// refresh fails.
+watch(() => fireStore.hotspots,   (fc) => setHotspots(fc),   { immediate: true })
+watch(() => fireStore.burntAreas, (fc) => setBurntAreas(fc), { immediate: true })
 watch(locale, () => setFireLabels({ fieldReport: t('fire.source.field_report') }))
 
 onMounted(async () => {

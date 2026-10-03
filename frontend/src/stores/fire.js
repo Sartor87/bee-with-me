@@ -43,40 +43,64 @@ export const useFireStore = defineStore('fire', () => {
   const shownFetchedAt = computed(() => oldestFetchedAt(shownFeeds.value.map(f => f.at)))
   const shownUpstreamState = computed(() => worstUpstreamState(shownFeeds.value.map(f => f.state)))
 
+  // Each feed numbers its requests. The resync tick, `fire_data_updated` and a layer toggle
+  // can overlap, and only the newest request may write data or a failure flag: otherwise
+  // 08:30 data can replace 09:00 data, or a late timeout can mark current data as failed.
+  const hotspotsFailed = ref(false)
+  const burntFailed    = ref(false)
+  let hotspotsSeq = 0
+  let burntSeq = 0
+
   async function fetchHotspots() {
-    const fc = await getFireHotspots()
-    hotspots.value = fc
-    fetchedAt.value = fc.fetched_at ?? null
-    upstreamState.value = fc.upstream_state ?? 'unknown'
+    const seq = ++hotspotsSeq
+    try {
+      const fc = await getFireHotspots()
+      if (seq !== hotspotsSeq) return
+      hotspots.value = fc
+      fetchedAt.value = fc.fetched_at ?? null
+      upstreamState.value = fc.upstream_state ?? 'unknown'
+      hotspotsFailed.value = false
+    } catch (err) {
+      if (seq === hotspotsSeq) hotspotsFailed.value = true
+      throw err
+    }
   }
 
   async function fetchBurntAreas() {
-    const fc = await getFireBurntAreas()
-    burntAreas.value = fc
-    burntFetchedAt.value = fc.fetched_at ?? null
-    burntUpstreamState.value = fc.upstream_state ?? 'unknown'
+    const seq = ++burntSeq
+    try {
+      const fc = await getFireBurntAreas()
+      if (seq !== burntSeq) return
+      burntAreas.value = fc
+      burntFetchedAt.value = fc.fetched_at ?? null
+      burntUpstreamState.value = fc.upstream_state ?? 'unknown'
+      burntFailed.value = false
+    } catch (err) {
+      if (seq === burntSeq) burntFailed.value = true
+      throw err
+    }
   }
 
-  // True while the last attempt to reach OUR backend failed (distinct from upstream_state,
-  // which is the backend's view of EFFIS). The pill shows both as "unavailable".
-  const fetchFailed = ref(false)
+  // True while the last attempt to reach OUR backend failed for a feed the operator is
+  // looking at (distinct from upstream_state, which is the backend's view of EFFIS). The
+  // pill shows both as "unavailable".
+  const fetchFailed = computed(() =>
+    (layers.value.hotspots && hotspotsFailed.value) || (layers.value.burnt && burntFailed.value))
 
-  async function refreshVisible() {
+  function refreshVisible() {
     const jobs = []
     if (layers.value.hotspots) jobs.push(fetchHotspots())
     if (layers.value.burnt)    jobs.push(fetchBurntAreas())
-    try {
-      await Promise.all(jobs)
-      fetchFailed.value = false
-    } catch (err) {
-      fetchFailed.value = true
-      throw err
-    }
+    return Promise.all(jobs).then(() => undefined)
   }
 
   function setLayer(name, on) {
     layers.value = { ...layers.value, [name]: !!on }
     saveLayers(layers.value)
+    // Turning a layer off cancels its in-flight request: a response (or failure) that lands
+    // after the operator hid the layer must not touch the store.
+    if (!on && name === 'hotspots') { hotspotsSeq++; hotspotsFailed.value = false }
+    if (!on && name === 'burnt')    { burntSeq++;    burntFailed.value = false }
     return on ? refreshVisible() : Promise.resolve()
   }
 
