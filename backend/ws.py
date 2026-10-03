@@ -1,9 +1,7 @@
 """
 WebSocket connection manager + PostgreSQL LISTEN/NOTIFY bridge.
 
-The serial reader fires pg_notify on 'location_update' and 'sos_alert'.
-This module listens on those channels and broadcasts JSON to all
-connected browser clients.
+The hardware reader and the fire feature fire pg_notify on the channels in FORWARDED_CHANNELS; this module forwards each one to every connected browser as {'type': <channel>, ...payload}.
 """
 
 from __future__ import annotations
@@ -22,6 +20,8 @@ logger = logging.getLogger(__name__)
 RECONNECT_DELAY      = 5    # seconds between reconnect attempts on the LISTEN connection
 HEALTHCHECK_INTERVAL = 30   # seconds between liveness pings — catches a connection that
                              # died silently (e.g. Postgres/Docker paused by system sleep)
+
+FORWARDED_CHANNELS = ('location_update', 'sos_alert', 'fire_data_updated')
 
 
 class WSManager:
@@ -46,6 +46,9 @@ class WSManager:
                 dead.add(ws)
         self._clients -= dead
 
+    async def _forward(self, _con, _pid, channel: str, payload: str) -> None:
+        await self.broadcast({'type': channel, **json.loads(payload)})
+
     async def listen_notifications(self) -> None:
         """Dedicated asyncpg connection that listens for pg_notify events.
 
@@ -58,21 +61,13 @@ class WSManager:
             f'@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}'
         )
 
-        async def _on_location(_con, _pid, _channel, payload):
-            data = json.loads(payload)
-            await self.broadcast({'type': 'location_update', **data})
-
-        async def _on_sos(_con, _pid, _channel, payload):
-            data = json.loads(payload)
-            await self.broadcast({'type': 'sos_alert', **data})
-
         while True:
             conn = None
             try:
                 conn = await asyncpg.connect(dsn)
-                await conn.add_listener('location_update', _on_location)
-                await conn.add_listener('sos_alert', _on_sos)
-                logger.info('Listening for pg_notify on location_update + sos_alert')
+                for channel in FORWARDED_CHANNELS:
+                    await conn.add_listener(channel, self._forward)
+                logger.info('Listening for pg_notify on %s', ', '.join(FORWARDED_CHANNELS))
 
                 while True:
                     await asyncio.sleep(HEALTHCHECK_INTERVAL)

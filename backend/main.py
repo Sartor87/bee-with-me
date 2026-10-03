@@ -14,6 +14,8 @@ from .database import close_pool, get_pool, init_pool
 from .db.migrate import BackupRequiredError, MigrationError, migrate
 from .routers import auth, devices, export, groups, locations, users, ws, test, hardware_reader, tiles
 from .ws import manager
+from .fire import poller as fire_poller
+from .fire.repository import prune_fire_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,6 +48,9 @@ async def _cleanup_old_locations() -> None:
                 )
                 logger.info('Location cleanup: removed %d events older than %d days',
                             deleted or 0, settings.location_retention_days)
+                pruned = await prune_fire_data(conn)
+                logger.info('Fire data cleanup: removed %d hotspots, %d burnt areas',
+                            pruned['fire_hotspots'], pruned['fire_burnt_areas'])
         except Exception as exc:
             logger.warning('Location cleanup failed: %s', exc)
 
@@ -127,6 +132,8 @@ async def lifespan(app: FastAPI):
 
     notify_task  = asyncio.create_task(manager.listen_notifications())
     cleanup_task = asyncio.create_task(_cleanup_old_locations())
+    fire_task = asyncio.create_task(fire_poller.run())
+    fire_task.add_done_callback(lambda t: _log_task_failure(t, 'Fire poller'))
 
     # Serial (LoRaWAN) reader — runs only when a real port is available
     serial_task = None
@@ -152,6 +159,7 @@ async def lifespan(app: FastAPI):
 
     notify_task.cancel()
     cleanup_task.cancel()
+    fire_task.cancel()
     if serial_task:
         serial_task.cancel()
     if hid_task:
