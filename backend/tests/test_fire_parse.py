@@ -274,3 +274,61 @@ def test_burnt_area_skip_counts_per_reason():
 def test_existing_call_style_without_stats_still_works():
     assert len(p.parse_hotspots(_fc(_pt()))) == 1
     assert len(p.parse_burnt_areas(_fc(_area()))) == 1
+
+
+@pytest.mark.Trait("Bug", "B31")
+@pytest.mark.parametrize('hostile', [
+    _pt(id_='bad\ud800'),                       # lone surrogate: asyncpg's text codec raises UnicodeEncodeError
+    _pt(id_='x' * 3000),                        # over the UNIQUE btree entry limit
+    _pt(id_='x' * 257),
+    _pt(id_=float('nan')),                      # what sources.py makes of an absurd integer
+])
+def test_unstorable_hotspot_id_skips_only_that_feature(hostile):
+    stats = p.ParseStats()
+    rows = p.parse_hotspots(_fc(_pt(id_='good'), hostile), stats=stats)
+    assert [r.effis_id for r in rows] == ['good']
+    assert stats.malformed == 1
+
+
+@pytest.mark.Trait("Bug", "B31")
+def test_id_of_exactly_the_limit_is_kept():
+    assert [r.effis_id for r in p.parse_hotspots(_fc(_pt(id_='x' * 256)))] == ['x' * 256]
+
+
+@pytest.mark.Trait("Bug", "B31")
+@pytest.mark.parametrize('cls', ['bad\ud800', 'c' * 3000])
+def test_unstorable_class_is_stored_as_none_and_the_row_survives(cls):
+    rows = p.parse_hotspots(_fc(_pt(id_='g', cls=cls)))
+    assert [(r.effis_id, r.effis_class) for r in rows] == [('g', None)]
+
+
+@pytest.mark.Trait("Bug", "B31")
+@pytest.mark.parametrize('props', [
+    {'id': 'bad\ud800'}, {'id': 'x' * 3000},
+    {'fire_id': 'f\ud800'}, {'fire_id': 'f\x00x'}, {'fire_id': 'f' * 3000},
+])
+def test_burnt_area_with_unstorable_id_or_fire_id_is_skipped_and_counted(props):
+    stats = p.ParseStats()
+    rows = p.parse_burnt_areas(_fc(_area(id_='good'), _area(id_='other', **props)), stats=stats)
+    assert [r.effis_id for r in rows] == ['good']
+    assert stats.malformed == 1
+
+
+@pytest.mark.Trait("Bug", "B31")
+def test_missing_or_empty_fire_id_is_not_a_reason_to_skip():
+    rows = p.parse_burnt_areas(_fc(_area(id_='a', fire_id=''), _area(id_='b', fire_id=None)))
+    assert [(r.effis_id, r.effis_fire_id) for r in rows] == [('a', None), ('b', None)]
+
+
+@pytest.mark.Trait("Bug", "B31")
+@pytest.mark.parametrize('area,expected', [('1e39', None), ('3.5e38', None), ('-1', None), ('nan', None),
+                                           ('0', 0.0), ('196', 196.0), ('3.4e38', 3.4e38)])
+def test_area_ha_must_fit_a_float32(area, expected):
+    rows = p.parse_burnt_areas(_fc(_area(id_='a', area=area)))
+    assert [r.area_ha for r in rows] == [expected]
+
+
+@pytest.mark.Trait("Bug", "B31")
+def test_dominant_reason_names_the_clock_when_mostly_future():
+    assert p.ParseStats(total=4, future=3, malformed=1).dominant_reason() == '(mostly future: check the machine clock)'
+    assert p.ParseStats(total=4, malformed=3, future=1).dominant_reason() == '(format changed?)'

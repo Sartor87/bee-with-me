@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 BBOX = (41.2, 22.3, 44.3, 28.7)          # lat_min, lon_min, lat_max, lon_max (Bulgaria + border areas)
 LIVE_MAX_AGE = timedelta(hours=48)
 MAX_FUTURE_SKEW = timedelta(hours=1)     # device/upstream clock skew tolerated; beyond it a detection is bogus
+MAX_TEXT_LEN = 256                       # stored upstream text: a longer id would break the UNIQUE btree entry
+MAX_AREA_HA = 3.4e38                     # area_ha is REAL (float32): asyncpg raises above this
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,14 @@ class ParseStats:
     @property
     def dropped(self) -> int:
         return self.malformed + self.out_of_bbox + self.duplicate + self.future
+
+    def dominant_reason(self) -> str:
+        """Operator hint for the dominant drop reason; only meaningful when dropped > 0."""
+        reasons = [(self.malformed, '(format changed?)'),
+                   (self.future, '(mostly future: check the machine clock)'),
+                   (self.out_of_bbox, '(mostly outside the area: axis order changed?)'),
+                   (self.duplicate, '(mostly duplicates)')]
+        return max(reasons, key=lambda item: item[0])[1]
 
     def log_dropped(self, source: str) -> None:
         if self.dropped:
@@ -104,18 +114,38 @@ def _features(collection) -> list:
     return collection['features']
 
 
+def _storable(text: str) -> bool:
+    """True when Postgres TEXT and asyncpg accept the string: no NUL, valid UTF-8 (no lone surrogate), bounded."""
+    if len(text) > MAX_TEXT_LEN or '\x00' in text:
+        return False
+    try:
+        text.encode('utf-8')
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _id(value) -> str | None:
+    """Identifier text, or None when absent or not storable (the caller skips the feature)."""
     if value is None or value == '':
         return None
-    text = str(value)
-    return None if '\x00' in text else text     # Postgres TEXT rejects NUL: skip the feature
+    if isinstance(value, float) and not math.isfinite(value):   # sources.py turns absurd integers into NaN
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text if _storable(text) else None
 
 
 def _class(value) -> str | None:
-    """CLASS only as a string (asyncpg rejects other types for TEXT); NUL stripped."""
+    """CLASS only as a string (asyncpg rejects other types for TEXT); NUL stripped; unstorable text becomes None."""
     if not isinstance(value, str):
         return None
-    return value.replace('\x00', '') or None
+    text = value.replace('\x00', '')
+    return text if text and _storable(text) else None
+
+
+def _area_ha(value) -> float | None:
+    number = parse_number(value)
+    return number if number is not None and 0 <= number <= MAX_AREA_HA else None
 
 
 def _dict_parts(feature):
@@ -237,14 +267,19 @@ def parse_burnt_areas(collection, source: str = 'viirs', stats: ParseStats | Non
             if effis_id in seen:
                 stats.duplicate += 1
                 continue
+            raw_fire_id = props.get('fire_id')
+            fire_id = _id(raw_fire_id)
+            if fire_id is None and raw_fire_id is not None and raw_fire_id != '':
+                stats.malformed += 1     # present but unstorable (NUL, lone surrogate, too long): skip the feature
+                continue
             seen.add(effis_id)
             rows.append(BurntAreaRow(
                 source=source,
                 effis_id=effis_id,
-                effis_fire_id=_id(props.get('fire_id')),
+                effis_fire_id=fire_id,
                 started_at=parse_utc(props.get('initialdate')),
                 ended_at=parse_utc(props.get('finaldate')),
-                area_ha=parse_number(props.get('area')),
+                area_ha=_area_ha(props.get('area')),
                 geometry={'type': geometry['type'],
                           'coordinates': polygons[0] if geometry['type'] == 'Polygon' else polygons},
             ))

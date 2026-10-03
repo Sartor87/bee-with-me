@@ -117,3 +117,25 @@ async def test_request_asks_for_an_uncompressed_body():
 
     await _feed(handler).fetch()
     assert seen['accept_encoding'] == 'identity'
+
+
+@pytest.mark.Trait("Bug", "B31")
+async def test_absurd_integer_literal_drops_only_that_feature():
+    from backend.fire import parse as p
+    huge = '9' * 4400
+    body = ('{"type":"FeatureCollection","features":['
+            '{"type":"Feature","properties":{"id":%s,"acq_at":"2026-10-02 10:00:00"},'
+            '"geometry":{"type":"Point","coordinates":[24.5,42.5]}},'
+            '{"type":"Feature","properties":{"id":"good","acq_at":"2026-10-02 10:00:00"},'
+            '"geometry":{"type":"Point","coordinates":[24.5,42.5]}}]}' % huge).encode()
+    payload = await _feed(lambda request: httpx.Response(200, content=body)).fetch()
+    stats = p.ParseStats()
+    rows = p.parse_hotspots(payload, now=p.datetime(2026, 10, 2, 12, 0, tzinfo=p.timezone.utc), stats=stats)
+    assert [r.effis_id for r in rows] == ['good']
+    assert stats.malformed == 1
+
+
+@pytest.mark.Trait("Bug", "B31")
+async def test_reasonable_integers_stay_integers():
+    payload = await _feed(lambda request: httpx.Response(200, content=b'{"a": 65324783454}')).fetch()
+    assert payload == {'a': 65324783454} and isinstance(payload['a'], int)

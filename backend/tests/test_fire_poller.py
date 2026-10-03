@@ -392,3 +392,25 @@ async def test_only_one_refresh_runs_at_a_time_in_this_process(pool):
     release.set()
     assert second is False
     assert await asyncio.wait_for(first, timeout=5) is True
+
+
+@pytest.mark.Trait("Bug", "B31")
+async def test_exactly_half_dropped_is_not_an_error(pool, migrated_conn):
+    feats = _hotspots(('g1', 42.5, 24.5, '2026-10-02 10:00:00'), ('g2', 42.5, 24.5, '2026-10-02 10:00:00'))
+    feats['features'] += _renamed_field_hotspots(2)['features']          # 2 of 4 dropped
+    await poller.refresh_once(pool, FixtureSource('hotspots', feats), FixtureSource('burnt_areas', AREAS),
+                              now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'live'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_hotspots') == 2
+
+
+@pytest.mark.Trait("Bug", "B31")
+async def test_mostly_future_drop_points_at_the_machine_clock(pool, migrated_conn):
+    feats = _hotspots(('g1', 42.5, 24.5, '2026-10-02 10:00:00'),
+                      *[('f%d' % i, 42.5, 24.5, '2026-10-05 10:00:00') for i in range(3)])
+    await poller.refresh_once(pool, FixtureSource('hotspots', feats), FixtureSource('burnt_areas', AREAS),
+                              now=lambda: NOW)
+    state = poller.FEEDS['hotspots']
+    assert state.upstream_state == 'error'
+    assert state.last_error == '3 of 4 features unusable (mostly future: check the machine clock)'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_hotspots') == 0

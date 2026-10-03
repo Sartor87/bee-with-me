@@ -73,7 +73,7 @@ async def _fetch_feed(name, source, parse) -> _Fetched | None:
         rows = parse(payload, stats=stats)
         if stats.total and (not rows or stats.dropped > stats.total * MAX_DROPPED_SHARE):
             # BP-03/BP-01: an empty map after a format change must not read as "no recent detections"
-            raise FeedFormatError('%s of %s features unusable (format changed?)' % (stats.dropped, stats.total))
+            raise FeedFormatError('%s of %s features unusable %s' % (stats.dropped, stats.total, stats.dominant_reason()))
     except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the other; CancelledError still propagates
         _fail(name, exc)
         return None

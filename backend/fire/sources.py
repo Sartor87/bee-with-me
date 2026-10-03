@@ -26,9 +26,15 @@ BASE_PARAMS = {
     # WFS 2.0 + EPSG:4326 URN = lat,lon axis order. lon,lat silently returns Saudi Arabia.
     'BBOX': '41.2,22.3,44.3,28.7,urn:ogc:def:crs:EPSG::4326',
 }
+MAX_JSON_INT_DIGITS = 30   # Python's json raises ValueError on integer literals over 4300 digits: don't lose the feed for one
 MAX_BODY_BYTES = 16 * 1024 * 1024
 TIMEOUT_S = 90
 USER_AGENT = f'BeeWithMe/{APP_VERSION}'
+
+
+def _bounded_int(text: str):
+    """Absurd integer literals become NaN, which the parsers reject as non-finite: only that feature is dropped."""
+    return int(text) if len(text) <= MAX_JSON_INT_DIGITS else float('nan')
 
 
 class FeedFetchError(RuntimeError):
@@ -68,7 +74,7 @@ class GwisFeed:
         except httpx.HTTPError as exc:
             raise FeedFetchError(f'{self.name}: {exc}') from exc
         try:
-            return json.loads(bytes(body))
+            return json.loads(bytes(body), parse_int=_bounded_int)
         except ValueError as exc:
             raise FeedFetchError(f'{self.name}: response is not JSON') from exc
 
