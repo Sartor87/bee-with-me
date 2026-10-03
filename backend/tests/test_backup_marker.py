@@ -109,19 +109,38 @@ async def _guard_problem(name, marker_path):
 
 def _acl(path):
     """(inheritance protected?, SIDs with access) of a folder."""
-    cmd = (f"$a = Get-Acl -LiteralPath '{path}'; [string]$a.AreAccessRulesProtected; "
-           "$a.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }")
-    res = subprocess.run([PS_EXE, '-NoProfile', '-Command', cmd], capture_output=True, text=True, timeout=120)
+    cmd = (
+        f"$a = Get-Acl -LiteralPath '{path}'; "
+        "[string]$a.AreAccessRulesProtected; "
+        "$a.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }"
+    )
+
+    # Execute the script
+    res = subprocess.run(
+        [PS_EXE, "-NoProfile", "-Command", cmd],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=script_env()
+    )
+
+
     assert res.returncode == 0, res.stderr
     lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+    if not lines:
+        raise AssertionError(
+            f"Get-Acl returned no output.\nSTDERR:\n{res.stderr}"
+        )
     return lines[0] == 'True', set(lines[1:])
 
 
 def _my_sid():
-    res = subprocess.run([PS_EXE, '-NoProfile', '-Command',
-                          '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
-                         capture_output=True, text=True, timeout=60)
-    return res.stdout.strip()
+    res = subprocess.run(
+        [PS_EXE, '-NoProfile', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
+        capture_output=True, text=True, timeout=60, env=script_env())
+    sid = res.stdout.strip()
+    assert res.returncode == 0 and sid.startswith('S-1-'), f'no SID.\nSTDERR:\n{res.stderr}'
+    return sid
 
 
 @pytest.mark.Trait("Bug", "B18")

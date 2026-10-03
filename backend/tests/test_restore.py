@@ -514,3 +514,9 @@ def test_failed_swap_leaves_the_live_database_and_drops_the_side_database(kind, 
     _still_after_backup_state(name)
     assert scratch['databases'](name + '_') == []   # side database dropped; nothing kept
 
+
+@pytest.mark.Trait("Bug", "B23")
+def test_script_env_drops_psmodulepath(monkeypatch):
+    monkeypatch.setenv('PSModulePath', r'C:\Program Files\PowerShell\7\Modules')
+    assert not any(k.upper() == 'PSMODULEPATH' for k in script_env())
+
