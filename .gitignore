@@ -20,6 +20,7 @@
 build/
 node_modules/
 assets/dist/
+frontend/dist/
 *.bundle.js
 *.module.wasm
 
