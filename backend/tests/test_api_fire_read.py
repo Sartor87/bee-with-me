@@ -105,3 +105,15 @@ def test_endpoints_require_login(path, mock_conn, test_app):
 ])
 def test_hotspot_state_precedence(row, expected):
     assert hotspot_state(row) == expected
+
+
+@pytest.mark.Trait("Bug", "B29")
+def test_status_count_is_null_until_the_feed_succeeded_in_this_process(client, mock_conn):
+    mock_conn.fetchval = AsyncMock(return_value=T)      # DB has rows (after a restart)
+    body = client.get('/api/fire/status').json()
+    assert body['feeds']['hotspots']['count'] is None
+    assert body['feeds']['burnt_areas']['count'] is None
+    poller.FEEDS['hotspots'] = poller.FeedState(T, None, 'live', 0)    # succeeded with a quiet week: 0 is real
+    body = client.get('/api/fire/status').json()
+    assert body['feeds']['hotspots']['count'] == 0
+    assert body['feeds']['burnt_areas']['count'] is None

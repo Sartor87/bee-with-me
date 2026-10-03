@@ -51,7 +51,8 @@ async def status(conn: Conn, _: User):
             'last_success_at': iso(await _fetched_at(conn, name)),
             'last_error': state.last_error,
             'upstream_state': state.upstream_state,
-            'count': state.count,
+            # null until this process has fetched the feed: after a restart 0 would contradict the DB
+            'count': state.count if state.last_success_at is not None else None,
         }
     return {
         'feeds': feeds,

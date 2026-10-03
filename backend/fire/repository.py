@@ -49,7 +49,11 @@ _PRUNE_BURNT_AREAS = """
     SELECT count(*) FROM d
 """
 
-_LAST_SEEN_TABLES = {'fire_hotspots', 'fire_burnt_areas'}
+# Feed age is the age of the EFFIS data: field reports (source = 'field_report') are ours, not the feed's.
+_LAST_SEEN_SQL = {
+    'fire_hotspots': "SELECT max(last_seen_at) FROM fire_hotspots WHERE source <> 'field_report'",
+    'fire_burnt_areas': 'SELECT max(last_seen_at) FROM fire_burnt_areas',
+}
 
 
 async def upsert_hotspots(conn: asyncpg.Connection, rows: list[HotspotRow]) -> None:
@@ -89,6 +93,7 @@ async def list_burnt_areas(conn: asyncpg.Connection) -> list[asyncpg.Record]:
 
 
 async def last_seen_at(conn: asyncpg.Connection, table: str) -> datetime | None:
-    if table not in _LAST_SEEN_TABLES:
+    sql = _LAST_SEEN_SQL.get(table)
+    if sql is None:
         raise ValueError(f'unknown table {table!r}')
-    return await conn.fetchval(f'SELECT max(last_seen_at) FROM {table}')
+    return await conn.fetchval(sql)
