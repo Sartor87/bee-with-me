@@ -78,3 +78,30 @@ async def test_fixture_source():
     assert await s.FixtureSource('x', payload=EMPTY).fetch() == EMPTY
     with pytest.raises(s.FeedFetchError):
         await s.FixtureSource('x', error=s.FeedFetchError('boom')).fetch()
+
+
+@pytest.mark.Trait("Bug", "B25")
+async def test_redirects_are_refused_without_a_second_request():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={'location': 'https://evil.example/gwis'})
+
+    with pytest.raises(s.FeedFetchError, match='302'):
+        await _feed(handler).fetch()
+    assert len(calls) == 1 and 'evil.example' not in calls[0]
+
+
+@pytest.mark.Trait("Bug", "B25")
+async def test_client_is_built_with_follow_redirects_explicitly_off(monkeypatch):
+    seen = {}
+    real = httpx.AsyncClient
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(s.httpx, 'AsyncClient', spy)
+    await _feed(lambda r: httpx.Response(200, json=EMPTY)).fetch()
+    assert seen.get('follow_redirects') is False

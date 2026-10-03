@@ -8,12 +8,16 @@ all raises (FeedFormatError) — the caller then keeps the previous data and rep
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 BBOX = (41.2, 22.3, 44.3, 28.7)          # lat_min, lon_min, lat_max, lon_max (Bulgaria + border areas)
 LIVE_MAX_AGE = timedelta(hours=48)
+MAX_FUTURE_SKEW = timedelta(hours=1)     # device/upstream clock skew tolerated; beyond it a detection is bogus
+
+logger = logging.getLogger(__name__)
 
 
 class FeedFormatError(ValueError):
@@ -83,13 +87,24 @@ def _id(value) -> str | None:
     return str(value)
 
 
-def parse_hotspots(collection, source: str = 'viirs') -> list[HotspotRow]:
-    rows, seen = [], set()
+def _dict_parts(feature):
+    """(geometry, properties) when both are objects, else None: the feature is skipped, never fatal."""
+    geometry, props = feature.get('geometry'), feature.get('properties')
+    if not isinstance(geometry, dict) or not isinstance(props, dict):
+        return None
+    return geometry, props
+
+
+def parse_hotspots(collection, source: str = 'viirs', now: datetime | None = None) -> list[HotspotRow]:
+    now = now or datetime.now(timezone.utc)
+    rows, seen, future = [], set(), 0
     for feature in _features(collection):
         if not isinstance(feature, dict):
             continue
-        geometry = feature.get('geometry') or {}
-        props = feature.get('properties') or {}
+        parts = _dict_parts(feature)
+        if parts is None:
+            continue
+        geometry, props = parts
         coords = geometry.get('coordinates')
         if geometry.get('type') != 'Point' or not isinstance(coords, list) or len(coords) < 2:
             continue
@@ -100,22 +115,33 @@ def parse_hotspots(collection, source: str = 'viirs') -> list[HotspotRow]:
         acquired_at = parse_utc(props.get('acq_at'))
         if effis_id is None or acquired_at is None or effis_id in seen:
             continue
+        if acquired_at - now > MAX_FUTURE_SKEW:
+            future += 1
+            continue
         seen.add(effis_id)
         rows.append(HotspotRow(source, effis_id, acquired_at, latitude, longitude, props.get('CLASS') or None))
+    if future:
+        logger.warning('dropped %s %s detections dated more than 1 h in the future (clock skew)', future, source)
     return rows
 
 
-def _valid_position(position) -> bool:
+def _position(position) -> list[float] | None:
+    """Normalised [lon, lat] floats, or None when the position is not usable."""
     if not isinstance(position, list) or len(position) < 2:
-        return False
+        return None
     lon, lat = parse_number(position[0]), parse_number(position[1])
-    return lon is not None and lat is not None and abs(lon) <= 180 and abs(lat) <= 90
+    if lon is None or lat is None or abs(lon) > 180 or abs(lat) > 90:
+        return None
+    return [lon, lat]
 
 
-def _valid_ring(ring) -> bool:
-    return (isinstance(ring, list) and len(ring) >= 4
-            and all(_valid_position(pos) for pos in ring)
-            and ring[0][:2] == ring[-1][:2])
+def _ring(ring) -> list[list[float]] | None:
+    if not isinstance(ring, list) or len(ring) < 4:
+        return None
+    points = [_position(pos) for pos in ring]
+    if any(pt is None for pt in points) or points[0] != points[-1]:
+        return None
+    return points
 
 
 def _polygons(geometry) -> list | None:
@@ -128,10 +154,15 @@ def _polygons(geometry) -> list | None:
         return None
     if not isinstance(polygons, list) or not polygons:
         return None
+    clean = []
     for polygon in polygons:
-        if not isinstance(polygon, list) or not polygon or not all(_valid_ring(r) for r in polygon):
+        if not isinstance(polygon, list) or not polygon:
             return None
-    return polygons
+        rings = [_ring(r) for r in polygon]
+        if any(r is None for r in rings):
+            return None
+        clean.append(rings)
+    return clean
 
 
 def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
@@ -139,12 +170,14 @@ def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
     for feature in _features(collection):
         if not isinstance(feature, dict):
             continue
-        geometry = feature.get('geometry') or {}
-        props = feature.get('properties') or {}
+        parts = _dict_parts(feature)
+        if parts is None:
+            continue
+        geometry, props = parts
         polygons = _polygons(geometry)
         if polygons is None:
             continue
-        if not any(in_bbox(float(pos[1]), float(pos[0])) for poly in polygons for ring in poly for pos in ring):
+        if not any(in_bbox(pos[1], pos[0]) for poly in polygons for ring in poly for pos in ring):
             continue
         effis_id = _id(props.get('id'))
         if effis_id is None or effis_id in seen:
@@ -157,14 +190,15 @@ def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
             started_at=parse_utc(props.get('initialdate')),
             ended_at=parse_utc(props.get('finaldate')),
             area_ha=parse_number(props.get('area')),
-            geometry={'type': geometry['type'], 'coordinates': geometry['coordinates']},
+            geometry={'type': geometry['type'],
+                      'coordinates': polygons[0] if geometry['type'] == 'Polygon' else polygons},
         ))
     return rows
 
 
 def upstream_state(rows: list[HotspotRow], now: datetime) -> str:
     """'live' when the newest detection is under 48 h old. A quiet week is not an error."""
-    newest = max((r.acquired_at for r in rows), default=None)
+    newest = max((r.acquired_at for r in rows if r.acquired_at - now <= MAX_FUTURE_SKEW), default=None)
     if newest is not None and now - newest < LIVE_MAX_AGE:
         return 'live'
     return 'no_recent_detections'

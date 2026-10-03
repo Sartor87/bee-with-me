@@ -127,3 +127,51 @@ def test_h3_r8_is_a_positive_signed_bigint_and_stable():
 def test_h3_r8_is_none_when_h3_is_unavailable(monkeypatch):
     monkeypatch.setattr(h3index, '_h3', None)
     assert h3index.h3_r8(42.6977, 23.3219) is None
+
+
+# --- B25 -------------------------------------------------------------------------------------------
+
+@pytest.mark.Trait("Bug", "B25")
+def test_non_dict_geometry_or_properties_skip_the_feature_not_the_feed():
+    bad_hot = [dict(_pt(id_='g'), geometry='POINT(24 42)'), dict(_pt(id_='p'), properties=['x']),
+               dict(_pt(id_='g2'), geometry=[1, 2])]
+    assert [r.effis_id for r in p.parse_hotspots(_fc(*bad_hot, _pt(id_='ok')))] == ['ok']
+    bad_area = [dict(_area(id_='g'), geometry='nope'), dict(_area(id_='p'), properties=['x']),
+                dict(_area(id_='g2'), geometry=[1])]
+    assert [r.effis_id for r in p.parse_burnt_areas(_fc(*bad_area, _area(id_='ok')))] == ['ok']
+
+
+@pytest.mark.Trait("Bug", "B25")
+def test_numeric_string_coordinates_are_stored_as_floats_and_rings_close_across_types():
+    ring = [['24', '42'], ['24.01', 42], [24.01, '42.01'], [24, '42']]
+    rows = p.parse_burnt_areas(_fc(_area(geometry={'type': 'Polygon', 'coordinates': [ring]})))
+    assert len(rows) == 1
+    stored = rows[0].geometry['coordinates'][0]
+    assert stored == [[24.0, 42.0], [24.01, 42.0], [24.01, 42.01], [24.0, 42.0]]
+    assert all(type(v) is float for pos in stored for v in pos)
+    multi = {'type': 'MultiPolygon', 'coordinates': [[ring]]}
+    got = p.parse_burnt_areas(_fc(_area(geometry=multi)))[0].geometry['coordinates'][0][0]
+    assert got == stored
+
+
+@pytest.mark.Trait("Bug", "B25")
+def test_unclosed_ring_is_still_rejected_after_normalising():
+    ring = [['24', '42'], [24.01, 42], [24.01, 42.01], [24, 43]]
+    assert p.parse_burnt_areas(_fc(_area(geometry={'type': 'Polygon', 'coordinates': [ring]}))) == []
+
+
+@pytest.mark.Trait("Bug", "B25")
+def test_future_detections_are_dropped_and_never_make_a_feed_live(caplog):
+    now = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    future = _pt(id_='f', acq='2026-10-02 14:00:00')          # 2 h ahead
+    skew = _pt(id_='s', acq='2026-10-02 12:30:00')            # 30 min ahead: tolerated
+    with caplog.at_level('WARNING'):
+        rows = p.parse_hotspots(_fc(future, skew), now=now)
+    assert [r.effis_id for r in rows] == ['s']
+    assert 'future' in caplog.text.lower() and '1' in caplog.text
+    only_future = p.parse_hotspots(_fc(future), now=now)
+    assert only_future == []
+    assert p.upstream_state(only_future, now) == 'no_recent_detections'
+    # defence in depth: rows built elsewhere with a far-future time cannot make the feed live either
+    row = p.HotspotRow('viirs', 'x', now + timedelta(hours=5), 42, 24, None)
+    assert p.upstream_state([row], now) == 'no_recent_detections'

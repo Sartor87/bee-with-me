@@ -51,7 +51,7 @@ class GwisFeed:
         cap = MAX_BODY_BYTES
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_S, headers={'User-Agent': USER_AGENT},
-                                         transport=self._transport) as client:
+                                         follow_redirects=False, transport=self._transport) as client:
                 async with client.stream('GET', GWIS_URL, params=params) as resp:
                     if resp.status_code != 200:
                         raise FeedFetchError(f'{self.name}: HTTP {resp.status_code}')
