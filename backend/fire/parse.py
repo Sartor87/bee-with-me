@@ -24,6 +24,29 @@ class FeedFormatError(ValueError):
     pass
 
 
+@dataclass
+class ParseStats:
+    """Out-parameter of the parsers: how many features arrived and why the others were dropped.
+
+    A silent drop hides an upstream format change (renamed field, swapped axes) behind an empty map,
+    so the poller reads these counts to tell "quiet week" from "feed no longer understood".
+    """
+    total: int = 0
+    malformed: int = 0       # not an object, wrong geometry type/shape, missing or invalid id/time/coords
+    out_of_bbox: int = 0
+    duplicate: int = 0
+    future: int = 0
+
+    @property
+    def dropped(self) -> int:
+        return self.malformed + self.out_of_bbox + self.duplicate + self.future
+
+    def log_dropped(self, source: str) -> None:
+        if self.dropped:
+            logger.warning('GWIS %s: dropped %s of %s features (malformed %s, outside bbox %s, duplicate %s, future-dated %s)',
+                           source, self.dropped, self.total, self.malformed, self.out_of_bbox, self.duplicate, self.future)
+
+
 @dataclass(frozen=True)
 class HotspotRow:
     source: str
@@ -103,36 +126,48 @@ def _dict_parts(feature):
     return geometry, props
 
 
-def parse_hotspots(collection, source: str = 'viirs', now: datetime | None = None) -> list[HotspotRow]:
+def parse_hotspots(collection, source: str = 'viirs', now: datetime | None = None,
+                   stats: ParseStats | None = None) -> list[HotspotRow]:
     now = now or datetime.now(timezone.utc)
-    rows, seen, future = [], set(), 0
-    for feature in _features(collection):
+    stats = stats if stats is not None else ParseStats()
+    rows, seen = [], set()
+    features = _features(collection)
+    stats.total += len(features)
+    for feature in features:
         try:
-            if not isinstance(feature, dict):
-                continue
-            parts = _dict_parts(feature)
+            parts = _dict_parts(feature) if isinstance(feature, dict) else None
             if parts is None:
+                stats.malformed += 1
                 continue
             geometry, props = parts
             coords = geometry.get('coordinates')
             if geometry.get('type') != 'Point' or not isinstance(coords, list) or len(coords) < 2:
+                stats.malformed += 1
                 continue
             longitude, latitude = parse_number(coords[0]), parse_number(coords[1])
-            if longitude is None or latitude is None or not in_bbox(latitude, longitude):
+            if longitude is None or latitude is None:
+                stats.malformed += 1
+                continue
+            if not in_bbox(latitude, longitude):
+                stats.out_of_bbox += 1
                 continue
             effis_id = _id(props.get('id'))
             acquired_at = parse_utc(props.get('acq_at'))
-            if effis_id is None or acquired_at is None or effis_id in seen:
+            if effis_id is None or acquired_at is None:
+                stats.malformed += 1
+                continue
+            if effis_id in seen:
+                stats.duplicate += 1
                 continue
             if acquired_at - now > MAX_FUTURE_SKEW:
-                future += 1
+                stats.future += 1
                 continue
             seen.add(effis_id)
             rows.append(HotspotRow(source, effis_id, acquired_at, latitude, longitude, _class(props.get('CLASS'))))
         except (ValueError, TypeError, OverflowError):   # last line of defence: skip this feature only
+            stats.malformed += 1
             continue
-    if future:
-        logger.warning('dropped %s %s detections dated more than 1 h in the future (clock skew)', future, source)
+    stats.log_dropped(source)
     return rows
 
 
@@ -176,23 +211,31 @@ def _polygons(geometry) -> list | None:
     return clean
 
 
-def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
+def parse_burnt_areas(collection, source: str = 'viirs', stats: ParseStats | None = None) -> list[BurntAreaRow]:
+    stats = stats if stats is not None else ParseStats()
     rows, seen = [], set()
-    for feature in _features(collection):
+    features = _features(collection)
+    stats.total += len(features)
+    for feature in features:
         try:
-            if not isinstance(feature, dict):
-                continue
-            parts = _dict_parts(feature)
+            parts = _dict_parts(feature) if isinstance(feature, dict) else None
             if parts is None:
+                stats.malformed += 1
                 continue
             geometry, props = parts
             polygons = _polygons(geometry)
             if polygons is None:
+                stats.malformed += 1
                 continue
             if not any(in_bbox(pos[1], pos[0]) for poly in polygons for ring in poly for pos in ring):
+                stats.out_of_bbox += 1
                 continue
             effis_id = _id(props.get('id'))
-            if effis_id is None or effis_id in seen:
+            if effis_id is None:
+                stats.malformed += 1
+                continue
+            if effis_id in seen:
+                stats.duplicate += 1
                 continue
             seen.add(effis_id)
             rows.append(BurntAreaRow(
@@ -206,7 +249,9 @@ def parse_burnt_areas(collection, source: str = 'viirs') -> list[BurntAreaRow]:
                           'coordinates': polygons[0] if geometry['type'] == 'Polygon' else polygons},
             ))
         except (ValueError, TypeError, OverflowError):   # last line of defence: skip this feature only
+            stats.malformed += 1
             continue
+    stats.log_dropped(source)
     return rows
 
 

@@ -16,8 +16,8 @@ from typing import Callable
 
 from ..database import get_pool
 from . import repository
-from .parse import FeedFormatError, parse_burnt_areas, parse_hotspots, upstream_state
-from .sources import BURNT_AREAS, HOTSPOTS, FeedFetchError, FireFeedSource
+from .parse import FeedFormatError, ParseStats, parse_burnt_areas, parse_hotspots, upstream_state
+from .sources import BURNT_AREAS, FEATURE_LIMIT, HOTSPOTS, FeedFetchError, FireFeedSource
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ REFRESH_INTERVAL_S = 30 * 60
 FIRST_RUN_DELAY_S = 30
 REFRESH_LOCK_KEY = 7_342_101
 FEED_DEADLINE_S = 150   # overall cap per fetch; httpx's timeout is per operation, not per request
+MAX_DROPPED_SHARE = 0.5   # more than this share of unusable features means the format changed
 
 after_refresh: Callable[[], None] | None = None   # set by the alarm service (Task 15)
 
@@ -52,7 +53,11 @@ async def _refresh_feed(conn, name, source, parse, upsert, now) -> None:
                 payload = await source.fetch()
         except TimeoutError:
             raise FeedFetchError('%s: no complete response within %s s (deadline)' % (name, FEED_DEADLINE_S))
-        rows = parse(payload)
+        stats = ParseStats()
+        rows = parse(payload, stats=stats)
+        if stats.total and (not rows or stats.dropped > stats.total * MAX_DROPPED_SHARE):
+            # BP-03/BP-01: an empty map after a format change must not read as "no recent detections"
+            raise FeedFormatError('%s of %s features unusable (format changed?)' % (stats.dropped, stats.total))
         async with conn.transaction():
             await upsert(conn, rows)
     except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the other; CancelledError still propagates
@@ -62,6 +67,10 @@ async def _refresh_feed(conn, name, source, parse, upsert, now) -> None:
         return
     state.last_success_at = now()
     state.last_error = None
+    if stats.total >= FEATURE_LIMIT:
+        logger.warning('Fire feed %s returned %s features (limit %s): the response is probably truncated',
+                       name, stats.total, FEATURE_LIMIT)
+        state.last_error = '%s features returned (limit %s): response probably truncated' % (stats.total, FEATURE_LIMIT)
     state.count = len(rows)
     state.upstream_state = upstream_state(rows, now()) if name == 'hotspots' else 'live'
 

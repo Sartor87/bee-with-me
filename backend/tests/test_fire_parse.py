@@ -229,3 +229,48 @@ def test_unexpected_per_feature_error_skips_only_that_feature(monkeypatch):
     monkeypatch.setattr(p, 'parse_number', boom)
     rows = p.parse_hotspots(_fc(_pt(id_='bad', lon=99.0), _pt(id_='good')))
     assert [r.effis_id for r in rows] == ['good']
+
+
+@pytest.mark.Trait("Bug", "B28")
+def test_hotspot_skip_counts_per_reason(caplog):
+    now = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    feats = [
+        _pt(id_='ok'),
+        _pt(id_='ok'),                                              # duplicate
+        _pt(id_='out', lon=2.35, lat=48.85),                        # outside bbox
+        _pt(id_='fut', acq='2026-10-02 15:00:00'),                  # future
+        'not a dict',                                               # malformed
+        {'type': 'Feature', 'properties': {'id': 'r', 'acq_date': '2026-09-26 11:19:00'},   # renamed field
+         'geometry': {'type': 'Point', 'coordinates': [23.1, 44.0]}},
+        {'type': 'Feature', 'properties': {'id': 'm', 'acq_at': '2026-09-26 11:19:00'},
+         'geometry': {'type': 'MultiPoint', 'coordinates': [[23.1, 44.0]]}},
+    ]
+    stats = p.ParseStats()
+    with caplog.at_level('WARNING'):
+        rows = p.parse_hotspots(_fc(*feats), now=now, stats=stats)
+    assert [r.effis_id for r in rows] == ['ok']
+    assert (stats.total, stats.duplicate, stats.out_of_bbox, stats.future, stats.malformed) == (7, 1, 1, 1, 3)
+    assert stats.dropped == 6
+    assert 'dropped 6 of 7' in caplog.text
+
+
+@pytest.mark.Trait("Bug", "B28")
+def test_burnt_area_skip_counts_per_reason():
+    feats = [
+        _area(id_='ok'),
+        _area(id_='ok'),                                            # duplicate
+        _area(id_='far', geometry={'type': 'Polygon', 'coordinates': [_ring(lon=2.0, lat=48.0)]}),
+        _area(id_='pt', geometry={'type': 'Point', 'coordinates': [24, 42]}),   # malformed geometry
+        {'type': 'Feature', 'properties': {'fire_id': '1'},         # missing id
+         'geometry': {'type': 'Polygon', 'coordinates': [_ring()]}},
+    ]
+    stats = p.ParseStats()
+    rows = p.parse_burnt_areas(_fc(*feats), stats=stats)
+    assert [r.effis_id for r in rows] == ['ok']
+    assert (stats.total, stats.duplicate, stats.out_of_bbox, stats.malformed) == (5, 1, 1, 2)
+
+
+@pytest.mark.Trait("Bug", "B28")
+def test_existing_call_style_without_stats_still_works():
+    assert len(p.parse_hotspots(_fc(_pt()))) == 1
+    assert len(p.parse_burnt_areas(_fc(_area()))) == 1

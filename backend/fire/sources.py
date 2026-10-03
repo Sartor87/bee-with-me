@@ -16,12 +16,13 @@ import httpx
 from ..version import APP_VERSION
 
 GWIS_URL = 'https://maps.effis.emergency.copernicus.eu/gwis'
+FEATURE_LIMIT = 5000   # WFS COUNT; a response this long is probably truncated
 BASE_PARAMS = {
     'SERVICE': 'WFS',
     'VERSION': '2.0.0',
     'REQUEST': 'GetFeature',
     'OUTPUTFORMAT': 'GEOJSON',
-    'COUNT': '5000',
+    'COUNT': str(FEATURE_LIMIT),
     # WFS 2.0 + EPSG:4326 URN = lat,lon axis order. lon,lat silently returns Saudi Arabia.
     'BBOX': '41.2,22.3,44.3,28.7,urn:ogc:def:crs:EPSG::4326',
 }

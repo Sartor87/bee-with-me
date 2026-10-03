@@ -218,3 +218,60 @@ async def test_fire_prune_failure_has_own_message_and_location_prune_ran(monkeyp
     assert any(m.startswith('Location cleanup: removed 3 events') for m in messages)
     assert any(m == 'Fire data prune failed: fire prune exploded' for m in messages)
     assert not any('Location cleanup failed' in m for m in messages)
+
+
+def _renamed_field_hotspots(n=3):
+    return {'type': 'FeatureCollection', 'features': [
+        {'type': 'Feature', 'properties': {'id': 'r%d' % i, 'acq_date': '2026-10-02 10:00:00'},
+         'geometry': {'type': 'Point', 'coordinates': [24.5, 42.5]}} for i in range(n)]}
+
+
+@pytest.mark.Trait("Bug", "B28")
+async def test_renamed_field_gives_error_state_and_leaves_stored_rows(pool, migrated_conn):
+    good = FixtureSource('hotspots', _hotspots(('h1', 42.5, 24.5, '2026-10-02 10:00:00')))
+    await poller.refresh_once(pool, good, FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    changed = FixtureSource('hotspots', _renamed_field_hotspots(3))
+    await poller.refresh_once(pool, changed, FixtureSource('burnt_areas', AREAS), now=lambda: NOW)
+    state = poller.FEEDS['hotspots']
+    assert state.upstream_state == 'error'
+    assert state.last_error == '3 of 3 features unusable (format changed?)'
+    assert state.last_success_at == NOW and state.count == 1
+    assert [r['effis_id'] for r in await migrated_conn.fetch('SELECT effis_id FROM fire_hotspots')] == ['h1']
+    assert poller.FEEDS['burnt_areas'].upstream_state == 'live'
+
+
+@pytest.mark.Trait("Bug", "B28")
+async def test_more_than_half_dropped_is_an_error_but_a_minority_is_not(pool, migrated_conn):
+    def mixed(bad):
+        feats = _hotspots(*[('g%d' % i, 42.5, 24.5, '2026-10-02 10:00:00') for i in range(4 - bad)])
+        feats['features'] += _renamed_field_hotspots(bad)['features']
+        return feats
+    await poller.refresh_once(pool, FixtureSource('hotspots', mixed(3)), FixtureSource('burnt_areas', AREAS),
+                              now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'error'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_hotspots') == 0
+    await poller.refresh_once(pool, FixtureSource('hotspots', mixed(1)), FixtureSource('burnt_areas', AREAS),
+                              now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'live'
+    assert await migrated_conn.fetchval('SELECT count(*) FROM fire_hotspots') == 3
+
+
+@pytest.mark.Trait("Bug", "B28")
+async def test_empty_collection_is_still_a_quiet_week_not_an_error(pool):
+    await poller.refresh_once(pool, FixtureSource('hotspots', _hotspots()), FixtureSource('burnt_areas', AREAS),
+                              now=lambda: NOW)
+    assert poller.FEEDS['hotspots'].upstream_state == 'no_recent_detections'
+    assert poller.FEEDS['hotspots'].last_error is None
+
+
+@pytest.mark.Trait("Bug", "B28")
+async def test_full_count_response_logs_truncation_and_notes_it(pool, caplog):
+    limit = poller.FEATURE_LIMIT
+    big = _hotspots(*[('t%d' % i, 42.5, 24.5, '2026-10-02 10:00:00') for i in range(limit)])
+    with caplog.at_level('WARNING'):
+        await poller.refresh_once(pool, FixtureSource('hotspots', big), FixtureSource('burnt_areas', AREAS),
+                                  now=lambda: NOW)
+    state = poller.FEEDS['hotspots']
+    assert state.upstream_state == 'live' and state.count == limit
+    assert 'truncated' in state.last_error
+    assert 'probably truncated' in caplog.text
