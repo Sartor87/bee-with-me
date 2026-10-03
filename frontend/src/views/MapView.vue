@@ -362,6 +362,7 @@ const FIRE_LAYER_BUTTONS = ['burnt', 'hotspots']
 const firePopupEl = ref(null)
 const firePopup   = ref(null)   // { kind, properties, coordinate } | null
 let   fireOverlay = null
+let   fireMap = null
 
 function toggleFire(name) {
   const on = !fireStore.layers[name]
@@ -398,6 +399,7 @@ onMounted(() => {
     stopEvent: true,
     autoPan: { animation: { duration: reduce ? 0 : 200 }, margin: 24 },
   })
+  fireMap = m
   m.addOverlay(fireOverlay)
   onFireFeatureClick(async (sel) => {
     firePopup.value = sel
@@ -414,8 +416,8 @@ onMounted(() => {
 
 // immediate: a remounted MapView shows what the store already holds even if its own first
 // refresh fails.
-watch(() => fireStore.hotspots,   (fc) => setHotspots(fc),   { immediate: true })
-watch(() => fireStore.burntAreas, (fc) => setBurntAreas(fc), { immediate: true })
+watch(() => fireStore.hotspots,   (fc) => { if (!setHotspots(fc))   fireStore.markFeedFailed('hotspots') }, { immediate: true })
+watch(() => fireStore.burntAreas, (fc) => { if (!setBurntAreas(fc)) fireStore.markFeedFailed('burnt') },    { immediate: true })
 watch(locale, () => setFireLabels({ fieldReport: t('fire.source.field_report') }))
 
 onMounted(async () => {
@@ -443,6 +445,11 @@ onUnmounted(() => {
   stopWindAnim()
   const m = map()
   if (m) m.un('moveend', scheduleWeatherFetch)
+  // The popup overlay belongs to this view; do not leave it on a map that outlives it.
+  onFireFeatureClick(null)
+  if (fireOverlay) fireMap?.removeOverlay(fireOverlay)
+  fireOverlay = null
+  fireMap = null
 })
 
 function switchBasemap(id) {
@@ -791,8 +798,11 @@ function batClass(v) {
 .fire-time { font-family: monospace; font-variant-numeric: tabular-nums; }
 .fire-pill-note { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
 .fire-unknown .fire-pill-main, .fire-quiet .fire-pill-main { color: var(--text-muted); }
-.fire-error { border-color: rgba(234,179,8,.5); background: rgba(120,53,15,.94); }
-.fire-error .fire-pill-main, .fire-error .fire-pill-note { color: #fde68a; }
+.fire-error {
+  border-color: var(--warning-line);
+  background: linear-gradient(var(--warning-wash), var(--warning-wash)), var(--bg-panel);
+}
+.fire-error .fire-pill-main, .fire-error .fire-pill-note { color: var(--warning); }
 
 .fire-attribution {
   position: absolute; bottom: 8px; left: 12px; z-index: 50;

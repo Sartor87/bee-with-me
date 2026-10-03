@@ -20,6 +20,7 @@ import { forward as toMGRS } from 'mgrs'
 import { useSettings } from './useSettings'
 import { freshnessOf, LIVE, LOST } from '../lib/freshness'
 import { hotspotStyleKey } from '../lib/fireStyle'
+import { hexToRgba } from '../lib/color'
 
 const DEFAULT_COLOR = '#3b82f6'
 
@@ -94,14 +95,6 @@ function makeMGRSLabel(lon, lat) {
   }
 }
 
-function hexToRgba(hex, alpha) {
-  if (!hex || !hex.startsWith('#') || hex.length < 7) return `rgba(59,130,246,${alpha})`
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b},${alpha})`
-}
-
 // Fire colours live as tokens in style.css (--fire-*). OpenLayers paints on a canvas and
 // cannot read CSS variables, so resolve them when a style is built. Fallbacks only matter
 // without a DOM.
@@ -116,16 +109,21 @@ function fireToken(name, fallback) {
 // state (dismissed / suppressed / extinguished) goes hollow and grey; a field report is a
 // diamond, never a circle, so it cannot pass for a satellite detection.
 function makeHotspotStyle(key, fieldReportLabel) {
-  const ember    = fireToken('--fire-hotspot', '#fb923c')
+  const ember    = fireToken('--fire-hotspot', '#ad1e57')
   const inactive = fireToken('--fire-inactive', '#8892aa')
   const ring     = fireToken('--text', '#e2e8f0')
   const circle = (radius, fill, stroke) => new Style({
     image: new Circle({ radius, fill: fill ? new Fill({ color: fill }) : undefined, stroke }),
   })
+  // The ember is dark on a dark map (about 2.8:1 on --bg), so every hotspot carries a thin
+  // light ring: newest is solid, older ones fade, but the ring never drops below what keeps
+  // the dot findable on dark and satellite basemaps. No glow: glow is an alarm signal.
+  const E = (alpha) => hexToRgba(ember, alpha, '#ad1e57')
+  const R = (alpha) => hexToRgba(ring, alpha, '#e2e8f0')
   switch (key) {
-    case 'age_24h': return circle(6, hexToRgba(ember, 1),   new Stroke({ color: ring, width: 2 }))
-    case 'age_3d':  return circle(5, hexToRgba(ember, 0.6), new Stroke({ color: hexToRgba(ring, 0.6), width: 1.5 }))
-    case 'age_7d':  return circle(4, hexToRgba(ember, 0.3), new Stroke({ color: hexToRgba(ring, 0.3), width: 1 }))
+    case 'age_24h': return circle(6, E(1),   new Stroke({ color: R(1),    width: 1.75 }))
+    case 'age_3d':  return circle(5, E(0.7), new Stroke({ color: R(0.8),  width: 1.5 }))
+    case 'age_7d':  return circle(4, E(0.45), new Stroke({ color: R(0.6), width: 1.25 }))
     case 'field_report':
       return new Style({
         image: new RegularShape({
@@ -139,9 +137,9 @@ function makeHotspotStyle(key, fieldReportLabel) {
         }) : undefined,
       })
     case 'suppressed':
-      return circle(5, null, new Stroke({ color: hexToRgba(inactive, 0.9), width: 1.5, lineDash: [3, 3] }))
+      return circle(5, null, new Stroke({ color: hexToRgba(inactive, 0.9, '#8892aa'), width: 1.5, lineDash: [3, 3] }))
     default: // dismissed, extinguished
-      return circle(4, null, new Stroke({ color: hexToRgba(inactive, 0.8), width: 1.5 }))
+      return circle(4, null, new Stroke({ color: hexToRgba(inactive, 0.8, '#8892aa'), width: 1.5 }))
   }
 }
 
@@ -149,8 +147,8 @@ function makeHotspotStyle(key, fieldReportLabel) {
 function makeBurntStyle() {
   const ash = fireToken('--fire-burnt', '#a8a29e')
   return new Style({
-    fill:   new Fill({ color: hexToRgba(ash, 0.28) }),
-    stroke: new Stroke({ color: hexToRgba(ash, 0.9), width: 1.5 }),
+    fill:   new Fill({ color: hexToRgba(ash, 0.28, '#a8a29e') }),
+    stroke: new Stroke({ color: hexToRgba(ash, 0.9, '#a8a29e'), width: 1.5 }),
   })
 }
 
@@ -647,7 +645,8 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
     map.on('click', (evt) => {
       if (hqPlacementMode || measureMode || !fireClickCb) return
-      if (trackerHit(evt.pixel)) return
+      // A tracker click opens the tracker popup and closes any fire popup.
+      if (trackerHit(evt.pixel)) { fireClickCb(null); return }
       const hit = fireHit(evt.pixel)
       if (!hit) { fireClickCb(null); return }
       const props = { ...hit.feature.getProperties() }
@@ -750,15 +749,24 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     if (map) map.getTargetElement().style.cursor = on ? 'crosshair' : ''
   }
 
-  function setBurntAreas(fc) {
-    burntSource.clear(true)
-    burntSource.addFeatures(geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' }))
+  // Read before clearing: a payload OpenLayers cannot parse keeps the previous features on
+  // screen. Returns false so the caller can show the feed as failed (BP-03). The log line
+  // carries no feature content.
+  function replaceFeatures(source, fc, what) {
+    let features
+    try {
+      features = geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' })
+    } catch {
+      console.warn('fire layer: unreadable %s GeoJSON, keeping previous features', what)
+      return false
+    }
+    source.clear(true)
+    source.addFeatures(features)
+    return true
   }
 
-  function setHotspots(fc) {
-    hotspotSource.clear(true)
-    hotspotSource.addFeatures(geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' }))
-  }
+  function setBurntAreas(fc)  { return replaceFeatures(burntSource, fc, 'burnt-area') }
+  function setHotspots(fc)    { return replaceFeatures(hotspotSource, fc, 'hotspot') }
 
   function setFireLayerVisible(name, visible) {
     if (name === 'burnt')    burntLayer.setVisible(visible)

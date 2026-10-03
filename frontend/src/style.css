@@ -10,10 +10,15 @@
   --accent:    #3b82f6;
   --danger:    #ef4444;
   --warning:   #f59e0b;
+  /* Amber tint and edge for stale/unavailable notices (the fire pill). */
+  --warning-wash: rgba(245, 158, 11, .16);
+  --warning-line: rgba(245, 158, 11, .5);
   --success:   #22c55e;
-  /* Fire layers. Ember is a detection signal, not an alarm: SOS/fire alarms keep --danger.
-     Ash is history. Inactive is dismissed / suppressed / extinguished. */
-  --fire-hotspot:  #fb923c;
+  /* Fire layers. Hotspot crimson is a detection signal, not an alarm: SOS/fire alarms keep
+     --danger. Only about 2.8:1 on --bg, so hotspot markers always carry a light ring (see
+     makeHotspotStyle in useMap.js). Ash is history. Inactive is dismissed / suppressed /
+     extinguished. */
+  --fire-hotspot:  #ad1e57;
   --fire-burnt:    #a8a29e;
   --fire-inactive: #8892aa;
   --sidebar-w: 280px;

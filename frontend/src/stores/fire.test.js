@@ -159,6 +159,14 @@ describe('useFireStore', () => {
     await store.setLayer('burnt', false)
     expect(store.fetchFailed).toBe(false)
   })
+  it('markFeedFailed flags a shown feed until the next good fetch [B34]', async () => {
+    const store = useFireStore()
+    await store.setLayer('hotspots', true)
+    store.markFeedFailed('hotspots')
+    expect(store.fetchFailed).toBe(true)
+    await store.refreshVisible()
+    expect(store.fetchFailed).toBe(false)
+  })
 })
 
 function deferred() {

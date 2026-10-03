@@ -87,6 +87,13 @@ export const useFireStore = defineStore('fire', () => {
   const fetchFailed = computed(() =>
     (layers.value.hotspots && hotspotsFailed.value) || (layers.value.burnt && burntFailed.value))
 
+  // The map could not draw a feed it received (unreadable GeoJSON): show it as failed, the
+  // same as a failed fetch. The next successful fetch clears it.
+  function markFeedFailed(name) {
+    if (name === 'hotspots') hotspotsFailed.value = true
+    if (name === 'burnt')    burntFailed.value = true
+  }
+
   function refreshVisible() {
     const jobs = []
     if (layers.value.hotspots) jobs.push(fetchHotspots())
@@ -115,6 +122,6 @@ export const useFireStore = defineStore('fire', () => {
   return {
     hotspots, burntAreas, fetchedAt, upstreamState, burntFetchedAt, burntUpstreamState, layers, anyLayerOn,
     shownFetchedAt, shownUpstreamState, fetchFailed,
-    fetchHotspots, fetchBurntAreas, refreshVisible, setLayer, applyFireDataUpdated,
+    fetchHotspots, fetchBurntAreas, refreshVisible, markFeedFailed, setLayer, applyFireDataUpdated,
   }
 })
