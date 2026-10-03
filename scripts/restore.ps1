@@ -2,9 +2,12 @@
 .SYNOPSIS
     Restores a Bee With Me database dump made by scripts\backup.ps1 or scripts/backup.sh.
 
-    REPLACES the whole database with the dump: the database is dropped, created empty and the
-    dump restored in a single transaction that stops at the first error, so nothing created after
-    the backup (tables, schema_migrations rows) survives. Prints the migration status at the end.
+    REPLACES the whole database with the dump. The dump is checked first (pg_restore -l), then
+    restored into a side database <db>_restore_<suffix> in a single transaction that stops at the
+    first error. Only when that worked is it swapped in: the current database is renamed to
+    <db>_before_restore_<UTC stamp> (kept until you drop it) and the side database to <db>. Nothing
+    created after the backup (tables, schema_migrations rows) survives; a failed restore leaves the
+    current database untouched. Prints the migration status at the end.
 
     Stop the backend first: the script refuses while something listens on port 8000.
     Works with Podman (default) or Docker; set CONTAINER_ENGINE to force one.
@@ -72,6 +75,13 @@ $envVars = Read-DotEnv (Join-Path $root '.env')
 $db   = if ($envVars['POSTGRES_DB'])   { $envVars['POSTGRES_DB'] }   else { 'rescuer_locator' }
 $user = if ($envVars['POSTGRES_USER']) { $envVars['POSTGRES_USER'] } else { 'rescuer' }
 
+# The swap renames databases in SQL: plain lower-case names only, short enough for the
+# _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.
+if ($db -cnotmatch '^[a-z_][a-z0-9_]*$' -or $db.Length -gt 33) {
+    throw "POSTGRES_DB '$db': restore supports database names of up to 33 lower-case letters, digits and _ only."
+}
+$restoreDb = "${db}_restore_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+
 # Find the db container by its compose labels (project + service), like the backup script.
 $container = Invoke-Native { & $engine ps -q --filter 'label=com.docker.compose.project=bee-with-me' --filter 'label=com.docker.compose.service=db' } | Select-Object -First 1
 if (-not $container) {
@@ -99,26 +109,76 @@ if (-not $Yes) {
     if ($answer -ne 'yes') { throw 'Not restored.' }
 }
 
+# First five bytes of a file as ASCII: 'PGDMP' for a pg_dump custom-format dump.
+function Get-FileMagic([string]$Path) {
+    $head = New-Object byte[] 5
+    $fs = [System.IO.File]::OpenRead($Path)
+    try { $read = $fs.Read($head, 0, 5) } finally { $fs.Dispose() }
+    return [System.Text.Encoding]::ASCII.GetString($head, 0, $read)
+}
+
 $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
 $inContainer = "/tmp/beewithme_restore_$(Get-Date -Format 'yyyyMMddHHmmss')_$suffix.dump"
+# The side database exists only between createdb and the swap; any failure in between drops it.
+$restoreCreated = $false
+$keptDb = $null
 try {
     Invoke-Native { & $engine cp $Dump "${container}:$inContainer" }
     if ($LASTEXITCODE -ne 0) { throw "$engine cp failed" }
 
-    Write-Host "==> Replacing $db ($engine)" -ForegroundColor Cyan
-    Invoke-Native { & $engine exec $container dropdb --if-exists --force -U $user $db }
-    if ($LASTEXITCODE -ne 0) { throw 'dropdb failed - the database was not changed' }
-    Invoke-Native { & $engine exec $container createdb -U $user -O $user $db }
-    if ($LASTEXITCODE -ne 0) { throw "createdb failed - database '$db' does not exist now; run the restore again" }
-    Invoke-Native { & $engine exec $container pg_restore --exit-on-error --single-transaction --no-owner -U $user -d $db $inContainer }
+    # 1. Is this a dump pg_restore can read at all? Checked before any database is touched.
+    Invoke-Native { & $engine exec $container pg_restore -l $inContainer } | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "pg_restore failed - nothing was restored and database '$db' is now EMPTY. Fix the cause and run the restore again with the same dump."
+        if ((Get-FileMagic $Dump) -ne 'PGDMP') {
+            Write-Host ("$Dump is not a pg_dump custom-format dump - it looks like a plain SQL dump (beewithme_*.sql from`n" +
+                        "1.7.1 or earlier), which pg_restore cannot read. Load it into a scratch database with psql, check it,`n" +
+                        "then turn it into a .dump and restore that with this script:`n" +
+                        "  $engine exec $container createdb -U $user -O $user ${db}_from_sql`n" +
+                        "  Get-Content -Raw `"$Dump`" | $engine exec -i $container psql -v ON_ERROR_STOP=1 -1 -U $user -d ${db}_from_sql`n" +
+                        "  $engine exec $container pg_dump -Fc -U $user -d ${db}_from_sql -f /tmp/from_sql.dump`n" +
+                        "  $engine cp ${container}:/tmp/from_sql.dump .\from_sql.dump") -ForegroundColor Yellow
+        }
+        throw "pg_restore cannot read $Dump - nothing restored, database '$db' was not changed."
     }
+
+    # 2. Restore into the side database; the live database stays as it is until this has worked.
+    Write-Host "==> Restoring into $restoreDb ($engine); '$db' is not touched until that has worked" -ForegroundColor Cyan
+    Invoke-Native { & $engine exec $container dropdb --if-exists --force -U $user $restoreDb }   # leftover of an interrupted run
+    if ($LASTEXITCODE -ne 0) { throw "dropdb $restoreDb failed - database '$db' was not changed." }
+    $restoreCreated = $true
+    Invoke-Native { & $engine exec $container createdb -U $user -O $user $restoreDb }
+    if ($LASTEXITCODE -ne 0) { throw "createdb $restoreDb failed - database '$db' was not changed." }
+    Invoke-Native { & $engine exec $container pg_restore --exit-on-error --single-transaction --no-owner -U $user -d $restoreDb $inContainer }
+    if ($LASTEXITCODE -ne 0) {
+        throw "pg_restore failed - nothing restored, database '$db' was not changed (the side database $restoreDb is dropped)."
+    }
+
+    # 3. Swap: one transaction renames the current database away and the restored one into its place.
+    $keptDb = "${db}_before_restore_$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))"
+    $exists = (Invoke-Native { & $engine exec $container psql -U $user -d postgres -Atc "SELECT count(*) FROM pg_database WHERE datname = '$db'" } | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Could not check whether database '$db' exists - database '$db' was not changed." }
+    if ($exists -eq '1') {
+        $swapSql = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db' AND pid <> pg_backend_pid(); ALTER DATABASE $db RENAME TO $keptDb; ALTER DATABASE $restoreDb RENAME TO $db;"
+    } else {
+        $keptDb = $null
+        $swapSql = "ALTER DATABASE $restoreDb RENAME TO $db;"
+    }
+    Write-Host "==> Swapping $restoreDb in as $db" -ForegroundColor Cyan
+    Invoke-Native { & $engine exec $container psql -v ON_ERROR_STOP=1 -U $user -d postgres -c $swapSql } | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Swapping the restored database in failed - database '$db' was not changed (is something still connected to it?)."
+    }
+    $restoreCreated = $false
 } finally {
-    # Always remove the temp dump inside the container, also when a step failed.
+    # Always remove the temp dump inside the container (and a half-restored side database), also when a step failed.
     Invoke-Native { & $engine exec $container rm -f $inContainer } | Out-Null
+    if ($restoreCreated) { Invoke-Native { & $engine exec $container dropdb --if-exists --force -U $user $restoreDb } | Out-Null }
 }
-Write-Host "==> Restored $Dump" -ForegroundColor Green
+Write-Host "==> Restored $Dump into $db" -ForegroundColor Green
+if ($keptDb) {
+    Write-Host "The database as it was before the restore is kept as $keptDb. Once the restored data is verified, drop it with:"
+    Write-Host "  $engine exec $container dropdb -U $user $keptDb"
+}
 
 # Show where the restored database stands (pending migrations are applied by the next start).
 $py = Join-Path $root '.venv\Scripts\python.exe'

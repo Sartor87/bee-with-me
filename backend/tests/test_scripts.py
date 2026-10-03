@@ -618,3 +618,39 @@ def test_dump_names_carry_a_random_suffix(rel, random):
 ])
 def test_pruning_only_counts_finished_dumps(rel, prune):
     assert prune in _read(rel)
+
+
+# ── B16: restore checks the dump, restores into a side database, then swaps ──
+
+def _code_lines(text):
+    return [l for l in text.splitlines() if not l.lstrip().startswith('#')]
+
+
+@pytest.mark.Trait("Bug", "B16")
+@pytest.mark.parametrize('rel', RESTORE_SCRIPTS)
+def test_restore_checks_the_dump_before_touching_any_database(rel):
+    body = '\n'.join(_code_lines(_read(rel)))
+    check = body.index('pg_restore -l')
+    assert check < body.index('createdb -U')
+    assert check < body.index(' '.join(RESTORE_CMD))
+    assert check < body.index('ALTER DATABASE')
+    assert body.index(' '.join(RESTORE_CMD)) < body.index('RENAME TO')
+    assert 'PGDMP' in body and 'plain SQL dump' in body
+    assert '_restore_' in body and '_before_restore_' in body
+
+
+@pytest.mark.Trait("Bug", "B16")
+@pytest.mark.parametrize('rel', RESTORE_SCRIPTS)
+def test_restore_never_drops_the_live_database(rel):
+    lines = _code_lines(_read(rel))
+    body = '\n'.join(lines)
+    check_line = next(i for i, l in enumerate(lines) if 'pg_restore -l' in l)
+    drops = [(i, l) for i, l in enumerate(lines) if 'dropdb' in l]
+    assert drops
+    for i, line in drops:
+        # only the side database (cleanup) or, in a printed hint, the kept old database
+        assert re.search(r'restoreDb|RESTORE_DB|keptDb|KEPT_DB', line), line
+        assert not re.search(r'dropdb\b.*[\s"]\$(db|DB)"?(\s|$|\}|\))', line), line
+        if i < check_line:
+            assert re.search(r'restoreDb|RESTORE_DB', line), line   # before the check: cleanup only
+    assert '--force' in body

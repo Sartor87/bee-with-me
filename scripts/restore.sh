@@ -3,9 +3,12 @@
 #
 #   ./scripts/restore.sh [--yes] [--force] DUMP_FILE
 #
-# REPLACES the whole database with the dump: the database is dropped, created empty and the
-# dump restored in a single transaction that stops at the first error, so nothing created after
-# the backup (tables, schema_migrations rows) survives. Prints the migration status at the end.
+# REPLACES the whole database with the dump. The dump is checked first (pg_restore -l), then
+# restored into a side database <db>_restore_<suffix> in a single transaction that stops at the
+# first error. Only when that worked is it swapped in: the current database is renamed to
+# <db>_before_restore_<UTC stamp> (kept until you drop it) and the side database to <db>. Nothing
+# created after the backup (tables, schema_migrations rows) survives; a failed restore leaves the
+# current database untouched. Prints the migration status at the end.
 #
 # Stop the backend first: the script refuses while something listens on port 8000.
 #   --yes    don't ask for confirmation
@@ -26,7 +29,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) YES=1; shift ;;
     --force)  FORCE=1; shift ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "Unknown option: $1 (see --help)" ;;
     *)  [ -z "$DUMP" ] || die "Only one dump file, please (got '$DUMP' and '$1')"; DUMP="$1"; shift ;;
   esac
@@ -63,6 +66,11 @@ env_value() {
 DB="$(env_value POSTGRES_DB rescuer_locator)"
 USER_NAME="$(env_value POSTGRES_USER rescuer)"
 
+# The swap renames databases in SQL: plain lower-case names only, short enough for the
+# _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.
+[[ "$DB" =~ ^[a-z_][a-z0-9_]*$ && ${#DB} -le 33 ]]   || die "POSTGRES_DB '$DB': restore supports database names of up to 33 lower-case letters, digits and _ only."
+RESTORE_DB="${DB}_restore_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+
 # Git Bash/MSYS on Windows: keep container paths (/tmp/...) as they are, hand the engine a Windows path.
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) export MSYS_NO_PATHCONV=1; DUMP="$(cygpath -m "$DUMP")" ;;
@@ -88,17 +96,58 @@ if [ $YES -eq 0 ]; then
 fi
 
 IN_CONTAINER="/tmp/beewithme_restore_$(date +%Y%m%d%H%M%S)_$$_$RANDOM.dump"
-# Always remove the temp dump inside the container, also when a step fails.
-trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true' EXIT
+# The side database exists only between createdb and the swap; any failure in between drops it.
+RESTORE_CREATED=0
+drop_restore_db() {
+  [ "$RESTORE_CREATED" = 1 ] || return 0
+  "$ENGINE" exec "$CONTAINER" dropdb --if-exists --force -U "$USER_NAME" "$RESTORE_DB" >/dev/null 2>&1 || true
+}
+# Always remove the temp dump inside the container (and a half-restored side database), also when a step fails.
+trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true; drop_restore_db' EXIT
 "$ENGINE" cp "$DUMP" "$CONTAINER:$IN_CONTAINER"
 
-echo "==> Replacing $DB ($ENGINE)"
-"$ENGINE" exec "$CONTAINER" dropdb --if-exists --force -U "$USER_NAME" "$DB"
-"$ENGINE" exec "$CONTAINER" createdb -U "$USER_NAME" -O "$USER_NAME" "$DB"
-if ! "$ENGINE" exec "$CONTAINER" pg_restore --exit-on-error --single-transaction --no-owner -U "$USER_NAME" -d "$DB" "$IN_CONTAINER"; then
-  die "pg_restore failed - nothing was restored and database '$DB' is now EMPTY. Fix the cause and run the restore again with the same dump."
+# 1. Is this a dump pg_restore can read at all? Checked before any database is touched.
+if ! "$ENGINE" exec "$CONTAINER" pg_restore -l "$IN_CONTAINER" >/dev/null; then
+  if [ "$(LC_ALL=C head -c 5 "$DUMP")" != PGDMP ]; then
+    echo "$DUMP is not a pg_dump custom-format dump - it looks like a plain SQL dump (beewithme_*.sql from" >&2
+    echo "1.7.1 or earlier), which pg_restore cannot read. Load it into a scratch database with psql, check it," >&2
+    echo "then turn it into a .dump and restore that with this script:" >&2
+    echo "  $ENGINE exec $CONTAINER createdb -U $USER_NAME -O $USER_NAME ${DB}_from_sql" >&2
+    echo "  $ENGINE exec -i $CONTAINER psql -v ON_ERROR_STOP=1 -1 -U $USER_NAME -d ${DB}_from_sql < \"$DUMP\"" >&2
+    echo "  $ENGINE exec $CONTAINER pg_dump -Fc -U $USER_NAME -d ${DB}_from_sql -f /tmp/from_sql.dump" >&2
+    echo "  $ENGINE cp $CONTAINER:/tmp/from_sql.dump ./from_sql.dump" >&2
+  fi
+  die "pg_restore cannot read $DUMP - nothing restored, database '$DB' was not changed."
 fi
-echo "==> Restored $DUMP"
+
+# 2. Restore into the side database; the live database stays as it is until this has worked.
+echo "==> Restoring into $RESTORE_DB ($ENGINE); '$DB' is not touched until that has worked"
+"$ENGINE" exec "$CONTAINER" dropdb --if-exists --force -U "$USER_NAME" "$RESTORE_DB"   # leftover of an interrupted run
+RESTORE_CREATED=1
+"$ENGINE" exec "$CONTAINER" createdb -U "$USER_NAME" -O "$USER_NAME" "$RESTORE_DB" \
+  || die "createdb $RESTORE_DB failed - database '$DB' was not changed."
+if ! "$ENGINE" exec "$CONTAINER" pg_restore --exit-on-error --single-transaction --no-owner -U "$USER_NAME" -d "$RESTORE_DB" "$IN_CONTAINER"; then
+  die "pg_restore failed - nothing restored, database '$DB' was not changed (the side database $RESTORE_DB is dropped)."
+fi
+
+# 3. Swap: one transaction renames the current database away and the restored one into its place.
+KEPT_DB="${DB}_before_restore_$(date -u +%Y%m%d%H%M%S)"
+EXISTS="$("$ENGINE" exec "$CONTAINER" psql -U "$USER_NAME" -d postgres -Atc "SELECT count(*) FROM pg_database WHERE datname = '$DB'" | tr -d '\r')"
+if [ "$EXISTS" = 1 ]; then
+  SWAP_SQL="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB' AND pid <> pg_backend_pid(); ALTER DATABASE $DB RENAME TO $KEPT_DB; ALTER DATABASE $RESTORE_DB RENAME TO $DB;"
+else
+  KEPT_DB=""
+  SWAP_SQL="ALTER DATABASE $RESTORE_DB RENAME TO $DB;"
+fi
+echo "==> Swapping $RESTORE_DB in as $DB"
+"$ENGINE" exec "$CONTAINER" psql -v ON_ERROR_STOP=1 -U "$USER_NAME" -d postgres -c "$SWAP_SQL" >/dev/null \
+  || die "Swapping the restored database in failed - database '$DB' was not changed (is something still connected to it?)."
+RESTORE_CREATED=0
+echo "==> Restored $DUMP into $DB"
+if [ -n "$KEPT_DB" ]; then
+  echo "The database as it was before the restore is kept as $KEPT_DB. Once the restored data is verified, drop it with:"
+  echo "  $ENGINE exec $CONTAINER dropdb -U $USER_NAME $KEPT_DB"
+fi
 
 # Show where the restored database stands (pending migrations are applied by the next start).
 PY="$ROOT/.venv/bin/python"

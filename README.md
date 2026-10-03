@@ -158,9 +158,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\restore.ps1 'E:\bee-backups\b
 ./scripts/restore.sh /media/usb/bee-backups/beewithme_2026-10-02_101500.dump
 ```
 
-The restore script drops the database, creates it empty and restores the dump in one transaction that
-stops at the first error (`pg_restore --exit-on-error --single-transaction`), so nothing created after
-the backup survives — including newer `schema_migrations` rows. It refuses while something listens on
+The restore script first checks the dump (`pg_restore -l`) and refuses before touching any database if
+it cannot be read. It then restores into a side database `<db>_restore_<suffix>` in one transaction that
+stops at the first error (`pg_restore --exit-on-error --single-transaction`). Only when that worked does
+it swap: the current database is renamed to `<db>_before_restore_<UTC stamp>` and the restored one to
+`<db>`, so nothing created after the backup survives (including newer `schema_migrations` rows). If the
+restore fails, the side database is dropped and the live database is left as it was. The old database is
+**kept** (the script prints its name); once the restored data is verified, drop it with
+`podman exec bee-with-me-db-1 dropdb -U rescuer <db>_before_restore_<stamp>` (Docker:
+`docker exec …`). Until then the disk holds both copies.
+
+Plain-text dumps (`beewithme_*.sql` from 1.7.1 or earlier) cannot be read by `pg_restore`: the script
+says so and prints the `psql` commands that load one into a scratch database and turn it into a `.dump`
+that it can restore. It refuses while something listens on
 port 8000 (`-Force` / `--force` overrides), asks before replacing anything (`-Yes` / `--yes` skips the
 question) and finally prints `python -m backend.db.migrate status`. It uses the same engine detection
 as the backup (Podman, then Docker).
