@@ -185,3 +185,11 @@ async def scratch_conn(scratch_db):
         yield conn
     finally:
         await conn.close()
+
+
+@pytest_asyncio.fixture()
+async def migrated_conn(scratch_conn):
+    """Scratch database with every migration in this build applied."""
+    from backend.db.migrate import load_migrations, migrate
+    await migrate(scratch_conn, load_migrations())
+    return scratch_conn
