@@ -1,0 +1,286 @@
+<template>
+  <div class="page">
+    <div class="page-header"><h2>{{ t('settings.title') }}</h2></div>
+
+    <p v-if="!store.settings && !loadFailed" class="muted">{{ t('settings.loading') }}</p>
+    <div v-else-if="!store.settings" class="card">
+      <p class="msg-warn" role="alert">{{ t('settings.loadFailed') }}</p>
+      <button class="secondary" @click="load">{{ t('settings.retry') }}</button>
+    </div>
+
+    <form v-else class="stack" novalidate @submit.prevent="onSave">
+      <section class="card">
+        <h3 class="section-title">{{ t('settings.fireAlarm') }}</h3>
+
+        <div class="alarm-block">
+          <label class="toggle">
+            <input v-model="draft.is_hq_alarm_enabled" type="checkbox" />
+            <span class="toggle-name">{{ t('settings.hqAlarm') }}</span>
+            <span :class="['state', draft.is_hq_alarm_enabled ? 'state-on' : 'state-off']">
+              {{ draft.is_hq_alarm_enabled ? t('settings.stateOn') : t('settings.stateOff') }}
+            </span>
+          </label>
+          <p class="hint">{{ t('settings.hqAlarmHint') }}</p>
+          <p v-if="!draft.is_hq_alarm_enabled" class="notice" role="status">{{ t('settings.hqOffNotice') }}</p>
+          <div class="field">
+            <label for="hq-radius">{{ t('settings.radius') }}</label>
+            <div class="with-unit">
+              <input id="hq-radius" v-model="draft.hq_radius_km" type="number" inputmode="decimal"
+                     step="0.1" min="0.1" max="100" :aria-invalid="!!errors.hq_radius_km"
+                     aria-describedby="hq-radius-err" />
+              <span class="unit">{{ t('settings.unitKm') }}</span>
+            </div>
+            <p id="hq-radius-err" class="field-error">{{ errors.hq_radius_km ? t('settings.' + errors.hq_radius_km) : '' }}</p>
+          </div>
+        </div>
+
+        <div class="alarm-block">
+          <label class="toggle">
+            <input v-model="draft.is_rescuer_alarm_enabled" type="checkbox" />
+            <span class="toggle-name">{{ t('settings.rescuerAlarm') }}</span>
+            <span :class="['state', draft.is_rescuer_alarm_enabled ? 'state-on' : 'state-off']">
+              {{ draft.is_rescuer_alarm_enabled ? t('settings.stateOn') : t('settings.stateOff') }}
+            </span>
+          </label>
+          <p class="hint">{{ t('settings.rescuerAlarmHint') }}</p>
+          <p v-if="!draft.is_rescuer_alarm_enabled" class="notice" role="status">{{ t('settings.rescuerOffNotice') }}</p>
+          <div class="field">
+            <label for="rescuer-radius">{{ t('settings.radius') }}</label>
+            <div class="with-unit">
+              <input id="rescuer-radius" v-model="draft.rescuer_radius_km" type="number" inputmode="decimal"
+                     step="0.1" min="0.1" max="100" :aria-invalid="!!errors.rescuer_radius_km"
+                     aria-describedby="rescuer-radius-err" />
+              <span class="unit">{{ t('settings.unitKm') }}</span>
+            </div>
+            <p id="rescuer-radius-err" class="field-error">{{ errors.rescuer_radius_km ? t('settings.' + errors.rescuer_radius_km) : '' }}</p>
+          </div>
+        </div>
+
+        <h3 class="section-title sub">{{ t('settings.timing') }}</h3>
+        <div class="timing">
+          <div class="field">
+            <label for="age-window">{{ t('settings.ageWindow') }}</label>
+            <div class="with-unit">
+              <input id="age-window" v-model="draft.alarm_max_age_hours" type="number" inputmode="numeric"
+                     step="1" min="1" max="168" :aria-invalid="!!errors.alarm_max_age_hours"
+                     aria-describedby="age-err" />
+              <span class="unit">{{ t('settings.unitHours') }}</span>
+            </div>
+            <p id="age-err" class="field-error">{{ errors.alarm_max_age_hours ? t('settings.' + errors.alarm_max_age_hours) : '' }}</p>
+          </div>
+          <div class="field">
+            <label for="repeat">{{ t('settings.repeat') }}</label>
+            <div class="with-unit">
+              <input id="repeat" v-model="draft.repeat_minutes" type="number" inputmode="numeric"
+                     step="1" min="1" max="60" :aria-invalid="!!errors.repeat_minutes"
+                     aria-describedby="repeat-err" />
+              <span class="unit">{{ t('settings.unitMinutes') }}</span>
+            </div>
+            <p id="repeat-err" class="field-error">{{ errors.repeat_minutes ? t('settings.' + errors.repeat_minutes) : '' }}</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 class="section-title">{{ t('settings.hqTitle') }}</h3>
+        <p v-if="store.hq" class="coords">{{ store.hq.lat.toFixed(5) }}, {{ store.hq.lon.toFixed(5) }}</p>
+        <p v-else class="muted">{{ t('settings.hqNone') }}</p>
+        <p v-if="!store.hq && draft.is_hq_alarm_enabled" class="notice flush" role="status">{{ t('settings.hqMissingNotice') }}</p>
+
+        <div v-if="store.hq" class="row">
+          <button v-if="!confirmClear" type="button" class="danger" @click="confirmClear = true">
+            {{ t('settings.hqClear') }}
+          </button>
+          <template v-else>
+            <span class="confirm-text">{{ t('settings.hqClearConfirm') }}</span>
+            <button type="button" class="danger" :disabled="busy" @click="onClearHQ">{{ t('settings.hqClearYes') }}</button>
+            <button type="button" class="secondary" @click="confirmClear = false">{{ t('settings.cancel') }}</button>
+          </template>
+        </div>
+      </section>
+
+      <div v-if="confirmOff.length" class="confirm-off" role="alertdialog" aria-labelledby="confirm-off-title">
+        <p id="confirm-off-title" class="confirm-title">{{ t('settings.confirmOffTitle') }}</p>
+        <p v-if="confirmOff.includes('hq')">{{ t('settings.hqOffNotice') }}</p>
+        <p v-if="confirmOff.includes('rescuer')">{{ t('settings.rescuerOffNotice') }}</p>
+        <div class="row">
+          <button type="button" class="warn" :disabled="busy" @click="doSave">{{ t('settings.confirmOffYes') }}</button>
+          <button type="button" class="secondary" @click="confirmOff = []">{{ t('settings.cancel') }}</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" :disabled="!valid || !dirty || busy">
+          {{ busy ? t('settings.saving') : t('settings.save') }}
+        </button>
+        <button v-if="dirty" type="button" class="secondary" :disabled="busy" @click="reset">
+          {{ t('settings.discard') }}
+        </button>
+        <span v-if="saveState === 'ok'" class="msg-ok" role="status">{{ t('settings.saved') }}</span>
+        <span v-if="saveState === 'fail'" class="msg-warn" role="alert">{{ t('settings.saveFailed') }}</span>
+      </div>
+    </form>
+  </div>
+</template>
+
+<script setup>
+import { computed, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useSettingsStore } from '../stores/settings'
+import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
+
+const { t } = useI18n()
+const store = useSettingsStore()
+
+const draft = ref({})
+const loadFailed = ref(false)
+const busy = ref(false)
+const saveState = ref('')
+const confirmOff = ref([])
+const confirmClear = ref(false)
+
+function reset() {
+  const s = store.settings
+  if (!s) return
+  draft.value = {
+    is_hq_alarm_enabled: s.is_hq_alarm_enabled,
+    is_rescuer_alarm_enabled: s.is_rescuer_alarm_enabled,
+    hq_radius_km: mToKm(s.hq_radius_m),
+    rescuer_radius_km: mToKm(s.rescuer_radius_m),
+    alarm_max_age_hours: s.alarm_max_age_hours,
+    repeat_minutes: s.repeat_minutes,
+  }
+  confirmOff.value = []
+}
+
+async function load() {
+  loadFailed.value = false
+  try {
+    await store.fetchSettings()
+    reset()
+  } catch {
+    loadFailed.value = true
+  }
+}
+onMounted(() => { if (store.settings) reset(); load() })
+
+const errors = computed(() => ({
+  hq_radius_km:        kmError(draft.value.hq_radius_km),
+  rescuer_radius_km:   kmError(draft.value.rescuer_radius_km),
+  alarm_max_age_hours: wholeError(draft.value.alarm_max_age_hours, LIMITS.hours, 'errRangeHours'),
+  repeat_minutes:      wholeError(draft.value.repeat_minutes, LIMITS.minutes, 'errRangeMinutes'),
+}))
+const valid = computed(() => Object.values(errors.value).every(e => !e))
+
+const patch = computed(() => ({
+  is_hq_alarm_enabled: !!draft.value.is_hq_alarm_enabled,
+  is_rescuer_alarm_enabled: !!draft.value.is_rescuer_alarm_enabled,
+  hq_radius_m: kmToM(draft.value.hq_radius_km),
+  rescuer_radius_m: kmToM(draft.value.rescuer_radius_km),
+  alarm_max_age_hours: Number(draft.value.alarm_max_age_hours),
+  repeat_minutes: Number(draft.value.repeat_minutes),
+}))
+const dirty = computed(() => {
+  const s = store.settings
+  if (!s) return false
+  return Object.entries(patch.value).some(([k, v]) => s[k] !== v)
+})
+
+function onSave() {
+  if (!valid.value || !dirty.value) return
+  saveState.value = ''
+  const off = alarmsTurnedOff(store.settings, patch.value)
+  if (off.length) { confirmOff.value = off; return }
+  doSave()
+}
+
+async function doSave() {
+  busy.value = true
+  confirmOff.value = []
+  try {
+    await store.saveSettings(patch.value)
+    reset()
+    saveState.value = 'ok'
+  } catch {
+    saveState.value = 'fail'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onClearHQ() {
+  busy.value = true
+  saveState.value = ''
+  try {
+    await store.clearHQ()
+    confirmClear.value = false
+  } catch {
+    saveState.value = 'fail'
+  } finally {
+    busy.value = false
+  }
+}
+
+// Any edit hides a stale result; the confirm step goes away if the edit undoes the switch-off.
+watch(draft, () => {
+  saveState.value = ''
+  if (confirmOff.value.length && !alarmsTurnedOff(store.settings, patch.value).length) confirmOff.value = []
+}, { deep: true })
+</script>
+
+<style scoped>
+.page { padding: 24px; flex: 1; max-width: 720px; }
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.section-title { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-muted); }
+.section-title.sub { margin-top: 8px; }
+.muted { font-size: 13px; color: var(--text-muted); margin-bottom: 12px; }
+.hint { font-size: 13px; color: var(--text-muted); margin: 4px 0 10px 28px; }
+
+.alarm-block { padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+
+.toggle { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 14px; color: var(--text); cursor: pointer; }
+.toggle input { width: 18px; height: 18px; padding: 0; accent-color: var(--accent); flex-shrink: 0; }
+.toggle-name { font-weight: 600; }
+.state { font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 2px 8px; border-radius: 99px; }
+.state-on  { color: var(--text-muted); border: 1px solid var(--border); }
+.state-off { color: var(--warning); border: 1px solid var(--warning); background: var(--warning-wash); }
+
+.notice {
+  margin: 0 0 12px 28px; padding: 8px 12px; font-size: 13px;
+  color: var(--text); background: var(--warning-wash);
+  border: 1px solid var(--warning-line); border-radius: 6px;
+}
+.notice.flush { margin-left: 0; }
+
+.field { margin-left: 28px; max-width: 220px; }
+.field label { margin-bottom: 4px; }
+.with-unit { display: flex; align-items: center; gap: 8px; }
+.with-unit input { font-family: ui-monospace, monospace; font-weight: 600; }
+.unit { font-size: 13px; color: var(--text-muted); min-width: 28px; }
+.field-error { min-height: 18px; margin-top: 4px; font-size: 12px; color: var(--warning); }
+input[aria-invalid="true"] { border-color: var(--warning); }
+
+.timing { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+.timing .field { margin-left: 0; max-width: none; }
+
+.coords { font-family: ui-monospace, monospace; font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.confirm-text { font-size: 13px; }
+
+.confirm-off {
+  padding: 14px 16px; border: 1px solid var(--warning-line); border-radius: 10px;
+  background: var(--warning-wash); font-size: 14px;
+}
+.confirm-off p + p { margin-top: 6px; }
+.confirm-title { font-weight: 700; }
+button.warn { background: var(--warning-wash); border: 1px solid var(--warning); color: var(--text); }
+
+.actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.msg-ok { font-size: 13px; color: var(--success); }
+.msg-warn { font-size: 13px; color: var(--warning); }
+
+@media (max-width: 600px) {
+  .timing { grid-template-columns: 1fr; }
+}
+</style>

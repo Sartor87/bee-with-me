@@ -65,3 +65,8 @@ export const exportPDF     = (params) => api.get('/export/pdf',     { params, re
 export const getFireHotspots   = () => api.get('/fire/hotspots')
 export const getFireBurntAreas = () => api.get('/fire/burnt-areas')
 export const getFireStatus     = () => api.get('/fire/status')
+
+// Settings (HQ + fire alarm)
+export const getSettings  = ()     => api.get('/settings')
+export const putSettings  = (body) => api.put('/settings', body)
+export const putHQInitial = (body) => api.put('/settings/hq-initial', body)

@@ -7,7 +7,7 @@
       </div>
 
       <RouterLink
-        v-for="item in NAV_ITEMS" :key="item.to"
+        v-for="item in visibleNav" :key="item.to"
         :to="item.to" class="nav-item"
       ><span>{{ item.icon }}</span> {{ t(item.labelKey) }}</RouterLink>
 
@@ -50,6 +50,9 @@ const auth   = useAuthStore()
 const router = useRouter()
 
 const currentLocale = computed(() => locale.value)
+// Cosmetic only: the router guard is what keeps non-admins off admin routes.
+const visibleNav = computed(() =>
+  NAV_ITEMS.filter(item => !item.adminOnly || auth.user?.role === 'admin'))
 
 function switchLocale(code) { setLocale(code) }
 
