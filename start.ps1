@@ -44,12 +44,12 @@ function Invoke-Native([scriptblock]$Command) {
 }
 
 # .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
-# a leading `export ` (shell-style .env) is accepted.
+# a leading `export ` (shell-style .env, lower case only, like python-dotenv) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -cnotmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }

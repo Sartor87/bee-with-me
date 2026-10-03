@@ -328,6 +328,17 @@ def test_script_env_drops_every_postgres_variable(monkeypatch):
     assert env['POSTGRES_DB'] == 'bwm_test_abc' and env['CONTAINER_ENGINE'] == 'podman'
 
 
+@pytest.mark.Trait("Bug", "B21")
+def test_script_env_drops_lower_and_mixed_case_postgres_keys(monkeypatch):
+    from types import SimpleNamespace
+    from backend.tests import script_env as se
+    fake = {'postgres_db': 'rescuer_locator', 'Postgres_User': 'rescuer', 'container_engine': 'docker',
+            'PATH': '/bin', 'pOsTgReS_pAsSwOrD': 'x'}
+    monkeypatch.setattr(se, 'os', SimpleNamespace(environ=fake))
+    env = se.script_env(POSTGRES_DB='bwm_test_abc')
+    assert env == {'PATH': '/bin', 'POSTGRES_DB': 'bwm_test_abc'}, env
+
+
 def _run_name_check(kind, tmp_path, db):
     """Runs a restore script up to its database-name check (a stub dump, an engine that does not exist)."""
     proj = tmp_path / 'proj'

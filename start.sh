@@ -44,11 +44,14 @@ cd "$ROOT"
 step "Using project folder: $ROOT"
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value; a leading `export ` is accepted; keys match in any case
-# (like the backend's settings and the PowerShell scripts).
+# " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
+# is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value
-  line="$(grep -iE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  local line value key="" c i LC_ALL=C
+  # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
+  # accept EXPORT) and without locale-dependent ranges
+  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"

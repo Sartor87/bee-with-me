@@ -35,9 +35,14 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
 if ($Keep -lt 1) { throw "Keep must be a whole number of at least 1 (got $Keep): it is how many dumps stay in the folder." }
+# An empty or blank -OutDir means <root>\backups, the same as `backup.sh ""` (never a drive root).
+if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = Join-Path $root 'backups' }
 # A trailing separator would reach icacls as an escaped quote ("E:\my backups\" -> E:\my backups").
-$OutDir = $OutDir.TrimEnd('\', '/')
-if (-not $OutDir -or $OutDir -match '^[A-Za-z]:\z') { $OutDir += '\.' }   # a drive root: E:\.
+$trimmed = $OutDir.TrimEnd('\', '/')
+# Only separators ('\'): the root of the current drive, written as its drive letter.
+if (-not $trimmed) { $trimmed = [IO.Path]::GetPathRoot((Get-Location).ProviderPath).TrimEnd('\', '/') }
+$OutDir = $trimmed
+if ($OutDir -match '^[A-Za-z]:\z') { $OutDir += '\.' }   # a bare drive letter: E:\.
 
 # Windows PowerShell 5.1 turns a native command's stderr into a terminating error under 'Stop' as soon
 # as stderr is redirected (a warning from podman with exit code 0 would abort the backup). Native calls
@@ -48,12 +53,12 @@ function Invoke-Native([scriptblock]$Command) {
 }
 
 # .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
-# a leading `export ` (shell-style .env) is accepted.
+# a leading `export ` (shell-style .env, lower case only, like python-dotenv) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -cnotmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }
@@ -194,11 +199,15 @@ $markerJson = [ordered]@{
 Move-Item -LiteralPath "$marker.tmp" -Destination $marker -Force
 Write-Host "==> Marker $marker" -ForegroundColor Green
 
-# Prune old dumps (custom-format .dump only: .dump.partial and older plain .sql dumps are left alone)
+# Prune old dumps (custom-format .dump only: .dump.partial and older plain .sql dumps are left alone).
+# The dump just written always stays (the marker names it), whatever the other files' times say;
+# of the others, the newest $Keep - 1 stay.
+$fresh = Split-Path $target -Leaf
 Get-ChildItem -LiteralPath $OutDir -Filter 'beewithme_*.dump' |
     Where-Object { $_.Name -like 'beewithme_*.dump' } |
+    Where-Object { $_.Name -ne $fresh } |
     Sort-Object LastWriteTime -Descending |
-    Select-Object -Skip $Keep |
+    Select-Object -Skip ($Keep - 1) |
     ForEach-Object { Write-Host "    pruning $($_.Name)"; Remove-Item -LiteralPath $_.FullName }
 
 Write-Host ''

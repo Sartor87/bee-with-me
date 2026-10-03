@@ -26,7 +26,9 @@ while [ $# -gt 0 ]; do
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
-OUT_DIR="${POSITIONAL[0]:-$ROOT/backups}"
+OUT_DIR="${POSITIONAL[0]:-}"
+# An empty or blank OUT_DIR means ./backups (the same as backup.ps1 -OutDir '').
+[[ "$OUT_DIR" =~ ^[[:space:]]*$ ]] && OUT_DIR="$ROOT/backups"
 KEEP="${POSITIONAL[1]:-30}"
 if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [ "$((10#$KEEP))" -lt 1 ]; then
   echo "Keep must be a whole number of at least 1 (got '$KEEP'): it is how many dumps stay in the folder." >&2
@@ -44,11 +46,14 @@ if [ -z "$ENGINE" ]; then
 fi
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value; a leading `export ` is accepted; keys match in any case
-# (like the backend's settings and the PowerShell scripts).
+# " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
+# is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value
-  line="$(grep -iE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  local line value key="" c i LC_ALL=C
+  # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
+  # accept EXPORT) and without locale-dependent ranges
+  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -147,8 +152,11 @@ printf '{"system_identifier": "%s", "database": "%s", "applied": [%s], "dump": "
 mv -f "$MARKER.tmp" "$MARKER"
 echo "==> Marker $MARKER"
 
-# Prune old dumps, keeping the most recent $KEEP (only *.dump: .dump.partial and older plain .sql dumps are left alone)
-ls -1t "$OUT_DIR"/beewithme_*.dump 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
+# Prune old dumps (only *.dump: .dump.partial and older plain .sql dumps are left alone). The dump just
+# written always stays (the marker names it), whatever the other files' times say; of the others, the
+# newest KEEP - 1 stay.
+ls -1t "$OUT_DIR"/beewithme_*.dump 2>/dev/null | FRESH="$TARGET" awk '$0 != ENVIRON["FRESH"]' \
+  | tail -n "+$KEEP" | while read -r old; do
   echo "    pruning $(basename "$old")"
   rm -f "$old"
 done

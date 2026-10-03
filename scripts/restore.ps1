@@ -49,12 +49,12 @@ function Invoke-Native([scriptblock]$Command) {
 }
 
 # .env values: surrounding quotes, a trailing CR and an inline " # comment" are not part of the value;
-# a leading `export ` (shell-style .env) is accepted.
+# a leading `export ` (shell-style .env, lower case only, like python-dotenv) is accepted.
 function Read-DotEnv([string]$Path) {
     $vars = @{}
     if (-not (Test-Path -LiteralPath $Path)) { return $vars }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
+        if ($line -cnotmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') { continue }
         $key = $matches[1]
         $value = ($matches[2] -replace "`r$", '').Trim()
         if ($value -match '^"([^"]*)"') { $value = $matches[1] }
@@ -82,7 +82,7 @@ $user = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } elseif ($envVars['POSTGRE
 if ($db -cnotmatch '^[a-z_][a-z0-9_]*\z' -or $db.Length -gt 33) {
     throw "POSTGRES_DB '$db': restore supports database names of up to 33 lower-case letters, digits and _ only."
 }
-if (@('postgres', 'template0', 'template1') -contains $db) {
+if (@('postgres', 'template0', 'template1', 'template_postgis') -ccontains $db.ToLowerInvariant()) {
     throw "POSTGRES_DB '$db' is a system database - restore never replaces it. Set POSTGRES_DB to the app's database."
 }
 $restoreDb = "${db}_restore_$([guid]::NewGuid().ToString('N').Substring(0, 8))"

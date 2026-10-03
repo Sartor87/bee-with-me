@@ -870,3 +870,128 @@ def test_restore_refuses_a_system_database(kind, db, tmp_path):
     res = _run_script(kind, 'scripts/restore', tmp_path, args, POSTGRES_DB=db, POSTGRES_USER='rescuer')
     assert res.returncode != 0, res.out
     assert 'system database' in res.out, res.out
+
+
+# ── B21: empty OutDir, locale-free name check, lower-case `export` only, README env notes ─────
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.parametrize('kind', _KINDS)
+@pytest.mark.parametrize('out_dir', ['', '   '])
+def test_backup_with_an_empty_out_dir_uses_the_project_backups_folder(kind, out_dir, tmp_path):
+    args = ['-OutDir', out_dir] if kind == 'ps' else [out_dir]
+    res = _run_script(kind, 'scripts/backup', tmp_path, args)
+    proj = tmp_path / 'proj'
+    # the engine does not exist, so the run stops after the folder was made: <root>/backups, as backup.sh ""
+    assert (proj / 'backups').is_dir(), res.out
+    assert {p.name for p in proj.iterdir() if p.is_dir()} == {'scripts', 'backups'}, res.out
+    assert 'is not restricted to this user' not in res.out, res.out   # never pointed at a drive root
+
+
+@pytest.mark.Trait("Bug", "B21")
+def test_backup_ps1_appends_dot_only_to_a_bare_drive_letter():
+    text = _read('scripts/backup.ps1')
+    line = next(l for l in _code_lines(text) if r"+= '\.'" in l)
+    assert '-not $OutDir' not in line, line
+    assert r"'^[A-Za-z]:\z'" in line, line
+
+
+def _locale_available(name):
+    if shutil.which('bash') is None:
+        return False
+    res = subprocess.run([shutil.which('bash'), '-c', 'locale -a'], capture_output=True, text=True, timeout=60)
+    if res.returncode != 0:
+        return False
+    want = name.lower().replace('-', '')
+    return any(l.strip().lower().replace('-', '') == want for l in res.stdout.splitlines())
+
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.skipif(not _locale_available('en_US.UTF-8'), reason='locale en_US.UTF-8 not installed')
+@pytest.mark.parametrize('db', ['Postgres', 'Template1', 'Bwm_x', 'POSTGRES'])
+def test_restore_sh_refuses_upper_case_names_under_a_utf8_locale(db, tmp_path):
+    dump = tmp_path / 'stub.dump'
+    dump.write_bytes(b'PGDMP not really')
+    res = _run_script('sh', 'scripts/restore', tmp_path, ['--yes', '--force', dump.as_posix()],
+                      POSTGRES_DB=db, POSTGRES_USER='rescuer', LC_ALL='en_US.UTF-8', LANG='en_US.UTF-8')
+    assert res.returncode != 0, res.out
+    assert 'restore supports database names' in res.out or 'system database' in res.out, res.out
+
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.parametrize('kind', _KINDS)
+@pytest.mark.parametrize('db', ['Postgres', 'Template1', 'Bwm_x'])
+def test_restore_refuses_upper_case_names(kind, db, tmp_path):
+    dump = tmp_path / 'stub.dump'
+    dump.write_bytes(b'PGDMP not really')
+    args = [str(dump), '-Yes', '-Force'] if kind == 'ps' else ['--yes', '--force', dump.as_posix()]
+    res = _run_script(kind, 'scripts/restore', tmp_path, args, POSTGRES_DB=db, POSTGRES_USER='rescuer')
+    assert res.returncode != 0, res.out
+    assert 'restore supports database names' in res.out or 'system database' in res.out, res.out
+
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.parametrize('kind', _KINDS)
+def test_restore_refuses_template_postgis(kind, tmp_path):
+    dump = tmp_path / 'stub.dump'
+    dump.write_bytes(b'PGDMP not really')
+    args = [str(dump), '-Yes', '-Force'] if kind == 'ps' else ['--yes', '--force', dump.as_posix()]
+    res = _run_script(kind, 'scripts/restore', tmp_path, args, POSTGRES_DB='template_postgis', POSTGRES_USER='rescuer')
+    assert res.returncode != 0, res.out
+    assert 'system database' in res.out, res.out
+
+
+@pytest.mark.Trait("Bug", "B21")
+def test_restore_sh_name_check_does_not_depend_on_the_locale():
+    lines = _code_lines(_read('scripts/restore.sh'))
+    check = next(l for l in lines if 'restore supports database names' in l)
+    assert 'a-z' not in check or 'LC_ALL=C' in check, check
+    i = next(i for i, l in enumerate(lines) if 'template_postgis' in l)
+    assert lines[i - 1].strip() == 'case "${DB,,}" in', lines[i - 1]   # compared lower-cased
+
+
+@pytest.mark.Trait("Bug", "B21")
+def test_restore_ps1_compares_reserved_names_lower_cased():
+    line = next(l for l in _code_lines(_read('scripts/restore.ps1')) if 'template_postgis' in l)
+    assert 'ToLowerInvariant()' in line, line
+
+
+_ENV_UPPER_EXPORT = 'EXPORT POSTGRES_DB=upper_export_db\r\nExport POSTGRES_USER=mixed_export\r\n'
+
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.skipif(shutil.which('bash') is None, reason='no bash')
+@pytest.mark.parametrize('rel', SH_SCRIPTS)
+def test_sh_dotenv_accepts_export_only_in_lower_case(rel, tmp_path):
+    fn = _block(_read(rel), 'env_value() {')
+    (tmp_path / '.env').write_bytes((_ENV_UPPER_EXPORT + 'export postgres_port=7777\r\n').encode('utf-8'))
+    probe = (f'ROOT="{tmp_path.as_posix()}"\n' + fn +
+             'printf "DB=[%s] USER=[%s] PORT=[%s]\n" "$(env_value POSTGRES_DB DEFAULT)" '
+             '"$(env_value POSTGRES_USER DEFAULT)" "$(env_value POSTGRES_PORT DEFAULT)"\n')
+    res = subprocess.run([shutil.which('bash'), '-c', probe], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    assert 'DB=[DEFAULT] USER=[DEFAULT] PORT=[7777]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.skipif(_PS_EXE is None, reason='no PowerShell')
+@pytest.mark.parametrize('rel', PS_SCRIPTS)
+def test_ps_dotenv_accepts_export_only_in_lower_case(rel, tmp_path):
+    fn = _block(_read(rel), 'function Read-DotEnv')
+    (tmp_path / '.env').write_bytes((_ENV_UPPER_EXPORT + 'export postgres_port=7777\r\n').encode('utf-8'))
+    script = tmp_path / 'probe.ps1'
+    script.write_text("$ErrorActionPreference = 'Stop'\n" + fn +
+                      f"$v = Read-DotEnv '{tmp_path / '.env'}'\n"
+                      "\"DB=[$($v['POSTGRES_DB'])] USER=[$($v['POSTGRES_USER'])] PORT=[$($v['POSTGRES_PORT'])]\"\n",
+                      encoding='utf-8')
+    res = subprocess.run([_PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert 'DB=[] USER=[] PORT=[7777]' in res.stdout, res.stdout
+
+
+@pytest.mark.Trait("Bug", "B21")
+def test_readme_says_the_env_notes_apply_to_the_scripts_only():
+    text = _read('README.md')
+    section = text[text.index('#### Backup and restore'):text.index('### 3. Backend')]
+    assert 'scripts only' in section, section
+    assert '`EXPORT' in section and 'lower case' in section, section

@@ -47,11 +47,14 @@ if [ -z "$ENGINE" ]; then
 fi
 
 # .env value of $1 (or $2 when unset/empty): surrounding quotes, a trailing CR and an inline
-# " # comment" are not part of the value; a leading `export ` is accepted; keys match in any case
-# (like the backend's settings and the PowerShell scripts).
+# " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
+# is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value
-  line="$(grep -iE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
+  local line value key="" c i LC_ALL=C
+  # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
+  # accept EXPORT) and without locale-dependent ranges
+  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -69,10 +72,13 @@ DB="${POSTGRES_DB:-$(env_value POSTGRES_DB rescuer_locator)}"
 USER_NAME="${POSTGRES_USER:-$(env_value POSTGRES_USER rescuer)}"
 
 # The swap renames databases in SQL: plain lower-case names only, short enough for the
-# _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit.
-[[ "$DB" =~ ^[a-z_][a-z0-9_]*$ && ${#DB} -le 33 ]]   || die "POSTGRES_DB '$DB': restore supports database names of up to 33 lower-case letters, digits and _ only."
-case "$DB" in
-  postgres|template0|template1) die "POSTGRES_DB '$DB' is a system database - restore never replaces it. Set POSTGRES_DB to the app's database." ;;
+# _before_restore_<stamp> name to stay within PostgreSQL's 63-character limit. The letters are spelled
+# out: under a UTF-8 locale a range like a-z can also match upper-case letters.
+LOWER='abcdefghijklmnopqrstuvwxyz'
+NAME_RE="^[${LOWER}_][${LOWER}0123456789_]*\$"
+[[ "$DB" =~ $NAME_RE && ${#DB} -le 33 ]]   || die "POSTGRES_DB '$DB': restore supports database names of up to 33 lower-case letters, digits and _ only."
+case "${DB,,}" in
+  postgres|template0|template1|template_postgis) die "POSTGRES_DB '$DB' is a system database - restore never replaces it. Set POSTGRES_DB to the app's database." ;;
 esac
 RESTORE_DB="${DB}_restore_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
 

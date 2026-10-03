@@ -209,3 +209,36 @@ def test_backup_ps1_restricts_an_out_dir_with_a_space_and_a_trailing_separator(s
     assert res.returncode == 0, res.out
     _check_marker(scratch_in_container, out_dir)
     assert _acl(out_dir) == (True, {_my_sid()})
+
+
+# ── B21: pruning never removes the dump just written (an older dump with a future mtime) ──────
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.db
+@pytest.mark.parametrize('kind', KINDS)
+def test_pruning_keeps_the_fresh_dump_even_when_an_older_one_has_a_future_mtime(kind, scratch_in_container, tmp_path):
+    out_dir = tmp_path / 'out'
+    out_dir.mkdir()
+    old = out_dir / 'beewithme_2000-01-01_000000_aaaaaa.dump'
+    old.write_bytes(b'PGDMP old dump')
+    future = (datetime.now() + timedelta(days=2)).timestamp()
+    os.utime(old, (future, future))
+    s = scratch_in_container
+    proj = tmp_path / 'proj'
+    (proj / 'scripts').mkdir(parents=True, exist_ok=True)
+    for rel in ('scripts/backup.ps1', 'scripts/backup.sh'):
+        text = (ROOT / rel).read_text(encoding='utf-8').replace('\r\n', '\n')
+        (proj / rel).write_text(text, encoding='utf-8', newline='\n' if rel.endswith('.sh') else '\r\n')
+    env = script_env(CONTAINER_ENGINE=s['engine'], POSTGRES_DB=s['name'], POSTGRES_USER=s['user'])
+    if kind == 'ps':
+        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / 'backup.ps1'),
+               '-OutDir', str(out_dir), '-Keep', '1']
+    else:
+        cmd = [BASH, (proj / 'scripts' / 'backup.sh').as_posix(), out_dir.as_posix(), '1']
+    res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=600)
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    marker = json.loads((out_dir / 'last-backup.json').read_text(encoding='utf-8'))
+    assert (out_dir / marker['dump']).is_file(), out          # the fresh dump survived the pruning
+    assert sorted(p.name for p in out_dir.glob('beewithme_*.dump')) == [marker['dump']], out   # KEEP=1
+    _check_marker(s, out_dir)

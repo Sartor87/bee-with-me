@@ -156,8 +156,12 @@ Back up with `scripts/backup.ps1 -OutDir E:\bee-backups` (Windows) or `./scripts
 (Linux/macOS) — onto another disk. Both find the database container (`bee-with-me-db-1`) through the
 chosen engine: Podman first, Docker when Podman is not installed (`CONTAINER_ENGINE=docker` to force it).
 They read `POSTGRES_DB` / `POSTGRES_USER` from the environment first, then from `.env` (like the backend).
-An environment variable set to an empty string counts as unset (the `.env` value or the default is used),
-and `.env` keys match in any case (`postgres_db=` works too). `-Keep` / `KEEP` must be at least 1.
+These parsing notes apply to the scripts only (the backend reads `.env` through its own settings): in the
+scripts, an environment variable set to an empty string counts as unset (the `.env` value or the default is
+used), `.env` keys match in any case (`postgres_db=` works too), and a leading `export ` is accepted in
+lower case only, like python-dotenv (an `EXPORT KEY=` line is ignored). `-Keep` / `KEEP` must be at least 1;
+the dump just written is never pruned. An empty `-OutDir ''` / `""` writes to `backups` in the project
+folder. Restore refuses the system databases `postgres`, `template0`, `template1` and `template_postgis`.
 
 Dumps hold every name and position of a callout. `backup.ps1` restricts the dump folder to the current
 user (by SID, no inherited permissions) when it creates the folder, and also when it finds an existing

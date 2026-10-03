@@ -7,6 +7,7 @@ project tree, containers or database. A local listener stands in for Postgres on
 """
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -372,3 +373,20 @@ def test_old_working_dir_with_doubled_separators_still_matches(kind, project, tm
     assert res.returncode == 0, res.out
     assert _backups(res) and _old_stopped(res), res.calls
     assert DRY in res.out
+
+
+# ── B21: the project folder is printed without a trailing separator ───────────────────────────
+
+@pytest.mark.Trait("Bug", "B21")
+@pytest.mark.parametrize('kind', KINDS)
+def test_project_folder_line_has_no_trailing_separator(kind, project, tmp_path):
+    if kind == 'ps':
+        args = ('-ProjectPath', str(project) + '\\\\')
+    else:
+        args = ('--project-path', project.as_posix() + '//')
+    res = _run(kind, project, tmp_path, migrate='0', args=args)
+    assert res.returncode == 0, res.out
+    line = next(l for l in res.out.splitlines() if 'Using project folder:' in l)
+    line = re.sub(r'\x1b\[[0-9;]*m', '', line).rstrip()   # start.sh colours its step lines
+    assert not line.endswith(('\\', '/')), line
+    assert line.lower().endswith(project.name.lower()), line
