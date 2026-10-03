@@ -40,6 +40,7 @@
 - [ ] confirm the RescuerBee frame interval with the hardware owner — it drives every data-volume estimate
 - [ ] `docker-compose.yaml` tiles service: `maptiler/tileserver-gl:latest` no longer accepts `--no-config` (container restart-loops with "unknown option '--no-config'"). Pin the image to a known version and fix the command; is the service still used at all (BG Mountains tiles are served by FastAPI)?
 - [ ] PDF export on Windows: WeasyPrint needs the GTK/Pango runtime, which is not installed by `pip`; without it PDF export fails. Document the install (or bundle it) and test a real PDF render on Windows
+- [ ] tests print `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead` (from `fastapi/testclient.py`, with the current FastAPI/Starlette versions). Harmless today; before a future Starlette drops httpx support, follow its migration note (add the replacement test client package with a pinned version in `backend/requirements.txt`) and re-run the backend tests. `httpx` itself stays: the EFFIS poller uses it at runtime
 - [ ] UI for bright daylight: the interface is dark-only; operators also work outdoors in sun — add a daylight / high-contrast mode
 - [ ] keyboard focus is invisible on buttons (no focus ring) — add one
 - [ ] after a restore the previous database is kept as `<db>_before_restore_<time>` (a second copy of all personal data) — remind the operator to drop it, or offer a cleanup command
