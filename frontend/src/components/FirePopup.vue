@@ -10,7 +10,7 @@
         <dt>{{ t('fire.popup.detected') }}</dt>
         <dd>
           <span class="fp-mono">{{ relative(properties.acquired_at) }}</span>
-          <span class="fp-sub fp-mono">{{ utc(properties.acquired_at) }}</span>
+          <span v-if="utc(properties.acquired_at)" class="fp-sub fp-mono">{{ utc(properties.acquired_at) }}</span>
         </dd>
       </div>
       <div class="fp-row">
@@ -19,7 +19,7 @@
       </div>
       <div v-if="properties.state && properties.state !== 'active'" class="fp-row">
         <dt>{{ t('fire.popup.state') }}</dt>
-        <dd><span class="fp-chip">{{ t(`fire.state.${properties.state}`) }}</span></dd>
+        <dd><span class="fp-chip">{{ stateLabel }}</span></dd>
       </div>
       <div v-if="properties.notes" class="fp-row fp-notes">
         <dt>{{ t('fire.popup.notes') }}</dt>
@@ -44,7 +44,7 @@
         <dt>{{ t('fire.popup.ended') }}</dt>
         <dd>
           <span class="fp-mono">{{ day(properties.ended_at) }}</span>
-          <span class="fp-sub">{{ burnedAgo }}</span>
+          <span v-if="burnedAgo" class="fp-sub">{{ burnedAgo }}</span>
         </dd>
       </div>
       <div v-if="properties.effis_fire_id" class="fp-row">
@@ -80,12 +80,24 @@ const sourceLabel = computed(() => {
   return ['viirs', 'modis', 'field_report'].includes(s) ? t(`fire.source.${s}`) : (s ?? t('fire.unknown'))
 })
 
+const STATES = ['active', 'dismissed', 'extinguished', 'suppressed']
+const stateLabel = computed(() => {
+  const s = props.properties.state
+  return STATES.includes(s) ? t(`fire.state.${s}`) : t('fire.unknown')
+})
+
+// null, undefined and '' are "not reported", not zero and not the epoch: Number(null) is 0
+// and new Date(null) is 1970, so check before converting (BP-01, BP-03).
+const isBlank = v => v === null || v === undefined || v === ''
+
 const areaLabel = computed(() => {
+  if (isBlank(props.properties.area_ha)) return t('fire.unknown')
   const a = Number(props.properties.area_ha)
   return Number.isFinite(a) ? `${a.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${t('fire.popup.ha')}` : t('fire.unknown')
 })
 
 function ageMsOf(iso) {
+  if (isBlank(iso)) return null
   const ms = Date.now() - Date.parse(iso)
   return Number.isFinite(ms) ? Math.max(0, ms) : null
 }
@@ -100,11 +112,13 @@ function relative(iso) {
 }
 
 function utc(iso) {
+  if (isBlank(iso)) return ''
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '' : `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
 function day(iso) {
+  if (isBlank(iso)) return t('fire.unknown')
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? t('fire.unknown') : d.toISOString().slice(0, 10)
 }
