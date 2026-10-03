@@ -60,3 +60,8 @@ export const getTileStatus      = () => api.get('/tiles/bgmountains/status')
 export const exportCSV     = (params) => api.get('/export/csv',     { params, responseType: 'blob' })
 export const exportGeoJSON = (params) => api.get('/export/geojson', { params, responseType: 'blob' })
 export const exportPDF     = (params) => api.get('/export/pdf',     { params, responseType: 'blob' })
+
+// Fire (EFFIS / GWIS)
+export const getFireHotspots   = () => api.get('/fire/hotspots')
+export const getFireBurntAreas = () => api.get('/fire/burnt-areas')
+export const getFireStatus     = () => api.get('/fire/status')

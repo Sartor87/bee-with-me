@@ -11,6 +11,7 @@ import Feature from 'ol/Feature'
 import Point from 'ol/geom/Point'
 import LineString from 'ol/geom/LineString'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import GeoJSON from 'ol/format/GeoJSON'
 import { Circle, Fill, Stroke, Style, Text } from 'ol/style'
 import RegularShape from 'ol/style/RegularShape'
 import Graticule from 'ol/layer/Graticule'
@@ -18,6 +19,7 @@ import ScaleLine from 'ol/control/ScaleLine'
 import { forward as toMGRS } from 'mgrs'
 import { useSettings } from './useSettings'
 import { freshnessOf, LIVE, LOST } from '../lib/freshness'
+import { hotspotStyleKey } from '../lib/fireStyle'
 
 const DEFAULT_COLOR = '#3b82f6'
 
@@ -98,6 +100,58 @@ function hexToRgba(hex, alpha) {
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
   return `rgba(${r},${g},${b},${alpha})`
+}
+
+// Fire colours live as tokens in style.css (--fire-*). OpenLayers paints on a canvas and
+// cannot read CSS variables, so resolve them when a style is built. Fallbacks only matter
+// without a DOM.
+function fireToken(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    return v || fallback
+  } catch { return fallback }
+}
+
+// Hotspot look per style key. Age fades fill and ring so the newest detections read first;
+// state (dismissed / suppressed / extinguished) goes hollow and grey; a field report is a
+// diamond, never a circle, so it cannot pass for a satellite detection.
+function makeHotspotStyle(key, fieldReportLabel) {
+  const ember    = fireToken('--fire-hotspot', '#fb923c')
+  const inactive = fireToken('--fire-inactive', '#8892aa')
+  const ring     = fireToken('--text', '#e2e8f0')
+  const circle = (radius, fill, stroke) => new Style({
+    image: new Circle({ radius, fill: fill ? new Fill({ color: fill }) : undefined, stroke }),
+  })
+  switch (key) {
+    case 'age_24h': return circle(6, hexToRgba(ember, 1),   new Stroke({ color: ring, width: 2 }))
+    case 'age_3d':  return circle(5, hexToRgba(ember, 0.6), new Stroke({ color: hexToRgba(ring, 0.6), width: 1.5 }))
+    case 'age_7d':  return circle(4, hexToRgba(ember, 0.3), new Stroke({ color: hexToRgba(ring, 0.3), width: 1 }))
+    case 'field_report':
+      return new Style({
+        image: new RegularShape({
+          points: 4, radius: 9, angle: 0,
+          fill: new Fill({ color: ember }), stroke: new Stroke({ color: ring, width: 2 }),
+        }),
+        text: fieldReportLabel ? new Text({
+          text: fieldReportLabel, offsetY: 20,
+          font: 'bold 12px system-ui',
+          fill: new Fill({ color: ring }), stroke: new Stroke({ color: '#000', width: 3 }),
+        }) : undefined,
+      })
+    case 'suppressed':
+      return circle(5, null, new Stroke({ color: hexToRgba(inactive, 0.9), width: 1.5, lineDash: [3, 3] }))
+    default: // dismissed, extinguished
+      return circle(4, null, new Stroke({ color: hexToRgba(inactive, 0.8), width: 1.5 }))
+  }
+}
+
+// Burnt areas are history, not alarm: neutral ash, never red.
+function makeBurntStyle() {
+  const ash = fireToken('--fire-burnt', '#a8a29e')
+  return new Style({
+    fill:   new Fill({ color: hexToRgba(ash, 0.28) }),
+    stroke: new Stroke({ color: hexToRgba(ash, 0.9), width: 1.5 }),
+  })
 }
 
 function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
@@ -196,6 +250,26 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   // Checkpoint dot layer
   const checkpointSource = new VectorSource()
   const checkpointLayer  = new VectorLayer({ source: checkpointSource, zIndex: 6, visible: false })
+
+  // Fire layers: history (burnt areas) and detections (hotspots) sit under the trackers and
+  // trails, hidden until the operator turns them on.
+  const geojson       = new GeoJSON()
+  const burntSource   = new VectorSource()
+  const burntLayer    = new VectorLayer({ source: burntSource, zIndex: 3, visible: false })
+  const hotspotSource = new VectorSource()
+  const hotspotStyles = {}
+  let   fieldReportLabel = ''
+  const hotspotLayer  = new VectorLayer({
+    source: hotspotSource, zIndex: 3.5, visible: false,
+    style: (feature) => {
+      const key = hotspotStyleKey(feature.getProperties(), Date.now())
+      return (hotspotStyles[key] ??= makeHotspotStyle(key, fieldReportLabel))
+    },
+  })
+  let burntStyleCache = null
+  burntLayer.setStyle(() => (burntStyleCache ??= makeBurntStyle()))
+  let fireTimer = null
+  let fireClickCb = null
 
   // Measure layer
   const measureSource = new VectorSource()
@@ -447,7 +521,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
     map = new Map({
       target:   mapRef.value,
-      layers:   [basemapLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
+      layers:   [basemapLayer, burntLayer, hotspotLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
       view:     new View({ center: fromLonLat([25.0, 42.5]), zoom: 7 }),
       overlays: [tooltip],
       controls: [new ScaleLine({ units: 'metric', bar: false, minWidth: 100 })],
@@ -562,6 +636,38 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       }
     })
 
+    // Fire features: a tracker wins when both are hit; clicking bare map closes the popup.
+    const fireHit = (pixel) => {
+      const hotspot = map.forEachFeatureAtPixel(pixel, f => f, { layerFilter: l => l === hotspotLayer, hitTolerance: 6 })
+      if (hotspot) return { kind: 'hotspot', feature: hotspot }
+      const burnt = map.forEachFeatureAtPixel(pixel, f => f, { layerFilter: l => l === burntLayer })
+      return burnt ? { kind: 'burnt_area', feature: burnt } : null
+    }
+    const trackerHit = (pixel) => map.hasFeatureAtPixel(pixel, { layerFilter: l => l === vectorLayer, hitTolerance: 5 })
+
+    map.on('click', (evt) => {
+      if (hqPlacementMode || measureMode || !fireClickCb) return
+      if (trackerHit(evt.pixel)) return
+      const hit = fireHit(evt.pixel)
+      if (!hit) { fireClickCb(null); return }
+      const props = { ...hit.feature.getProperties() }
+      delete props.geometry
+      fireClickCb({
+        kind: hit.kind,
+        properties: props,
+        coordinate: hit.kind === 'hotspot' ? hit.feature.getGeometry().getCoordinates() : evt.coordinate,
+      })
+    })
+
+    map.on('pointermove', (evt) => {
+      if (evt.dragging || hqPlacementMode || measureMode) return
+      if (trackerHit(evt.pixel)) return
+      if (fireHit(evt.pixel)) map.getTargetElement().style.cursor = 'pointer'
+    })
+
+    // Hotspots fade with age; repaint each minute so they do so without a refetch.
+    fireTimer = setInterval(() => { if (hotspotLayer.getVisible()) hotspotLayer.changed() }, 60_000)
+
     // Re-evaluate stale state every minute without needing a new WS frame
     staleTimer = setInterval(() => {
       source.getFeatures().forEach(f => {
@@ -596,6 +702,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   onUnmounted(() => {
     map?.setTarget(null)
     clearInterval(staleTimer)
+    clearInterval(fireTimer)
   })
 
   function setMeasureMode(on) {
@@ -643,10 +750,33 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     if (map) map.getTargetElement().style.cursor = on ? 'crosshair' : ''
   }
 
+  function setBurntAreas(fc) {
+    burntSource.clear(true)
+    burntSource.addFeatures(geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' }))
+  }
+
+  function setHotspots(fc) {
+    hotspotSource.clear(true)
+    hotspotSource.addFeatures(geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' }))
+  }
+
+  function setFireLayerVisible(name, visible) {
+    if (name === 'burnt')    burntLayer.setVisible(visible)
+    if (name === 'hotspots') hotspotLayer.setVisible(visible)
+  }
+
+  function setFireLabels({ fieldReport }) {
+    fieldReportLabel = fieldReport || ''
+    for (const k of Object.keys(hotspotStyles)) delete hotspotStyles[k]
+    hotspotLayer.changed()
+  }
+
+  function onFireFeatureClick(cb) { fireClickCb = cb }
+
   function refreshMarkers(list) {
     list.forEach(upsertFeature)
     removeStaleFeatures(list.map(p => p.device_id))
   }
 
-  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode }
+  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick }
 }

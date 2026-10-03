@@ -1,5 +1,6 @@
 import { onUnmounted } from 'vue'
 import { useLocationsStore } from '../stores/locations'
+import { useFireStore } from '../stores/fire'
 
 // Belt-and-braces reconciliation. The WebSocket can look healthy and still be delivering
 // nothing (a half-open socket after a sleep/wake, a dead LISTEN connection on the server),
@@ -15,10 +16,11 @@ let hasConnectedBefore = false
 
 export function useWebSocket() {
   const store = useLocationsStore()
+  const fireStore = useFireStore()
 
   async function resync() {
     try {
-      await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
+      await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail(), fireStore.refreshVisible()])
     } catch { /* offline or backend restarting — the next tick tries again */ }
   }
 
@@ -42,6 +44,7 @@ export function useWebSocket() {
       if (msg.type === 'location_update') store.applyLocationUpdate(msg)
       if (msg.type === 'sos_alert')       store.applySOSAlert(msg)
       if (msg.type === 'serial_status')   store.applySerialStatus(msg)
+      if (msg.type === 'fire_data_updated') fireStore.applyFireDataUpdated(msg).catch(() => {})
     }
 
     socket.onclose = () => {

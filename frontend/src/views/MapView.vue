@@ -53,6 +53,12 @@
       <button v-if="hqLocation" class="bm-btn bm-btn-danger" @click="clearHQ">
         {{ t('map.hqClear') }}
       </button>
+      <button
+        v-for="name in FIRE_LAYER_BUTTONS" :key="name"
+        :class="['bm-btn', { active: fireStore.layers[name] }]"
+        :aria-pressed="fireStore.layers[name]"
+        @click="toggleFire(name)"
+      >{{ t(`fire.layers.${name}`) }}</button>
       <template v-if="activeBasemap === 'satellite'">
         <span class="bm-row-break" />
         <button
@@ -61,6 +67,28 @@
           @click="toggleWeather(wl.id)"
         >{{ t(`map.weather.${wl.id}`) }}</button>
       </template>
+    </div>
+
+    <!-- Fire data freshness: always shows its age, and says so when it cannot. -->
+    <div v-if="fireStore.anyLayerOn" class="fire-pill" :class="`fire-${firePill.kind}`" role="status">
+      <i18n-t v-if="firePill.time" keypath="fire.asOf" tag="span" class="fire-pill-main">
+        <template #time><span class="fire-time">{{ firePill.time }}</span></template>
+      </i18n-t>
+      <span v-if="firePill.note" class="fire-pill-note">{{ firePill.note }}</span>
+    </div>
+
+    <!-- Licence attribution (text only: the offline build loads nothing from the network). -->
+    <div v-if="fireStore.anyLayerOn" class="fire-attribution">{{ t('fire.attribution') }}</div>
+
+    <!-- OpenLayers moves this element into its overlay; the popup inside is a Vue component. -->
+    <div ref="firePopupEl" class="fire-popup-anchor">
+      <FirePopup
+        v-if="firePopup"
+        :kind="firePopup.kind"
+        :properties="firePopup.properties"
+        :is-admin="authStore.user?.role === 'admin'"
+        @close="closeFirePopup"
+      />
     </div>
 
     <!-- Measure readout -->
@@ -194,12 +222,17 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 defineOptions({ name: 'MapView' })
 import { useI18n } from 'vue-i18n'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import Overlay from 'ol/Overlay'
 import { useLocationsStore } from '../stores/locations'
+import { useFireStore } from '../stores/fire'
+import { useAuthStore } from '../stores/auth'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useMap, BASEMAPS } from '../composables/useMap'
 import { getGroupsWithMembers, getSerialStatus } from '../api'
 import { ageMs, formatAge, freshnessOf, byUrgency } from '../lib/freshness'
+import { freshnessKind, isFireDataStale } from '../lib/fireStyle'
 import SOSToast from '../components/SOSToast.vue'
+import FirePopup from '../components/FirePopup.vue'
 
 const OWM_KEY = import.meta.env.VITE_OWM_API_KEY ?? ''
 const WEATHER_LAYERS = [
@@ -225,8 +258,10 @@ const WEATHER_LAYERS = [
   },
 ]
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const store   = useLocationsStore()
+const fireStore = useFireStore()
+const authStore = useAuthStore()
 const mapEl   = ref(null)
 
 const activeBasemap  = ref('osm')
@@ -306,7 +341,7 @@ function loadHQ() {
   } catch { return null }
 }
 
-const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode } = useMap(
+const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick } = useMap(
   mapEl,
   displayList,
   computed(() => store.trails),
@@ -321,6 +356,70 @@ const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpo
   },
 )
 const { connect } = useWebSocket()
+
+// ── Fire layers ──────────────────────────────────────────────────────────────
+const FIRE_LAYER_BUTTONS = ['burnt', 'hotspots']
+const firePopupEl = ref(null)
+const firePopup   = ref(null)   // { kind, properties, coordinate } | null
+let   fireOverlay = null
+
+function toggleFire(name) {
+  const on = !fireStore.layers[name]
+  setFireLayerVisible(name, on)
+  if (!on && firePopup.value && (name === 'hotspots') === (firePopup.value.kind === 'hotspot')) closeFirePopup()
+  fireStore.setLayer(name, on).catch(() => { /* fetchFailed drives the pill */ })
+}
+
+function closeFirePopup() {
+  firePopup.value = null
+  fireOverlay?.setPosition(undefined)
+}
+
+// What the pill says. Order matters: a failure outranks everything, then never-fetched,
+// then an as-of time too old to trust, then the quiet and live cases.
+const firePill = computed(() => {
+  const at = fireStore.shownFetchedAt
+  const time = at
+    ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
+  const kind = freshnessKind(fireStore.shownUpstreamState)
+  if (fireStore.fetchFailed || kind === 'error') {
+    return { kind: 'error', time, note: t('fire.error') }
+  }
+  if (!at) return { kind: 'unknown', time: '', note: t('fire.neverFetched') }
+  if (isFireDataStale(at, nowTick.value)) return { kind: 'error', time, note: t('fire.stale') }
+  if (kind === 'quiet') return { kind: 'quiet', time, note: t('fire.quiet') }
+  return { kind, time, note: '' }
+})
+
+onMounted(() => {
+  const m = map()
+  if (!m) return
+  const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  fireOverlay = new Overlay({
+    element: firePopupEl.value,
+    positioning: 'bottom-center',
+    offset: [0, -16],
+    stopEvent: true,
+    autoPan: { animation: { duration: reduce ? 0 : 200 }, margin: 24 },
+  })
+  m.addOverlay(fireOverlay)
+  onFireFeatureClick(async (sel) => {
+    firePopup.value = sel
+    // The popup has no size until Vue renders it; position after that so OpenLayers
+    // anchors it by its real width and height.
+    await nextTick()
+    fireOverlay.setPosition(sel ? sel.coordinate : undefined)
+  })
+  setFireLabels({ fieldReport: t('fire.source.field_report') })
+  // Layers remembered from the last session show again after a reload.
+  for (const name of FIRE_LAYER_BUTTONS) setFireLayerVisible(name, fireStore.layers[name])
+  fireStore.refreshVisible().catch(() => { /* fetchFailed drives the pill */ })
+})
+
+watch(() => fireStore.hotspots,   (fc) => setHotspots(fc))
+watch(() => fireStore.burntAreas, (fc) => setBurntAreas(fc))
+watch(locale, () => setFireLabels({ fieldReport: t('fire.source.field_report') }))
 
 onMounted(async () => {
   await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
@@ -681,6 +780,32 @@ function batClass(v) {
 .bm-btn-danger { color: #f87171; border-color: rgba(248,113,113,0.35); }
 .bm-btn-danger:hover { background: rgba(248,113,113,0.1); color: #fca5a5; }
 .bm-row-break { flex-basis: 100%; height: 0; }
+
+/* Fire data freshness. Neutral when live, muted when quiet or unknown, amber (never red)
+   when stale or failed: red is reserved for alarms. */
+.fire-pill {
+  position: absolute; top: 48px; left: 12px; z-index: 50;
+  display: flex; flex-direction: column; gap: 2px;
+  max-width: 300px; padding: 5px 10px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 4px; font-size: 12px; color: var(--text);
+}
+.fire-pill-main { font-weight: 600; }
+.fire-time { font-family: monospace; font-variant-numeric: tabular-nums; }
+.fire-pill-note { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
+.fire-unknown .fire-pill-main, .fire-quiet .fire-pill-main { color: var(--text-muted); }
+.fire-error { border-color: rgba(234,179,8,.5); background: rgba(120,53,15,.94); }
+.fire-error .fire-pill-main, .fire-error .fire-pill-note { color: #fde68a; }
+
+.fire-attribution {
+  position: absolute; bottom: 8px; left: 12px; z-index: 50;
+  max-width: max(calc(100% - 300px), 200px); padding: 2px 6px;
+  background: rgba(15,17,23,.78); border-radius: 3px;
+  font-size: 10.5px; line-height: 1.35; color: var(--text-muted);
+  pointer-events: none;
+}
+/* Not positioned: OpenLayers sizes its overlay container from this element. */
+.fire-popup-anchor { display: block; }
 
 .tracker-panel {
   width: 260px; background: var(--bg-panel); border-left: 1px solid var(--border);
