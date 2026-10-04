@@ -80,8 +80,19 @@ class FireAlarmService:
                 except Exception as exc:  # noqa: BLE001 - never evaluate on a failed read (would mask or mass-resolve)
                     logger.error('Fire alarm tick skipped: settings could not be read: %s', exc)
                     return False
-                await self._evaluate(conn, settings, hq)
-                await self._repeat(conn)
+                # Each step runs in its own savepoint inside the lock-holding transaction: a failure rolls
+                # back only that step (and its pending notifications), the other step still runs, the
+                # advisory lock stays held, and notifications are delivered only when the outer commit lands.
+                try:
+                    async with conn.transaction():
+                        await self._evaluate(conn, settings, hq)
+                except Exception as exc:  # noqa: BLE001 - repeats of open alerts must not depend on evaluation
+                    logger.error('Fire alarm evaluation failed: %s', exc, exc_info=True)
+                try:
+                    async with conn.transaction():
+                        await self._repeat(conn)
+                except Exception as exc:  # noqa: BLE001 - a failed repeat must not undo the evaluation
+                    logger.error('Fire alarm repeat step failed: %s', exc, exc_info=True)
         return True
 
     async def _evaluate(self, conn: asyncpg.Connection, settings, hq) -> None:

@@ -86,7 +86,23 @@ async def test_alert_payload_never_carries_the_hq_position(scratch_pool, migrate
         await listener.close()
     text = json.dumps(payload)
     assert 'hq_latitude' not in text and 'hq_longitude' not in text
-    assert str(HQ[0]) not in text and 'phone' not in text and 'photo' not in text
+    assert 'phone' not in text and 'photo' not in text
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key, None
+                yield from walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from walk(item)
+        else:
+            yield None, node
+
+    for key, value in walk(payload):
+        assert key is None or not str(key).startswith('hq_')
+        # HQ latitude only: the hotspot shares HQ's longitude (24.5), so that value cannot be told apart
+        assert isinstance(value, bool) or not isinstance(value, (int, float)) or value != HQ[0]
 
 
 async def test_rescuer_without_gnss_fix_is_still_protected(scratch_pool, migrated_conn):

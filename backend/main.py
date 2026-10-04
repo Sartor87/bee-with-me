@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -176,6 +176,9 @@ async def lifespan(app: FastAPI):
         serial_task.cancel()
     if hid_task:
         hid_task.cancel()
+    # The alarm task may hold a pooled connection mid-tick: let its cancellation finish before the pool closes.
+    with suppress(asyncio.CancelledError):
+        await alarm_task
     await close_pool()
 
 

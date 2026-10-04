@@ -12,7 +12,7 @@ from backend.fire import service as service_module
 from backend.fire.proximity import AlarmSettings, Decisions
 from backend.fire.service import FireAlarmService
 
-pytestmark = [pytest.mark.Trait("Task", "T15"), pytest.mark.asyncio]
+pytestmark = [pytest.mark.Trait("Task", "T15")]
 
 SETTINGS = AlarmSettings(True, True, 10000, 3000, 24, 5)
 
@@ -40,6 +40,7 @@ def _svc(conn):
     return FireAlarmService(pool_getter=lambda: _Pool(conn))
 
 
+@pytest.mark.asyncio
 async def test_failed_settings_read_skips_the_tick_and_logs_error(monkeypatch, caplog):
     conn = _Conn()
     monkeypatch.setattr(repo, 'load_alarm_settings', AsyncMock(side_effect=RuntimeError('db down')))
@@ -54,6 +55,7 @@ async def test_failed_settings_read_skips_the_tick_and_logs_error(monkeypatch, c
     assert any(r.levelno == logging.ERROR and 'settings' in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.asyncio
 async def test_missing_settings_row_raises_a_named_error():
     conn = AsyncMock()
     conn.fetchrow.return_value = None
@@ -70,6 +72,7 @@ def _patch_loaders(monkeypatch, decisions):
     monkeypatch.setattr(service_module, 'evaluate', lambda *a, **k: decisions())
 
 
+@pytest.mark.asyncio
 async def test_hq_missing_warning_is_logged_once_per_state_change(monkeypatch, caplog):
     state = {'missing': True}
     _patch_loaders(monkeypatch, lambda: Decisions([], [], {}, hq_missing=state['missing']))
@@ -88,6 +91,7 @@ async def test_hq_missing_warning_is_logged_once_per_state_change(monkeypatch, c
     assert len(all_logs) == 2   # once, then again after the state flipped back and forth
 
 
+@pytest.mark.asyncio
 async def test_loop_survives_a_failing_tick(monkeypatch, caplog):
     svc = FireAlarmService(pool_getter=lambda: _Pool(_Conn()), tick_s=0.01)
     calls = {'n': 0}
@@ -114,3 +118,60 @@ def test_request_evaluation_only_signals():
     svc = FireAlarmService(pool_getter=lambda: None)
     svc.request_evaluation()
     assert svc._wake.is_set()
+
+
+class _TxConn(_Conn):
+    """Conn whose nested transactions roll back on error like asyncpg savepoints (records outcomes)."""
+
+    def __init__(self):
+        super().__init__()
+        self.outcomes = []
+
+    @asynccontextmanager
+    async def transaction(self):
+        try:
+            yield
+        except BaseException:
+            self.outcomes.append('rollback')
+            raise
+        else:
+            self.outcomes.append('commit')
+
+
+@pytest.mark.Trait("Bug", "B41")
+@pytest.mark.asyncio
+async def test_repeats_still_run_when_evaluation_fails(monkeypatch, caplog):
+    conn = _TxConn()
+    monkeypatch.setattr(repo, 'load_alarm_settings', AsyncMock(return_value=(SETTINGS, None)))
+    monkeypatch.setattr(repo, 'load_rescuer_targets', AsyncMock(side_effect=ValueError('bad row')))
+    monkeypatch.setattr(repo, 'mark_repeats_due', AsyncMock(return_value=['a1', 'a2']))
+    with caplog.at_level(logging.ERROR):
+        await _svc(conn).tick()
+    sent = [c.args for c in conn.execute.await_args_list if c.args[1] == 'fire_alert_repeat']
+    assert len(sent) == 1 and '"a1"' in sent[0][2]
+    assert any(r.levelno == logging.ERROR and 'evaluation' in r.getMessage() for r in caplog.records)
+    assert 'rollback' in conn.outcomes   # the failed evaluation did not commit partial writes
+
+
+@pytest.mark.Trait("Bug", "B41")
+@pytest.mark.asyncio
+async def test_failed_settings_read_skips_evaluation_and_repeats(monkeypatch):
+    conn = _TxConn()
+    monkeypatch.setattr(repo, 'load_alarm_settings', AsyncMock(side_effect=RuntimeError('db down')))
+    repeats = AsyncMock(return_value=['a1'])
+    monkeypatch.setattr(repo, 'mark_repeats_due', repeats)
+    assert await _svc(conn).tick() is False
+    repeats.assert_not_called()
+    assert not any(c.args[1] == 'fire_alert_repeat' for c in conn.execute.await_args_list)
+
+
+@pytest.mark.Trait("Bug", "B41")
+@pytest.mark.asyncio
+async def test_cancellation_during_evaluation_propagates(monkeypatch):
+    monkeypatch.setattr(repo, 'load_alarm_settings', AsyncMock(return_value=(SETTINGS, None)))
+    monkeypatch.setattr(repo, 'load_rescuer_targets', AsyncMock(side_effect=asyncio.CancelledError()))
+    repeats = AsyncMock(return_value=[])
+    monkeypatch.setattr(repo, 'mark_repeats_due', repeats)
+    with pytest.raises(asyncio.CancelledError):
+        await _svc(_TxConn()).tick()
+    repeats.assert_not_called()
