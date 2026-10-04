@@ -6,8 +6,9 @@
   - [x] P1 fire data: migration `0002`, GWIS fetch, poller, read endpoints
   - [x] P2 fire layers on the map
   - [x] P3 settings page + HQ location in the database (migration `0003`, admin-only Settings page, optimistic concurrency on settings writes)
-  - [ ] P4 fire proximity alarm (HQ / rescuers, repeat until acknowledged) — in progress: migration `0004` + pure proximity evaluation done; alarm service, alert endpoints and alarm banner next
-  - [ ] P5 dismiss, suppression zones, field reports
+  - [x] P4 fire proximity alarm (HQ / rescuers, repeat until acknowledged): migration `0004`, pure proximity evaluation, single alarm service, alert endpoints, alarm banner with tone and acknowledge (acknowledged alerts collapse into one row)
+  - [ ] P5 dismiss, suppression zones, field reports: implemented (field report from the selected volunteer's frozen position or a map right-click); gate fixes in progress
+  - [x] rescuer photos on the map (migration `0005`, Settings → Map display, default on); copyable GPS/MGRS coordinates in the fire popup
   - [ ] before the PR: one live GWIS smoke test (real network fetch of both layers); note in the PR that PDF export on Windows needs the GTK runtime
 - [ ] wind-shift alerts for forest-fire ops (draft spec: docs/superpowers/specs/2026-10-02-wind-shift-alerts-design.md in the kit workspace)
 - [x] ~~move the logout button away from the language so nobody log outs accidentally~~ — done: logout is on the Settings page (Account card), not next to the language switch (feature/effis-fire-layers)
@@ -18,17 +19,17 @@
 - [ ] build and compile
 - [ ] think about windows support?
 - [x] ~~WebSocket endpoint (`/ws`) has no authentication~~ — deliberately open (owner decision, 2026-10-04): anyone who can reach the server receives live positions, SOS, and the EFFIS messages (`fire_data_updated`: counts, time, feed state; `fire_alert`: rescuer name, rank, hotspot position and distance; HQ distances are rounded to 100 m and HQ coordinates are never sent). Revisit only if the deployment leaves a closed intranet or more operators log in
-- [ ] **[SECURITY]** stored XSS in the map's tracker tooltip: `frontend/src/composables/useMap.js` (~549-572) builds the tooltip with `innerHTML` from group description, member full name, rank, phone, device name and display label. Anyone who can create or import users/groups can put `<img src=x onerror=...>` in a name; it runs in every operator's browser on hover and can read `token` / `refresh_token` from `localStorage`. Fix in its own PR: build the tooltip as a Vue component (like `FirePopup.vue`) or with DOM nodes + `textContent`, plus a test with an HTML payload in a name. Found by the security review of the EFFIS P2 gate (2026-10-03); pre-existing, not part of the EFFIS PR
+- [ ] **[SECURITY] being fixed in the EFFIS PR (owner decision 2026-10-04)** stored XSS in the map's tracker tooltip: `frontend/src/composables/useMap.js` (~549-572) builds the tooltip with `innerHTML` from group description, member full name, rank, phone, device name and display label. Anyone who can create or import users/groups can put `<img src=x onerror=...>` in a name; it runs in every operator's browser on hover and can read `token` / `refresh_token` from `localStorage`. Fix: build the tooltip as a Vue component (like `FirePopup.vue`) or with DOM nodes + `textContent`, plus a test with an HTML payload in a name. Found by the security review of the EFFIS P2 gate (2026-10-03); pre-existing; the P5 gate found the team branch reachable again after the groups fix
 - [ ] map never goes live if the backend is down when the map opens: `frontend/src/views/MapView.vue` `onMounted` (~423-425) awaits `Promise.all([fetchLive, fetchSOS, fetchTrail])` and only then calls `connect()`. If any of the three requests fails, the rejection skips `connect()`, so there is no WebSocket, no reconnect loop, no live positions or SOS until the page is reloaded (life safety). Fix: call `connect()` first (or in a `finally`), and let the reconnect/resync path load the data; add a test. Found by the breaker on the EFFIS P2 gate (2026-10-03); pre-existing
 - [ ] add a Content-Security-Policy to `frontend/index.html` (none today; limits the damage of any XSS)
 - [ ] tighten CORS allow_origins=['*'] in main.py
 - [ ] add support for serial devices
-- [ ] orphaned files are not being deleted
+- [ ] orphaned files are not being deleted (also: uploading a new photo for a person leaves the previous file in `backend/uploads/`)
 - [x] ~~think if db migration (maybe alembic?) makes sense~~ — done without Alembic: `backend/db/migrate.py` + numbered SQL files in `backend/db/migrations/`, applied at start-up after a backup (feature/effis-fire-layers)
 - [ ] pg_notify has no reconnect logic at the moment
 - [ ] access tokens never expire (currently on purpose)
 - [ ] CRC check has no integrity check
-- [ ] endpoints accessible to any user not just admin (are we going to have other users?)
+- [ ] endpoints accessible to any user not just admin (are we going to have other users?) — since the EFFIS PR only roles in `LOGIN_ROLES` (default `admin`) can log in; username/password and the other roles are kept for a later widening
 - [x] ~~the headquarters location is stored in localstorage (per browser), instead it should be stored in the database~~ — done in EFFIS P3: `settings` table (migration `0003`), `GET/PUT /api/settings`, `PUT /api/settings/hq`; an admin's old browser copy is uploaded once, then removed from every browser (feature/effis-fire-layers)
 - [ ] drop redundant columns: latitude/longitude/mgrs duplicate what's in the geometry. should save a lot of db rows
 - [ ] fetchtrail () should only fetch a device if the row is in view, should make the json smaller
@@ -44,8 +45,10 @@
 - [ ] tests print `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead` (from `fastapi/testclient.py`, with the current FastAPI/Starlette versions). Harmless today; before a future Starlette drops httpx support, follow its migration note (add the replacement test client package with a pinned version in `backend/requirements.txt`) and re-run the backend tests. `httpx` itself stays: the EFFIS poller uses it at runtime
 - [ ] UI for bright daylight: the interface is dark-only; operators also work outdoors in sun — add a daylight / high-contrast mode
 - [ ] keyboard focus is invisible on buttons (no focus ring) — add one
-- [ ] retention for fire data: `fire_alerts` are never deleted, and hotspots referenced by an alert are kept by the 7-day prune, so both grow without limit (small volume, but no defined lifetime: DP-03). Decide how long alerts are kept (after-action review vs personal data: alerts name rescuers) and add a cleanup that removes old resolved alerts, then their hotspots
+- [ ] retention for fire data: alerts and the hotspots they reference are kept as the operation record, but since the EFFIS PR their personal links (who, which device, notes) are cleared after `location_retention_days` (owner decision 2026-10-04, option c). Still open: the retention number itself (default 90 days; R-16/R-20 in `Architecture/`) and whether old anonymised alerts should ever be deleted
 - [ ] settings: `PUT /api/settings/hq-initial` accepts a browser's legacy HQ only while `settings.updated_by IS NULL`; deleting the user who last saved settings sets it back to NULL (FK `ON DELETE SET NULL`), so an old browser copy could set HQ again if HQ is also unset. Low risk; fix with a one-time marker column (e.g. `hq_migrated_at`) in a later migration
 - [ ] `groups.color` is a free string with no format check on the server (only admins set it; the map falls back safely on bad values) — validate it as a hex colour in the groups API
 - [ ] i18n: `map.latLon` exists in `en.js` but is missing in `bg.js`
 - [ ] after a restore the previous database is kept as `<db>_before_restore_<time>` (a second copy of all personal data) — remind the operator to drop it, or offer a cleanup command
+- [ ] mobile / narrow screens: the app shell has a fixed 280 px sidebar, so below ~700 px the page content is a sliver (at 390 px about 100 px wide) and the map controls overlap the attribution. Add a responsive shell (collapsible sidebar, tracker panel as a drawer) before anyone uses the app on a phone or tablet
+- [ ] text fields of the people/groups APIs (`routers/users.py`, `routers/groups.py`, ...) accept a lone UTF-16 surrogate in JSON (`"\ud800"`), which asyncpg cannot encode, so the request ends in a 500 instead of a 422. Validate text bodies at the boundary (the EFFIS fire endpoints already use `fire.parse.is_storable`)
