@@ -26,6 +26,9 @@ export function wholeError(raw, { min, max }, key) {
 export const kmToM = (km) => Math.round(Number(km) * 1000)
 export const mToKm = (m) => m / 1000
 
+// The photo switch defaults to on: an older server response without the field means on.
+export const photosOnMapOf = (s) => s?.is_rescuer_photo_on_map_enabled !== false
+
 // Names of the alarms that are on in `current` and off in `draft`.
 export function alarmsTurnedOff(current, draft) {
   const off = []

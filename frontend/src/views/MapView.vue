@@ -448,6 +448,7 @@ const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpo
     setHQPlacementMode(false)
     saveHQ(() => settingsStore.setHQ(coords.lat, coords.lon))
   },
+  computed(() => settingsStore.photosOnMap),
 )
 const { connect } = useWebSocket()
 

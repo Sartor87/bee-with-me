@@ -1,4 +1,4 @@
-import { onMounted, onUnmounted, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import Overlay from 'ol/Overlay'
 import Map from 'ol/Map'
 import View from 'ol/View'
@@ -15,6 +15,7 @@ import { fromLonLat, toLonLat } from 'ol/proj'
 import GeoJSON from 'ol/format/GeoJSON'
 import { Circle, Fill, Stroke, Style, Text } from 'ol/style'
 import RegularShape from 'ol/style/RegularShape'
+import Icon from 'ol/style/Icon'
 import Graticule from 'ol/layer/Graticule'
 import ScaleLine from 'ol/control/ScaleLine'
 import { forward as toMGRS } from 'mgrs'
@@ -23,6 +24,7 @@ import { normaliseGroups } from '../lib/groups'
 import { freshnessOf, LIVE, LOST } from '../lib/freshness'
 import { hotspotStyleKey } from '../lib/fireStyle'
 import { hexToRgba } from '../lib/color'
+import { PHOTO_SIZE, photoCanvas, photoImage, ringFor, safePhotoUrl } from '../lib/photoMarker'
 
 const DEFAULT_COLOR = '#3b82f6'
 
@@ -178,7 +180,7 @@ function makeZoneStyle(label) {
   })
 }
 
-function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
+export function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
   const radius   = isSOS ? 10 : isTeam ? 10 : 7
   const isStale  = freshness !== LIVE
   const isLost   = freshness === LOST
@@ -211,6 +213,27 @@ function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
     }),
   })
   return style
+}
+
+// Photo variant of the marker: same label, same states, the dot replaced by a round photo with
+// a state ring. Returns null (the caller keeps the dot) while the image is loading, after it
+// failed, or when the browser cannot draw it.
+export function makePhotoMarkerStyle(url, color, isSOS, name, freshness, noFix, onLoad) {
+  const img = photoImage(url, onLoad)
+  if (!img) return null
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+  const canvas = photoCanvas(url, img, ringFor({ color, isSOS, freshness, noFix }), dpr)
+  if (!canvas) return null
+  return new Style({
+    image: new Icon({ img: canvas, imgSize: [canvas.width, canvas.height], scale: 1 / dpr }),
+    text: new Text({
+      text:    name || '',
+      offsetY: -(PHOTO_SIZE / 2 + 10),
+      fill:    new Fill({ color: '#fff' }),
+      stroke:  new Stroke({ color: '#000', width: 3 }),
+      font:    'bold 13px system-ui',
+    }),
+  })
 }
 
 function makeTrailStyle(color) {
@@ -251,7 +274,7 @@ function makeCheckpointStyle(color, index, isLast, showLabels, recordedAt) {
   })
 }
 
-export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, groupsMap, onHQPlaced) {
+export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, groupsMap, onHQPlaced, showPhotos = ref(true)) {
   let map = null
   let basemapLayer = makeBasemapLayer('osm')
   let checkpointNumbersVisible = false
@@ -425,14 +448,41 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     try { upsertFeature(pos) } catch { console.warn('Skipped a position that could not be drawn') }
   }
 
-  function upsertFeature(rawPos) {
-    const pos         = normaliseGroups(rawPos)
-    const id          = pos.device_id
+  // One place decides how a marker looks. Photo only for an individual (never the team dot in
+  // the groups view) with the setting on and a same-origin photo that has loaded; every other
+  // case, including a failed load, is the dot.
+  function styleFor(pos) {
     const leaderGroup = pos.groups?.find(g => g.is_leader)
-    const color       = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
-    const isSOS       = pos.sos_active
-    const freshness   = freshnessOf(pos)
-    const label = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+    const color     = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
+    const freshness = freshnessOf(pos)
+    const noFix     = pos.gnss_valid === false
+    const isTeam    = !!pos.displayLabel
+    const label     = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+    if (!isTeam && showPhotos.value !== false) {
+      const url = safePhotoUrl(pos.photo_url)
+      const photo = url && makePhotoMarkerStyle(url, color, pos.sos_active, label, freshness, noFix, scheduleRestyle)
+      if (photo) return photo
+    }
+    return makeMarkerStyle(color, pos.sos_active, label, isTeam, freshness, noFix)
+  }
+
+  // A photo that finished loading restyles the markers once, however many arrive together.
+  let restylePending = false
+  function scheduleRestyle() {
+    if (restylePending) return
+    restylePending = true
+    queueMicrotask(() => { restylePending = false; restyleAll() })
+  }
+  function restyleAll() {
+    source.getFeatures().forEach(f => {
+      const pos = f.get('pos')
+      if (pos) f.setStyle(styleFor(pos))
+    })
+  }
+
+  function upsertFeature(rawPos) {
+    const pos = normaliseGroups(rawPos)
+    const id  = pos.device_id
 
     let feature = source.getFeatureById(id)
     if (!feature) {
@@ -441,7 +491,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       source.addFeature(feature)
     }
     feature.getGeometry().setCoordinates(fromLonLat([pos.longitude, pos.latitude]))
-    feature.setStyle(makeMarkerStyle(color, isSOS, label, !!pos.displayLabel, freshness, pos.gnss_valid === false))
+    feature.setStyle(styleFor(pos))
     feature.setProperties({ pos }, true)
   }
 
@@ -749,17 +799,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
     // Re-evaluate stale state every minute without needing a new WS frame
     staleTimer = setInterval(() => {
-      source.getFeatures().forEach(f => {
-        const pos = f.get('pos')
-        if (!pos) return
-        const leaderGroup = pos.groups?.find(g => g.is_leader)
-        const color   = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
-        const label = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
-        f.setStyle(makeMarkerStyle(
-          color, pos.sos_active, label, !!pos.displayLabel,
-          freshnessOf(pos), pos.gnss_valid === false,
-        ))
-      })
+      restyleAll()
     }, 60_000)
 
   })
@@ -768,6 +808,12 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     list.forEach(safeUpsert)
     removeStaleFeatures(list.map(p => p.device_id))
   }, { deep: true })
+
+  // The setting changed: redraw every marker now.
+  watch(showPhotos, () => {
+    ;(positionList.value ?? []).forEach(safeUpsert)
+    restyleAll()
+  })
 
   watch(trails, (trailMap) => {
     Object.entries(trailMap).forEach(([deviceId, points]) => {

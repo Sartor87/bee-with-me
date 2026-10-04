@@ -82,6 +82,15 @@
       </section>
 
       <section class="card">
+        <h3 class="section-title">{{ t('settings.mapDisplay') }}</h3>
+        <label class="toggle">
+          <input v-model="draft.is_rescuer_photo_on_map_enabled" type="checkbox" aria-describedby="photo-hint" />
+          <span class="toggle-name">{{ t('settings.photosOnMap') }}</span>
+        </label>
+        <p id="photo-hint" class="hint flush-bottom">{{ t('settings.photosOnMapHint') }}</p>
+      </section>
+
+      <section class="card">
         <h3 class="section-title">{{ t('settings.hqTitle') }}</h3>
         <p v-if="store.hq" class="coords">{{ store.hq.lat.toFixed(5) }}, {{ store.hq.lon.toFixed(5) }}</p>
         <p v-else class="muted">{{ t('settings.hqNone') }}</p>
@@ -212,7 +221,7 @@ import { getFireStatus } from '../api'
 import { detailOf } from '../api/client'
 import { fireErrorKey } from '../lib/fireErrors'
 import SuppressionZoneForm from '../components/SuppressionZoneForm.vue'
-import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
+import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, photosOnMapOf, wholeError } from '../lib/settingsForm'
 
 const { t } = useI18n()
 const store = useSettingsStore()
@@ -236,6 +245,7 @@ function draftFrom(s) {
     rescuer_radius_km: mToKm(s.rescuer_radius_m),
     alarm_max_age_hours: s.alarm_max_age_hours,
     repeat_minutes: s.repeat_minutes,
+    is_rescuer_photo_on_map_enabled: photosOnMapOf(s),
   }
 }
 
@@ -358,11 +368,13 @@ const patch = computed(() => ({
   rescuer_radius_m: kmToM(draft.value.rescuer_radius_km),
   alarm_max_age_hours: Number(draft.value.alarm_max_age_hours),
   repeat_minutes: Number(draft.value.repeat_minutes),
+  is_rescuer_photo_on_map_enabled: draft.value.is_rescuer_photo_on_map_enabled !== false,
 }))
 const dirty = computed(() => {
   const s = store.settings
   if (!s) return false
-  return Object.entries(patch.value).some(([k, v]) => s[k] !== v)
+  const server = { ...s, is_rescuer_photo_on_map_enabled: photosOnMapOf(s) }
+  return Object.entries(patch.value).some(([k, v]) => server[k] !== v)
 })
 
 // The decision to ask "turn off alarms?" is made against the server's state right now, not
@@ -448,6 +460,7 @@ watch(draft, () => {
 .account { margin-top: 16px; }
 .targets, .zones { margin-top: 16px; }
 .hint.flush { margin-left: 0; }
+.hint.flush-bottom { margin-bottom: 0; }
 .muted.flush { margin-bottom: 0; }
 .mono { font-family: ui-monospace, monospace; font-weight: 600; font-variant-numeric: tabular-nums; }
 .target-rows { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { getSettings, putHQ, putHQInitial, putSettings } from '../api'
 import { useAuthStore } from './auth'
 import { ApiError, detailOf } from '../api/client'
+import { photosOnMapOf } from '../lib/settingsForm'
 
 const LEGACY_HQ_KEY = 'bwm.hq'   // where MapView kept HQ before it moved to the database
 
@@ -40,6 +41,9 @@ export const useSettingsStore = defineStore('settings', () => {
     const s = settings.value
     return s && s.hq_latitude != null ? { lat: s.hq_latitude, lon: s.hq_longitude } : null
   })
+
+  // Missing in an old server response counts as on.
+  const photosOnMap = computed(() => photosOnMapOf(settings.value))
 
   async function fetchSettings() {
     settings.value = await getSettings()
@@ -104,5 +108,5 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  return { settings, hq, fetchSettings, saveSettings, setHQ, clearHQ, migrateLocalHQ }
+  return { settings, hq, photosOnMap, fetchSettings, saveSettings, setHQ, clearHQ, migrateLocalHQ }
 })
