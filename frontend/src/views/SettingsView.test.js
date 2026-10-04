@@ -4,9 +4,10 @@ import { mount, flushPromises } from '@vue/test-utils'
 
 vi.mock('../api', () => ({
   getSettings: vi.fn(), putSettings: vi.fn(), putHQ: vi.fn(), putHQInitial: vi.fn(), getMe: vi.fn(),
+  getFireStatus: vi.fn(), getSuppressionZones: vi.fn(), updateSuppressionZone: vi.fn(), disableSuppressionZone: vi.fn(),
 }))
 
-import { getSettings, putSettings } from '../api'
+import { getSettings, putSettings, getFireStatus, getSuppressionZones } from '../api'
 import SettingsView from './SettingsView.vue'
 import { useSettingsStore } from '../stores/settings'
 import { i18n } from '../i18n/index.js'
@@ -30,6 +31,8 @@ describe('SettingsView against a changing server', () => {
     vi.clearAllMocks()
     i18n.global.locale.value = 'en'
     server = { ...BASE }
+    getFireStatus.mockResolvedValue({ targets: { hq: false, rescuers: 2 } })
+    getSuppressionZones.mockResolvedValue([])
     getSettings.mockImplementation(async () => ({ ...server }))
     putSettings.mockImplementation(async (b) => {
       if (b.expected_updated_at !== server.updated_at) throw 'settings_stale'

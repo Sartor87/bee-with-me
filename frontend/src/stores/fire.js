@@ -1,6 +1,10 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { acknowledgeAllFireAlerts, acknowledgeFireAlert, getFireAlerts, getFireBurntAreas, getFireHotspots } from '../api'
+import {
+  acknowledgeAllFireAlerts, acknowledgeFireAlert, createFieldReport, createSuppressionZone, disableSuppressionZone,
+  dismissFireHotspot, extinguishFieldReport, getFireAlerts, getFireBurntAreas, getFireHotspots, getSuppressionZones,
+  updateSuppressionZone,
+} from '../api'
 import { oldestFetchedAt, worstUpstreamState } from '../lib/fireStyle'
 
 const LAYERS_KEY = 'bwm.fireLayers'
@@ -131,6 +135,7 @@ export const useFireStore = defineStore('fire', () => {
     // after the operator hid the layer must not touch the store.
     if (!on && name === 'hotspots') { hotspotsSeq++; hotspotsFailed.value = false }
     if (!on && name === 'burnt')    { burntSeq++;    burntFailed.value = false }
+    if (on && name === 'zones') return Promise.all([refreshVisible(), fetchZones()]).then(() => undefined)
     return on ? refreshVisible() : Promise.resolve()
   }
 
@@ -141,6 +146,63 @@ export const useFireStore = defineStore('fire', () => {
     void msg
     return refreshVisible()
   }
+
+  // ---- Operator writes: dismiss, field reports, suppression zones ---------------------------------
+  // The server answers every write with the changed row, so the store swaps that one row in; the
+  // `fire_data_updated` push that follows refreshes the rest. Errors propagate to the caller
+  // (ApiError: `.detail`, `.status`); nothing here logs notes, which are free operator text.
+  const zones       = ref([])
+  const zonesFailed = ref(false)
+
+  function upsertHotspotFeature(next) {
+    const features = hotspots.value.features
+    const idx = features.findIndex(f => f.id === next.id)
+    hotspots.value = {
+      ...hotspots.value,
+      features: idx === -1 ? [next, ...features] : features.map(f => (f.id === next.id ? next : f)),
+    }
+  }
+
+  function upsertZone(next) {
+    const idx = zones.value.findIndex(z => z.id === next.id)
+    zones.value = idx === -1 ? [...zones.value, next] : zones.value.map(z => (z.id === next.id ? next : z))
+  }
+
+  async function dismissHotspot(id, notes) {
+    upsertHotspotFeature(await dismissFireHotspot(id, notes))
+  }
+
+  // A rescuer's position (deviceId) or a point (latitude, longitude): never both in one request.
+  async function reportFire({ deviceId, latitude, longitude, notes } = {}) {
+    const body = deviceId
+      ? { device_id: deviceId, notes: notes ?? null }
+      : { latitude, longitude, notes: notes ?? null }
+    upsertHotspotFeature(await createFieldReport(body))
+  }
+
+  async function extinguish(id) {
+    upsertHotspotFeature(await extinguishFieldReport(id))
+  }
+
+  // Only the newest request may write the list or the failure flag (a late answer must not
+  // replace a newer one, as with the feeds above).
+  let zonesSeq = 0
+  async function fetchZones(includeDisabled = false) {
+    const seq = ++zonesSeq
+    try {
+      const list = await getSuppressionZones({ include_disabled: includeDisabled })
+      if (seq !== zonesSeq) return
+      zones.value = list
+      zonesFailed.value = false
+    } catch (err) {
+      if (seq === zonesSeq) zonesFailed.value = true
+      throw err
+    }
+  }
+
+  async function createZone(body)     { upsertZone(await createSuppressionZone(body)) }
+  async function updateZone(id, body) { upsertZone(await updateSuppressionZone(id, body)) }
+  async function disableZone(id)      { upsertZone(await disableSuppressionZone(id)) }
 
   // ---- Fire alarms (alerts near HQ or a rescuer) --------------------------------------------
   // Open alerts, acknowledged ones included: an acknowledged alert stays listed (quiet) until
@@ -326,6 +388,7 @@ export const useFireStore = defineStore('fire', () => {
     shownFetchedAt, shownUpstreamState, fetchFailed,
     fetchHotspots, fetchBurntAreas, refreshVisible, retryFailed, markFeedFailed, setLayer, applyFireDataUpdated,
     alerts, ringToken, alertsFailed, alertsHidden, unacknowledged, focusRequest, requestFocus, clearFocusRequest,
+    zones, zonesFailed, upsertHotspotFeature, dismissHotspot, reportFire, extinguish, fetchZones, createZone, updateZone, disableZone,
     fetchOpenAlerts, applyFireAlert, applyFireAlertRepeat, applyFireAlertUpdated, acknowledge, acknowledgeAll, resetAlerts,
   }
 })

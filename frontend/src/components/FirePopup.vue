@@ -66,27 +66,74 @@
       </div>
     </dl>
     <p class="fp-live" role="status" aria-live="polite" data-testid="fp-copy-status">{{ liveMsg }}</p>
+
+    <div v-if="kind === 'hotspot' && (canDismiss || canCreateZone || canExtinguish)" class="fp-actions">
+      <div v-if="canDismiss && noteOpen" class="fp-note-field">
+        <label :for="noteId">{{ t('fire.popup.noteLabel') }}</label>
+        <textarea :id="noteId" v-model="note" rows="3" :maxlength="NOTES_MAX" data-testid="fp-note" />
+        <span class="fp-count fp-mono" :class="{ 'fp-count-near': note.length > NOTES_MAX - 100 }">{{ note.length }}/{{ NOTES_MAX }}</span>
+      </div>
+      <div class="fp-buttons">
+        <button v-if="canDismiss" type="button" class="fp-btn" data-action="dismiss" :disabled="busy" @click="onDismiss">
+          {{ t('fire.popup.dismiss') }}
+        </button>
+        <button v-if="canCreateZone" type="button" class="fp-btn" data-action="create-zone" :disabled="busy" @click="onCreateZone">
+          {{ t('fire.popup.createZone') }}
+        </button>
+        <button v-if="canExtinguish" type="button" class="fp-btn" data-action="extinguish" :disabled="busy" @click="emit('extinguish', { id: properties.id })">
+          {{ t('fire.popup.extinguish') }}
+        </button>
+      </div>
+      <button v-if="canDismiss" type="button" class="fp-link" data-action="toggle-note" :aria-expanded="noteOpen" @click="noteOpen = !noteOpen">
+        {{ noteOpen ? t('fire.popup.noNote') : t('fire.popup.addNote') }}
+      </button>
+      <p v-if="errorText" class="fp-error" role="alert" data-testid="fp-error">{{ errorText }}</p>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { forward as toMGRS } from 'mgrs'
 
 // Every property is rendered as text through Vue interpolation; field-report notes and
-// dismiss notes are user text and must never reach innerHTML. `isAdmin` is accepted now so
-// the later action buttons (dismiss, create zone, extinguish) need no prop change.
+// dismiss notes are user text and must never reach innerHTML. Dismiss and Create zone are
+// admin actions; Extinguish is open to every signed-in user, for field reports only. The
+// popup only emits: MapView calls the store and passes `busy` and `errorText` back.
 const props = defineProps({
   kind:       { type: String, required: true, validator: v => v === 'hotspot' || v === 'burnt_area' },
   properties: { type: Object, required: true },
   isAdmin:    { type: Boolean, default: false },
   // WGS84 [lon, lat] in degrees (the map hands over EPSG:3857; MapView converts).
   lonLat:     { type: Array, default: null },
+  busy:       { type: Boolean, default: false },
+  errorText:  { type: String, default: '' },
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'dismiss', 'create-zone', 'extinguish'])
 
 const { t } = useI18n()
+
+const NOTES_MAX = 1000
+const noteId = `fp-note-${Math.random().toString(36).slice(2, 8)}`
+const noteOpen = ref(false)
+const note = ref('')
+
+const canDismiss    = computed(() => props.isAdmin && props.properties.state !== 'dismissed')
+const canCreateZone = computed(() => props.isAdmin)
+const canExtinguish = computed(() => props.properties.source === 'field_report' && props.properties.state !== 'extinguished')
+
+// A new selection or a changed state starts with a closed, empty note.
+watch(() => [props.properties.id, props.properties.state], () => { noteOpen.value = false; note.value = '' })
+
+function onDismiss() {
+  const text = note.value.trim()
+  emit('dismiss', { id: props.properties.id, notes: text || null })
+}
+
+function onCreateZone() {
+  emit('create-zone', { latitude: coords.value?.lat ?? null, longitude: coords.value?.lon ?? null })
+}
 
 const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000
 
@@ -258,4 +305,31 @@ onUnmounted(() => { window.removeEventListener('keydown', onKey); clearTimeout(f
 .fp-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .fp-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .fp-notes dd { white-space: pre-wrap; max-height: 96px; overflow-y: auto; }
+
+/* Actions: plain secondary buttons. Dismiss is not destructive and Create zone is reversible,
+   so nothing here is red (red is for alarms and data loss). */
+.fp-actions { border-top: 1px solid var(--border); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.fp-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.fp-btn {
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 12px; min-height: 34px; font-size: 13px; font-weight: 600; border-radius: 6px;
+}
+.fp-btn:focus-visible, .fp-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fp-btn:disabled { opacity: .45; cursor: not-allowed; }
+.fp-link {
+  align-self: flex-start; background: transparent; color: var(--accent);
+  padding: 2px 0; font-size: 12px; font-weight: 600; text-decoration: underline; text-underline-offset: 2px;
+}
+.fp-note-field label { font-size: 12px; margin-bottom: 4px; }
+.fp-note-field textarea {
+  width: 100%; resize: vertical; min-height: 64px; max-height: 140px; font: inherit; font-size: 13px; padding: 6px 8px;
+}
+.fp-note-field textarea:focus { border-color: var(--accent); }
+.fp-count { display: block; text-align: right; font-size: 11px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
+.fp-count-near { color: var(--warning); }
+.fp-error { font-size: 12px; color: var(--warning); line-height: 1.4; }
+@media (hover: hover) and (pointer: fine) {
+  .fp-btn:hover:not(:disabled) { border-color: var(--accent); opacity: 1; }
+  .fp-link:hover { color: var(--text); }
+}
 </style>

@@ -100,3 +100,87 @@ describe('FirePopup coordinates', () => {
     expect(w.get('[data-testid="fp-copy-status"]').text()).toBe('Copied')
   })
 })
+
+const HOSTILE = '<img src=x onerror="window.__pwned = true">'
+const mountActions = (props) => mount(FirePopup, { props: { kind: 'hotspot', ...props }, global: { plugins: [i18n] } })
+
+describe('FirePopup actions', () => {
+  it('renders user-typed notes as text, never as markup [T19]', () => {
+    const wrapper = mountActions({
+      isAdmin: true,
+      properties: { id: 'r1', source: 'field_report', state: 'active', acquired_at: '2026-10-02T09:00:00+00:00',
+                    notes: HOSTILE, dismiss_notes: HOSTILE },
+    })
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.text()).toContain(HOSTILE)
+    expect(window.__pwned).toBeUndefined()
+  })
+
+  it('emits the admin actions [T19]', async () => {
+    const wrapper = mountActions({
+      isAdmin: true,
+      properties: { id: 'h1', source: 'viirs', state: 'active', acquired_at: '2026-10-02T09:00:00+00:00' },
+    })
+    await wrapper.find('[data-action="dismiss"]').trigger('click')
+    await wrapper.find('[data-action="create-zone"]').trigger('click')
+    expect(Object.keys(wrapper.emitted())).toEqual(expect.arrayContaining(['dismiss', 'create-zone']))
+    expect(wrapper.emitted().dismiss[0][0]).toEqual({ id: 'h1', notes: null })
+  })
+
+  it('hides admin actions from non-admins and offers Extinguish on field reports [T19]', () => {
+    const wrapper = mountActions({
+      isAdmin: false,
+      properties: { id: 'r1', source: 'field_report', state: 'active', acquired_at: '2026-10-02T09:00:00+00:00' },
+    })
+    expect(wrapper.find('[data-action="dismiss"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="create-zone"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="extinguish"]').exists()).toBe(true)
+  })
+
+  it('a satellite detection has no Extinguish, an extinguished report has none either [T19]', () => {
+    const sat = mountActions({ isAdmin: true, properties: { id: 'h1', source: 'viirs', state: 'active' } })
+    expect(sat.find('[data-action="extinguish"]').exists()).toBe(false)
+    const done = mountActions({ isAdmin: true, properties: { id: 'r1', source: 'field_report', state: 'extinguished' } })
+    expect(done.find('[data-action="extinguish"]').exists()).toBe(false)
+  })
+
+  it('an optional note travels with Dismiss, trimmed; an empty one is null [T19]', async () => {
+    const wrapper = mountActions({ isAdmin: true, properties: { id: 'h1', source: 'viirs', state: 'active' } })
+    expect(wrapper.find('[data-testid="fp-note"]').exists()).toBe(false)
+    await wrapper.find('[data-action="toggle-note"]').trigger('click')
+    const box = wrapper.find('[data-testid="fp-note"]')
+    expect(box.attributes('maxlength')).toBe('1000')
+    await box.setValue('  solar farm  ')
+    await wrapper.find('[data-action="dismiss"]').trigger('click')
+    expect(wrapper.emitted().dismiss[0][0]).toEqual({ id: 'h1', notes: 'solar farm' })
+  })
+
+  it('create-zone emits the point of the detection [T19]', async () => {
+    const wrapper = mount(FirePopup, {
+      props: { kind: 'hotspot', isAdmin: true, lonLat: [24.5, 42.5], properties: { id: 'h1', source: 'viirs', state: 'active' } },
+      global: { plugins: [i18n] },
+    })
+    await wrapper.find('[data-action="create-zone"]').trigger('click')
+    expect(wrapper.emitted()['create-zone'][0][0]).toEqual({ latitude: 42.5, longitude: 24.5 })
+  })
+
+  it('busy disables the actions and an error shows as text [T19]', () => {
+    const wrapper = mountActions({
+      isAdmin: true, busy: true, errorText: HOSTILE,
+      properties: { id: 'h1', source: 'viirs', state: 'active' },
+    })
+    expect(wrapper.find('[data-action="dismiss"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fp-error"]').text()).toBe(HOSTILE)
+  })
+
+  it('an already dismissed detection offers no second Dismiss [T19]', () => {
+    const wrapper = mountActions({ isAdmin: true, properties: { id: 'h1', source: 'viirs', state: 'dismissed' } })
+    expect(wrapper.find('[data-action="dismiss"]').exists()).toBe(false)
+  })
+
+  it('burnt areas have no actions [T19]', () => {
+    const wrapper = mount(FirePopup, { props: { kind: 'burnt_area', isAdmin: true, properties: { id: 'b1' } }, global: { plugins: [i18n] } })
+    expect(wrapper.find('.fp-actions').exists()).toBe(false)
+  })
+})

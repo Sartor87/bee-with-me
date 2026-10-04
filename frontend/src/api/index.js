@@ -84,3 +84,13 @@ export const getSettings  = ()     => api.get('/settings')
 export const putSettings  = (body) => api.put('/settings', body)
 export const putHQ        = (body) => api.put('/settings/hq', body)
 export const putHQInitial = (body) => api.put('/settings/hq-initial', body)
+
+// Fire: operator writes. Notes are free operator text; they travel only in these bodies.
+export const dismissFireHotspot     = (id, notes) => api.post(`/fire/hotspots/${id}/dismiss`, { notes: notes ?? null })
+export const createFieldReport      = (body)      => api.post('/fire/field-reports', body)
+export const extinguishFieldReport  = (id)        => api.post(`/fire/field-reports/${id}/extinguish`)
+export const getSuppressionZones    = (params)    => api.get('/fire/suppression-zones', { params })
+export const createSuppressionZone  = (body)      => api.post('/fire/suppression-zones', body)
+export const updateSuppressionZone  = (id, body)  => api.put(`/fire/suppression-zones/${id}`, body)
+// "Delete" disables the zone; the server removes it 48 h later.
+export const disableSuppressionZone = (id)        => api.delete(`/fire/suppression-zones/${id}`)

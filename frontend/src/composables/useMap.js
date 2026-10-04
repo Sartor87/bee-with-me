@@ -10,6 +10,7 @@ import VectorSource from 'ol/source/Vector'
 import Feature from 'ol/Feature'
 import Point from 'ol/geom/Point'
 import LineString from 'ol/geom/LineString'
+import { circular as circularPolygon } from 'ol/geom/Polygon'
 import { fromLonLat, toLonLat } from 'ol/proj'
 import GeoJSON from 'ol/format/GeoJSON'
 import { Circle, Fill, Stroke, Style, Text } from 'ol/style'
@@ -23,6 +24,11 @@ import { hotspotStyleKey } from '../lib/fireStyle'
 import { hexToRgba } from '../lib/color'
 
 const DEFAULT_COLOR = '#3b82f6'
+
+// Long press on touch: 600 ms held within 10 px.
+const LONG_PRESS_MS = 600
+const LONG_PRESS_SLOP_PX = 10
+const LONG_PRESS_DEDUPE_MS = 800
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371
@@ -152,6 +158,25 @@ function makeBurntStyle() {
   })
 }
 
+// Suppression zones: an operator's "ignore detections here" circle. Muted, dashed and hollow like a
+// suppressed hotspot (inactive grey-blue), never red, no glow. The label is canvas text, so a
+// user-typed label can never act as markup; it is clipped so a long one cannot cover the map.
+const ZONE_LABEL_MAX = 28
+function makeZoneStyle(label) {
+  const inactive = fireToken('--fire-inactive', '#8892aa')
+  const ring     = fireToken('--text', '#e2e8f0')
+  const text = String(label ?? '')
+  return new Style({
+    fill:   new Fill({ color: hexToRgba(inactive, 0.1, '#8892aa') }),
+    stroke: new Stroke({ color: hexToRgba(inactive, 0.95, '#8892aa'), width: 1.5, lineDash: [6, 5] }),
+    text: text ? new Text({
+      text: text.length > ZONE_LABEL_MAX ? `${text.slice(0, ZONE_LABEL_MAX - 1)}…` : text,
+      font: '600 12px system-ui',
+      fill: new Fill({ color: ring }), stroke: new Stroke({ color: '#000', width: 3 }),
+    }) : undefined,
+  })
+}
+
 function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
   const radius   = isSOS ? 10 : isTeam ? 10 : 7
   const isStale  = freshness !== LIVE
@@ -266,8 +291,14 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   })
   let burntStyleCache = null
   burntLayer.setStyle(() => (burntStyleCache ??= makeBurntStyle()))
+  // Suppression zones sit under the hotspots so a detection inside a zone stays clickable.
+  const zoneSource = new VectorSource()
+  const zoneLayer  = new VectorLayer({ source: zoneSource, zIndex: 3.4, visible: false })
   let fireTimer = null
   let fireClickCb = null
+  let trackerClickCb = null
+  let contextMenuCb = null
+  let onContextMenuEvent = null, onPressDown = null, onPressMove = null, endPressFn = null
 
   // Measure layer
   const measureSource = new VectorSource()
@@ -519,7 +550,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
     map = new Map({
       target:   mapRef.value,
-      layers:   [basemapLayer, burntLayer, hotspotLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
+      layers:   [basemapLayer, burntLayer, zoneLayer, hotspotLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
       view:     new View({ center: fromLonLat([25.0, 42.5]), zoom: 7 }),
       overlays: [tooltip],
       controls: [new ScaleLine({ units: 'metric', bar: false, minWidth: 100 })],
@@ -646,9 +677,14 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     map.on('click', (evt) => {
       if (hqPlacementMode || measureMode || !fireClickCb) return
       // A tracker click opens the tracker popup and closes any fire popup.
-      if (trackerHit(evt.pixel)) { fireClickCb(null); return }
+      if (trackerHit(evt.pixel)) {
+        fireClickCb(null)
+        const marker = map.forEachFeatureAtPixel(evt.pixel, f => f, { layerFilter: l => l === vectorLayer, hitTolerance: 5 })
+        if (marker && marker.getId() != null) trackerClickCb?.(String(marker.getId()))
+        return
+      }
       const hit = fireHit(evt.pixel)
-      if (!hit) { fireClickCb(null); return }
+      if (!hit) { fireClickCb(null); trackerClickCb?.(null); return }
       const props = { ...hit.feature.getProperties() }
       delete props.geometry
       fireClickCb({
@@ -663,6 +699,43 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       if (trackerHit(evt.pixel)) return
       if (fireHit(evt.pixel)) map.getTargetElement().style.cursor = 'pointer'
     })
+
+    // "Report fire here": right-click on a mouse, long-press on touch. Both hand over the clicked
+    // coordinate (EPSG:3857) and its pixel inside the map element; the view decides what to offer.
+    // Touch browsers may fire `contextmenu` after a long press as well, so one gesture is reported
+    // once (a second report within LONG_PRESS_DEDUPE_MS is dropped).
+    const viewport = map.getViewport()
+    let lastContextAt = -Infinity
+    const reportContext = (clientX, clientY) => {
+      const now = performance.now()
+      if (now - lastContextAt < LONG_PRESS_DEDUPE_MS) return
+      lastContextAt = now
+      if (!contextMenuCb || hqPlacementMode || measureMode) return
+      const pixel = map.getEventPixel({ clientX, clientY })
+      const coordinate = map.getCoordinateFromPixel(pixel)
+      if (coordinate) contextMenuCb({ coordinate, pixel })
+    }
+    onContextMenuEvent = (e) => { e.preventDefault(); reportContext(e.clientX, e.clientY) }
+    viewport.addEventListener('contextmenu', onContextMenuEvent)
+
+    let press = null
+    const endPress = () => { if (press) { clearTimeout(press.timer); press = null } }
+    onPressDown = (e) => {
+      if (e.pointerType === 'mouse' || !e.isPrimary) return
+      endPress()
+      press = {
+        x: e.clientX, y: e.clientY,
+        timer: setTimeout(() => { const p = press; press = null; if (p) reportContext(p.x, p.y) }, LONG_PRESS_MS),
+      }
+    }
+    onPressMove = (e) => {
+      if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > LONG_PRESS_SLOP_PX) endPress()
+    }
+    viewport.addEventListener('pointerdown', onPressDown)
+    viewport.addEventListener('pointermove', onPressMove)
+    viewport.addEventListener('pointerup', endPress)
+    viewport.addEventListener('pointercancel', endPress)
+    endPressFn = endPress
 
     // Hotspots fade with age; repaint each minute so they do so without a refetch.
     fireTimer = setInterval(() => { if (hotspotLayer.getVisible()) hotspotLayer.changed() }, 60_000)
@@ -699,6 +772,15 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   }, { deep: true })
 
   onUnmounted(() => {
+    const viewport = map?.getViewport()
+    if (viewport) {
+      viewport.removeEventListener('contextmenu', onContextMenuEvent)
+      viewport.removeEventListener('pointerdown', onPressDown)
+      viewport.removeEventListener('pointermove', onPressMove)
+      viewport.removeEventListener('pointerup', endPressFn)
+      viewport.removeEventListener('pointercancel', endPressFn)
+    }
+    endPressFn?.()
     map?.setTarget(null)
     clearInterval(staleTimer)
     clearInterval(fireTimer)
@@ -768,9 +850,29 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   function setBurntAreas(fc)  { return replaceFeatures(burntSource, fc, 'burnt-area') }
   function setHotspots(fc)    { return replaceFeatures(hotspotSource, fc, 'hotspot') }
 
+  // Zones arrive as plain rows ({ id, label, latitude, longitude, radius_m }). Each becomes a true
+  // geodesic circle (a Web Mercator circle would be about a third too large at 42 N). A row that
+  // cannot be drawn is skipped, so one bad zone never hides the rest.
+  function setZones(list) {
+    const features = []
+    for (const z of Array.isArray(list) ? list : []) {
+      const lon = Number(z?.longitude), lat = Number(z?.latitude), r = Number(z?.radius_m)
+      if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(r) || r <= 0) continue
+      const geometry = circularPolygon([lon, lat], r, 64).transform('EPSG:4326', 'EPSG:3857')
+      const f = new Feature({ geometry, zoneId: z.id })
+      f.setId(z.id)
+      f.setStyle(makeZoneStyle(z.label))
+      features.push(f)
+    }
+    zoneSource.clear(true)
+    zoneSource.addFeatures(features)
+    return features.length
+  }
+
   function setFireLayerVisible(name, visible) {
     if (name === 'burnt')    burntLayer.setVisible(visible)
     if (name === 'hotspots') hotspotLayer.setVisible(visible)
+    if (name === 'zones')    zoneLayer.setVisible(visible)
   }
 
   function setFireLabels({ fieldReport }) {
@@ -780,11 +882,14 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   }
 
   function onFireFeatureClick(cb) { fireClickCb = cb }
+  // A click on a tracker marker passes its device id; a click on bare map passes null.
+  function onTrackerClick(cb) { trackerClickCb = cb }
+  function onMapContextMenu(cb) { contextMenuCb = cb }
 
   function refreshMarkers(list) {
     list.forEach(upsertFeature)
     removeStaleFeatures(list.map(p => p.device_id))
   }
 
-  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick }
+  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick, setZones, onTrackerClick, onMapContextMenu }
 }

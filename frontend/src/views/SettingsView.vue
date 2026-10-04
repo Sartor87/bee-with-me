@@ -125,6 +125,70 @@
       </div>
     </form>
 
+    <!-- Alarm targets: what the fire alarm can actually watch right now. Independent of the settings form. -->
+    <section class="card targets" aria-labelledby="targets-title">
+      <h3 id="targets-title" class="section-title">{{ t('settings.targets.title') }}</h3>
+      <p v-if="targets === undefined" class="muted flush">{{ t('settings.zones.loading') }}</p>
+      <p v-else-if="targets === null" class="msg-warn" role="status" data-testid="targets-unavailable">{{ t('settings.targets.unavailable') }}</p>
+      <dl v-else class="target-rows">
+        <div class="target-row">
+          <dt>{{ t('settings.targets.hq') }}</dt>
+          <dd data-testid="targets-hq">{{ targets.hq ? t('settings.targets.hqSet') : t('settings.targets.hqNotSet') }}</dd>
+        </div>
+        <div class="target-row">
+          <dt>{{ t('settings.targets.rescuers') }}</dt>
+          <dd class="mono" data-testid="targets-rescuers">{{ targets.rescuers }}</dd>
+        </div>
+      </dl>
+      <p v-if="rescuerAlarmBlind" class="notice flush" role="status" data-testid="targets-warning">{{ t('settings.targets.noRescuers') }}</p>
+    </section>
+
+    <section class="card zones" aria-labelledby="zones-title">
+      <h3 id="zones-title" class="section-title">{{ t('settings.zones.title') }}</h3>
+      <p class="hint flush">{{ t('settings.zones.hint') }}</p>
+
+      <p v-if="zonesLoading && !fire.zones.length" class="muted flush">{{ t('settings.zones.loading') }}</p>
+      <div v-else-if="fire.zonesFailed" class="zones-failed">
+        <p class="msg-warn" role="alert">{{ t('settings.zones.loadFailed') }}</p>
+        <button type="button" class="secondary" @click="loadZones">{{ t('settings.zones.retry') }}</button>
+      </div>
+      <p v-else-if="!zoneList.length" class="muted flush" data-testid="zones-empty">{{ t('settings.zones.empty') }}</p>
+
+      <ul v-if="zoneList.length" class="zone-list">
+        <li v-for="z in zoneList" :key="z.id" class="zone-item" :class="{ 'zone-off': !z.is_active }" data-testid="zone-item">
+          <SuppressionZoneForm
+            v-if="editingId === z.id"
+            inline mode="edit"
+            :initial="z"
+            :busy="zoneBusy"
+            :error-text="zoneError"
+            @submit="onZoneSave(z, $event)"
+            @cancel="stopEdit"
+          />
+          <template v-else>
+            <div class="zone-main">
+              <div class="zone-name">
+                <span class="zone-label">{{ z.label }}</span>
+                <span :class="['state', z.is_active ? 'state-on' : 'state-off']">{{ z.is_active ? t('settings.zones.active') : t('settings.zones.disabled') }}</span>
+              </div>
+              <div class="zone-facts">
+                <span class="mono">{{ t('settings.zones.radiusValue', { n: z.radius_m }) }}</span>
+                <span class="mono">{{ Number(z.latitude).toFixed(5) }}, {{ Number(z.longitude).toFixed(5) }}</span>
+              </div>
+              <p v-if="z.notes" class="zone-notes">{{ z.notes }}</p>
+              <p v-if="rowError?.id === z.id" class="msg-warn" role="alert">{{ rowError.text }}</p>
+            </div>
+            <div v-if="isAdmin" class="zone-actions">
+              <button type="button" class="secondary" data-testid="zone-edit" :disabled="zoneBusy" @click="startEdit(z)">{{ t('settings.zones.edit') }}</button>
+              <button v-if="z.is_active" type="button" class="secondary" data-testid="zone-disable" :disabled="zoneBusy" @click="onZoneDisable(z)">{{ t('settings.zones.disable') }}</button>
+              <button v-else type="button" class="secondary" data-testid="zone-enable" :disabled="zoneBusy" @click="onZoneEnable(z)">{{ t('settings.zones.enable') }}</button>
+            </div>
+          </template>
+        </li>
+      </ul>
+      <p v-if="zoneList.some(z => !z.is_active)" class="hint flush zones-note" data-testid="zones-disabled-note">{{ t('settings.zones.disabledNote') }}</p>
+    </section>
+
     <!-- Outside the load/save states above: signing out must work even when settings failed to load. -->
     <section class="card account" aria-labelledby="account-title">
       <h3 id="account-title" class="section-title">{{ t('settings.account') }}</h3>
@@ -143,13 +207,19 @@ import { routerKey } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
+import { useFireStore } from '../stores/fire'
+import { getFireStatus } from '../api'
 import { detailOf } from '../api/client'
+import { fireErrorKey } from '../lib/fireErrors'
+import SuppressionZoneForm from '../components/SuppressionZoneForm.vue'
 import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
 
 const { t } = useI18n()
 const store = useSettingsStore()
 const auth = useAuthStore()
+const fire = useFireStore()
 const router = inject(routerKey, null)
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const draft = ref({})
 const loadFailed = ref(false)
@@ -205,7 +275,73 @@ async function load() {
     loadFailed.value = true
   }
 }
-onMounted(() => { if (store.settings) reset(); load() })
+onMounted(() => { if (store.settings) reset(); load(); loadZones(); loadTargets() })
+
+// ---- Alarm targets: what GET /api/fire/status says the alarm can watch right now ----------------
+// undefined = loading, null = unavailable (request failed, or the server has no settings row).
+const targets = ref(undefined)
+async function loadTargets() {
+  try {
+    const status = await getFireStatus()
+    targets.value = status?.targets ?? null
+  } catch {
+    targets.value = null
+  }
+}
+// The rescuer alarm is on but there is nothing for it to watch: say so (amber, not red).
+const rescuerAlarmBlind = computed(() =>
+  !!store.settings?.is_rescuer_alarm_enabled && !!targets.value && targets.value.rescuers === 0)
+
+// ---- Suppression zones ------------------------------------------------------------------------
+// Disabled zones are listed too (the server removes them after 48 h), so an operator can bring one back.
+const zonesLoading = ref(true)
+const editingId = ref(null)
+const zoneBusy = ref(false)
+const zoneError = ref('')      // shown inside the open edit form
+const rowError = ref(null)     // { id, text } for a disable / re-enable that failed
+
+const zoneList = computed(() => [...fire.zones].sort((a, b) =>
+  Number(b.is_active) - Number(a.is_active) || String(a.label).localeCompare(String(b.label))))
+
+async function loadZones() {
+  zonesLoading.value = true
+  try { await fire.fetchZones(true) } catch { /* fire.zonesFailed drives the retry notice */ } finally { zonesLoading.value = false }
+}
+
+function startEdit(z) { editingId.value = z.id; zoneError.value = ''; rowError.value = null }
+function stopEdit() { editingId.value = null; zoneError.value = '' }
+
+const zoneBody = (z, over = {}) => ({
+  label: z.label, latitude: z.latitude, longitude: z.longitude, radius_m: z.radius_m, notes: z.notes ?? null,
+  is_active: z.is_active, ...over,
+})
+
+async function runZoneAction(id, action, onError) {
+  if (zoneBusy.value) return
+  zoneBusy.value = true
+  try {
+    await action()
+    return true
+  } catch (err) {
+    onError(t(fireErrorKey(err)))
+  } finally {
+    zoneBusy.value = false
+  }
+}
+
+async function onZoneSave(z, values) {
+  zoneError.value = ''
+  const ok = await runZoneAction(z.id, () => fire.updateZone(z.id, zoneBody(z, values)), (text) => { zoneError.value = text })
+  if (ok) stopEdit()
+}
+async function onZoneDisable(z) {
+  rowError.value = null
+  await runZoneAction(z.id, () => fire.disableZone(z.id), (text) => { rowError.value = { id: z.id, text } })
+}
+async function onZoneEnable(z) {
+  rowError.value = null
+  await runZoneAction(z.id, () => fire.updateZone(z.id, zoneBody(z, { is_active: true })), (text) => { rowError.value = { id: z.id, text } })
+}
 
 const errors = computed(() => ({
   hq_radius_km:        kmError(draft.value.hq_radius_km),
@@ -310,6 +446,31 @@ watch(draft, () => {
 .page { padding: 24px; flex: 1; max-width: 720px; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .account { margin-top: 16px; }
+.targets, .zones { margin-top: 16px; }
+.hint.flush { margin-left: 0; }
+.muted.flush { margin-bottom: 0; }
+.mono { font-family: ui-monospace, monospace; font-weight: 600; font-variant-numeric: tabular-nums; }
+.target-rows { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.target-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.target-row dt { color: var(--text-muted); font-size: 13px; }
+.target-row + .target-row { padding-top: 6px; border-top: 1px solid var(--border); }
+.targets .notice { margin-top: 12px; margin-bottom: 0; }
+
+.zones .hint { margin-bottom: 12px; }
+.zones-failed { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.zone-list { list-style: none; display: flex; flex-direction: column; }
+.zone-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 0; }
+.zone-item + .zone-item { border-top: 1px solid var(--border); }
+.zone-item > :only-child { flex: 1; }
+.zone-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.zone-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zone-label { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.zone-off .zone-label, .zone-off .zone-facts, .zone-off .zone-notes { color: var(--text-muted); }
+.zone-facts { display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); }
+.zone-notes { font-size: 13px; color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.2em; overflow-y: auto; }
+.zone-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.zone-actions button { padding: 6px 12px; font-size: 13px; }
+.zones .zones-note { margin-top: 8px; margin-bottom: 0; }
 .who { font-size: 14px; margin-bottom: 4px; }
 .hint-inline { font-size: 13px; color: var(--text-muted); }
 .section-title { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-muted); }
@@ -364,5 +525,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (max-width: 600px) {
   .timing { grid-template-columns: 1fr; }
+  .zone-item { flex-direction: column; }
+  .zone-actions { justify-content: flex-start; }
 }
 </style>

@@ -64,11 +64,16 @@
       </span>
       <span v-if="hqError" class="bm-hq-error" role="alert">{{ t('map.hqSaveFailed') }}</span>
       <button
-        v-for="name in FIRE_LAYER_BUTTONS" :key="name"
+        v-for="name in fireLayerButtons" :key="name"
         :class="['bm-btn', { active: fireStore.layers[name] }]"
         :aria-pressed="fireStore.layers[name]"
+        :data-layer="name"
         @click="toggleFire(name)"
       >{{ t(`fire.layers.${name}`) }}</button>
+      <span v-if="isAdmin && fireStore.layers.zones && fireStore.zonesFailed" class="bm-hq-note" role="status">
+        {{ t('fire.zone.loadFailed') }}
+        <button class="bm-btn" @click="retryZones">{{ t('fire.zone.retry') }}</button>
+      </span>
       <template v-if="activeBasemap === 'satellite'">
         <span class="bm-row-break" />
         <button
@@ -80,7 +85,7 @@
     </div>
 
     <!-- Fire data freshness: always shows its age, and says so when it cannot. -->
-    <div v-if="fireStore.anyLayerOn" class="fire-pill" :class="`fire-${firePill.kind}`" role="status">
+    <div v-if="fireDataLayerOn" class="fire-pill" :class="`fire-${firePill.kind}`" role="status">
       <i18n-t v-if="firePill.time" keypath="fire.asOf" tag="span" class="fire-pill-main">
         <template #time><span class="fire-time">{{ firePill.time }}</span></template>
       </i18n-t>
@@ -88,7 +93,7 @@
     </div>
 
     <!-- Licence attribution (text only: the offline build loads nothing from the network). -->
-    <div v-if="fireStore.anyLayerOn" class="fire-attribution">{{ t('fire.attribution') }}</div>
+    <div v-if="fireDataLayerOn" class="fire-attribution">{{ t('fire.attribution') }}</div>
 
     <!-- OpenLayers moves this element into its overlay; the popup inside is a Vue component. -->
     <div ref="firePopupEl" class="fire-popup-anchor">
@@ -97,10 +102,40 @@
         :kind="firePopup.kind"
         :properties="firePopup.properties"
         :lon-lat="firePopupLonLat"
-        :is-admin="authStore.user?.role === 'admin'"
+        :is-admin="isAdmin"
+        :busy="fireBusy"
+        :error-text="fireError"
         @close="closeFirePopup"
+        @dismiss="onPopupDismiss"
+        @extinguish="onPopupExtinguish"
+        @create-zone="onPopupCreateZone"
       />
     </div>
+
+    <!-- Right-click / long-press on the map: the only item is "Report fire here". -->
+    <div v-if="ctxMenu" ref="ctxMenuEl" class="map-context" role="menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
+      <button type="button" role="menuitem" class="mc-item" data-testid="report-fire-here" @click="reportFromMenu">
+        {{ t('fire.report.here') }}
+      </button>
+    </div>
+
+    <FieldReportForm
+      v-if="dialog?.kind === 'report'"
+      :target="dialog.target"
+      :busy="dialogBusy"
+      :error-text="dialogError"
+      @submit="submitReport"
+      @cancel="closeDialog"
+    />
+    <SuppressionZoneForm
+      v-if="dialog?.kind === 'zone'"
+      :latitude="dialog.latitude"
+      :longitude="dialog.longitude"
+      :busy="dialogBusy"
+      :error-text="dialogError"
+      @submit="submitZone"
+      @cancel="closeDialog"
+    />
 
     <!-- Measure readout -->
     <div v-if="measureReadout" class="measure-readout">
@@ -120,7 +155,7 @@
     </div>
 
     <!-- Tracker panel -->
-    <aside class="tracker-panel">
+    <aside ref="trackerPanelEl" class="tracker-panel">
       <div class="panel-header">
         <span>{{ t('map.trackers') }} ({{ displayList.length }})</span>
         <span v-if="store.hasSOS" class="badge badge-sos sos-pulse">SOS</span>
@@ -148,11 +183,17 @@
 
       <!-- Individual mode -->
       <template v-if="viewMode === 'individuals'">
+        <template v-for="pos in displayList" :key="pos.device_id">
         <div
-          v-for="pos in displayList" :key="pos.device_id"
           class="tracker-row"
-          :class="[`fresh-${freshnessOf(pos, nowTick)}`, { 'tracker-sos': pos.sos_active }]"
-          @click="focusDevice(pos)"
+          :class="[`fresh-${freshnessOf(pos, nowTick)}`, { 'tracker-sos': pos.sos_active, 'tracker-selected': selectedDeviceId === pos.device_id }]"
+          :data-device-id="pos.device_id"
+          tabindex="0"
+          role="button"
+          :aria-pressed="selectedDeviceId === pos.device_id"
+          @click="selectDevice(pos)"
+          @keydown.enter.self.prevent="selectDevice(pos)"
+          @keydown.space.self.prevent="selectDevice(pos)"
         >
           <div class="tracker-dot" :style="{ background: pos.groups?.[0]?.color ?? '#3b82f6' }" />
           <div class="tracker-info">
@@ -171,6 +212,12 @@
             </div>
           </div>
         </div>
+        <div v-if="selectedDeviceId === pos.device_id" class="tracker-actions">
+          <button type="button" class="tracker-report" data-testid="report-fire-row" @click="reportFromRow(pos)">
+            {{ t('fire.report.atPosition') }}
+          </button>
+        </div>
+        </template>
         <div v-if="!displayList.length" class="no-trackers">{{ t('map.noTrackers') }}</div>
       </template>
 
@@ -181,7 +228,13 @@
             <span class="group-section-dot" :style="{ background: group.color }" />
             {{ group.name }}
           </div>
-          <div v-if="group.leader" class="tracker-row tracker-leader" @click="focusDevice(group.leader)">
+          <div v-if="group.leader" class="tracker-row tracker-leader"
+               :class="{ 'tracker-selected': selectedDeviceId === group.leader.device_id }"
+               :data-device-id="group.leader.device_id" tabindex="0" role="button"
+               :aria-pressed="selectedDeviceId === group.leader.device_id"
+               @click="selectDevice(group.leader)"
+               @keydown.enter.self.prevent="selectDevice(group.leader)"
+               @keydown.space.self.prevent="selectDevice(group.leader)">
             <div class="tracker-dot" :style="{ background: group.color }" />
             <div class="tracker-info">
               <div class="tracker-name">
@@ -193,7 +246,12 @@
               {{ group.leader.battery_voltage?.toFixed(1) ?? '—' }}V
             </div>
           </div>
-          <div v-else class="no-leader">{{ t('map.noLeader') }}</div>
+          <div v-if="group.leader && selectedDeviceId === group.leader.device_id" class="tracker-actions">
+            <button type="button" class="tracker-report" data-testid="report-fire-row" @click="reportFromRow(group.leader)">
+              {{ t('fire.report.atPosition') }}
+            </button>
+          </div>
+          <div v-if="!group.leader" class="no-leader">{{ t('map.noLeader') }}</div>
         </template>
         <div v-if="!groupsWithLeaders.length" class="no-trackers">{{ t('map.noTrackers') }}</div>
       </template>
@@ -241,10 +299,13 @@ import { useSettingsStore } from '../stores/settings'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useMap, BASEMAPS } from '../composables/useMap'
 import { getGroupsWithMembers, getSerialStatus } from '../api'
-import { ageMs, formatAge, freshnessOf, byUrgency } from '../lib/freshness'
+import { ageMs, contactAt, formatAge, freshnessOf, byUrgency } from '../lib/freshness'
 import { firePillState } from '../lib/fireStyle'
 import SOSToast from '../components/SOSToast.vue'
 import FirePopup from '../components/FirePopup.vue'
+import FieldReportForm from '../components/FieldReportForm.vue'
+import SuppressionZoneForm from '../components/SuppressionZoneForm.vue'
+import { fireErrorKey } from '../lib/fireErrors'
 
 const OWM_KEY = import.meta.env.VITE_OWM_API_KEY ?? ''
 const WEATHER_LAYERS = [
@@ -375,7 +436,7 @@ async function saveHQ(action) {
   }
 }
 
-const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick } = useMap(
+const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick, setZones, onTrackerClick, onMapContextMenu } = useMap(
   mapEl,
   displayList,
   computed(() => store.trails),
@@ -391,7 +452,11 @@ const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpo
 const { connect } = useWebSocket()
 
 // ── Fire layers ──────────────────────────────────────────────────────────────
-const FIRE_LAYER_BUTTONS = ['burnt', 'hotspots']
+const FIRE_LAYER_BUTTONS = ['burnt', 'hotspots', 'zones']
+// Suppression zones are an admin tool: the button, the circles and the zone fetch are admin-only.
+const fireLayerButtons = computed(() => FIRE_LAYER_BUTTONS.filter(n => n !== 'zones' || isAdmin.value))
+// The freshness pill and the licence line describe EFFIS data; zones are our own and need neither.
+const fireDataLayerOn = computed(() => fireStore.layers.burnt || fireStore.layers.hotspots)
 const firePopupEl = ref(null)
 const firePopup   = ref(null)   // { kind, properties, coordinate } | null
 let   fireOverlay = null
@@ -400,9 +465,14 @@ let   fireMap = null
 function toggleFire(name) {
   const on = !fireStore.layers[name]
   setFireLayerVisible(name, on)
-  if (!on && firePopup.value && (name === 'hotspots') === (firePopup.value.kind === 'hotspot')) closeFirePopup()
-  fireStore.setLayer(name, on).catch(() => { /* fetchFailed drives the pill */ })
+  if (!on && firePopup.value && name !== 'zones' && (name === 'hotspots') === (firePopup.value.kind === 'hotspot')) closeFirePopup()
+  fireStore.setLayer(name, on).catch(() => { /* fetchFailed / zonesFailed drive the notices */ })
 }
+
+// A new report or zone must be visible where it was just made: switch its layer on if it is off.
+function ensureLayer(name) { if (!fireStore.layers[name]) toggleFire(name) }
+
+function retryZones() { fireStore.fetchZones().catch(() => { /* zonesFailed shows the note */ }) }
 
 // The overlay coordinate is in the map projection (EPSG:3857); the popup wants WGS84.
 const firePopupLonLat = computed(() => {
@@ -412,7 +482,174 @@ const firePopupLonLat = computed(() => {
 
 function closeFirePopup() {
   firePopup.value = null
+  fireError.value = ''
   fireOverlay?.setPosition(undefined)
+}
+
+// ── Popup actions (admin: dismiss, create zone; anyone: extinguish a field report) ──────────
+const fireBusy  = ref(false)
+const fireError = ref('')
+
+// Only one popup action runs at a time. The server answers with the changed row; the popup then
+// shows that row (state chip, notes) instead of the copy it was opened with.
+async function runPopupAction(id, action) {
+  if (fireBusy.value) return
+  fireBusy.value = true
+  fireError.value = ''
+  try {
+    await action()
+    syncPopup(id)
+  } catch (err) {
+    if (firePopup.value?.properties?.id === id) fireError.value = t(fireErrorKey(err))
+  } finally {
+    fireBusy.value = false
+  }
+}
+
+function syncPopup(id) {
+  if (firePopup.value?.properties?.id !== id) return
+  const next = fireStore.hotspots.features.find(f => f.id === id)
+  if (next) firePopup.value = { ...firePopup.value, properties: { ...next.properties } }
+}
+
+const onPopupDismiss    = ({ id, notes }) => runPopupAction(id, () => fireStore.dismissHotspot(id, notes))
+const onPopupExtinguish = ({ id }) => runPopupAction(id, () => fireStore.extinguish(id))
+function onPopupCreateZone() {
+  const ll = firePopupLonLat.value
+  if (!ll) return
+  openDialog({ kind: 'zone', latitude: ll[1], longitude: ll[0] })
+  closeFirePopup()
+}
+
+// ── Dialogs: field report, suppression zone (one at a time) ──────────────────────────────────
+const dialog      = ref(null)   // { kind: 'report', target } | { kind: 'zone', latitude, longitude } | null
+const dialogBusy  = ref(false)
+const dialogError = ref('')
+let   dialogSeq   = 0
+
+function openDialog(next) {
+  closeContextMenu()
+  dialogSeq++
+  dialogBusy.value = false
+  dialogError.value = ''
+  dialog.value = next
+}
+function closeDialog() {
+  dialogSeq++
+  dialog.value = null
+  dialogBusy.value = false
+  dialogError.value = ''
+}
+
+// Runs a write for the open dialog. A dialog that was closed or replaced while the request was
+// in flight takes neither the result nor the error.
+async function runDialogAction(action, context) {
+  if (dialogBusy.value) return false
+  const mine = ++dialogSeq
+  dialogBusy.value = true
+  dialogError.value = ''
+  try {
+    await action()
+    if (mine === dialogSeq) closeDialog()
+    return true
+  } catch (err) {
+    if (mine === dialogSeq) { dialogError.value = t(fireErrorKey(err, context)); dialogBusy.value = false }
+  }
+  return false
+}
+
+async function submitReport({ notes }) {
+  const target = dialog.value?.target
+  if (!target) return
+  if (target.noPosition) return
+  const body = { latitude: target.latitude, longitude: target.longitude, notes }
+  // A 404 here means the running backend lacks the field-report endpoint (older than T18).
+  if (await runDialogAction(() => fireStore.reportFire(body), 'report')) ensureLayer('hotspots')
+}
+
+async function submitZone(values) {
+  const d = dialog.value
+  if (d?.kind !== 'zone') return
+  const body = { ...values, latitude: d.latitude, longitude: d.longitude }
+  if (await runDialogAction(() => fireStore.createZone(body))) ensureLayer('zones')
+}
+
+// ── Volunteer selection and "Report fire at this position" ───────────────────────────────────
+// Selecting a volunteer (panel row, or their marker on the map) reveals the action under their row.
+const selectedDeviceId = ref(null)
+
+function selectDevice(pos) {
+  selectedDeviceId.value = pos.device_id
+  focusDevice(pos)
+}
+
+// The position is frozen here, at the click: the volunteer keeps moving while the operator types,
+// and what the form shows is exactly what is sent. No position, or none from the last 24 h
+// (judged on received_at, the server clock), means nothing can be reported.
+const REPORT_MAX_AGE_MS = 24 * 3_600_000
+function reportFromRow(pos) {
+  const live = store.positions[pos.device_id] ?? null
+  const name = pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+  const age = live ? ageMs(live) : null
+  const lat = Number(live?.latitude), lon = Number(live?.longitude)
+  const usable = !!live && live.latitude != null && live.longitude != null
+    && Number.isFinite(lat) && Number.isFinite(lon) && age != null && age <= REPORT_MAX_AGE_MS
+  openDialog({
+    kind: 'report',
+    target: usable
+      ? { name, latitude: lat, longitude: lon, mgrs: live.mgrs ?? '', receivedAt: contactAt(live) }
+      : { name, noPosition: true },
+  })
+}
+
+// A marker click selects that volunteer's row and brings it into view; bare map deselects.
+const trackerPanelEl = ref(null)
+async function onMarkerClick(deviceId) {
+  selectedDeviceId.value = deviceId
+  if (!deviceId) return
+  await nextTick()
+  const row = [...(trackerPanelEl.value?.querySelectorAll('[data-device-id]') ?? [])].find(el => el.dataset.deviceId === deviceId)
+  row?.scrollIntoView?.({ block: 'nearest' })
+}
+// A volunteer who left the list cannot stay selected.
+watch(displayList, (list) => {
+  if (selectedDeviceId.value && !list.some(p => p.device_id === selectedDeviceId.value)) selectedDeviceId.value = null
+})
+
+// ── Right-click / long-press: "Report fire here" ─────────────────────────────────────────────
+const ctxMenu   = ref(null)   // { x, y, coordinate } | null
+const ctxMenuEl = ref(null)
+
+function closeContextMenu() {
+  if (!ctxMenu.value) return
+  ctxMenu.value = null
+  document.removeEventListener('pointerdown', onOutsidePointer, true)
+  document.removeEventListener('keydown', onMenuKey, true)
+}
+function onOutsidePointer(e) { if (!ctxMenuEl.value?.contains(e.target)) closeContextMenu() }
+function onMenuKey(e) { if (e.key === 'Escape') closeContextMenu() }
+
+async function openContextMenu({ coordinate, pixel }) {
+  const width = mapEl.value?.clientWidth ?? 0
+  const height = mapEl.value?.clientHeight ?? 0
+  // Keep the menu inside the map (about 190 x 44 px).
+  const x = Math.max(4, Math.min(pixel[0], width ? width - 196 : pixel[0]))
+  const y = Math.max(4, Math.min(pixel[1], height ? height - 52 : pixel[1]))
+  const first = !ctxMenu.value
+  ctxMenu.value = { x, y, coordinate }
+  if (first) {
+    document.addEventListener('pointerdown', onOutsidePointer, true)
+    document.addEventListener('keydown', onMenuKey, true)
+  }
+  await nextTick()
+  ctxMenuEl.value?.querySelector('button')?.focus()
+}
+
+function reportFromMenu() {
+  const c = ctxMenu.value?.coordinate
+  if (!c) return
+  const [lon, lat] = toLonLat(c)
+  openDialog({ kind: 'report', target: { latitude: lat, longitude: lon } })
 }
 
 // What the pill says; the priority rules live in lib/fireStyle.js (firePillState).
@@ -441,6 +678,7 @@ onMounted(() => {
   fireMap = m
   m.addOverlay(fireOverlay)
   onFireFeatureClick(async (sel) => {
+    fireError.value = ''
     firePopup.value = sel
     // The popup has no size until Vue renders it; position after that so OpenLayers
     // anchors it by its real width and height.
@@ -449,8 +687,9 @@ onMounted(() => {
   })
   setFireLabels({ fieldReport: t('fire.source.field_report') })
   // Layers remembered from the last session show again after a reload.
-  for (const name of FIRE_LAYER_BUTTONS) setFireLayerVisible(name, fireStore.layers[name])
+  for (const name of FIRE_LAYER_BUTTONS) setFireLayerVisible(name, fireStore.layers[name] && (name !== 'zones' || isAdmin.value))
   fireStore.refreshVisible().catch(() => { /* fetchFailed drives the pill */ })
+  if (isAdmin.value && fireStore.layers.zones) retryZones()
 })
 
 // immediate: a remounted MapView shows what the store already holds even if its own first
@@ -458,6 +697,11 @@ onMounted(() => {
 watch(() => fireStore.hotspots,   (fc) => { if (!setHotspots(fc))   fireStore.markFeedFailed('hotspots') }, { immediate: true })
 watch(() => fireStore.burntAreas, (fc) => { if (!setBurntAreas(fc)) fireStore.markFeedFailed('burnt') },    { immediate: true })
 watch(locale, () => setFireLabels({ fieldReport: t('fire.source.field_report') }))
+// Only active zones are drawn; Settings may have loaded disabled ones into the same list.
+watch(() => fireStore.zones, (list) => setZones(list.filter(z => z.is_active)), { immediate: true })
+
+onTrackerClick(onMarkerClick)
+onMapContextMenu(openContextMenu)
 
 onMounted(async () => {
   await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
@@ -491,6 +735,9 @@ onUnmounted(() => {
   if (m) m.un('moveend', scheduleWeatherFetch)
   // The popup overlay belongs to this view; do not leave it on a map that outlives it.
   onFireFeatureClick(null)
+  onTrackerClick(null)
+  onMapContextMenu(null)
+  closeContextMenu()
   if (fireOverlay) fireMap?.removeOverlay(fireOverlay)
   fireOverlay = null
   fireMap = null
@@ -905,6 +1152,30 @@ function batClass(v) {
 .tracker-row.fresh-stale { border-left: 3px solid rgba(234,179,8,.55); }
 .tracker-row.fresh-lost  { border-left: 3px solid rgba(156,163,175,.5); }
 .tracker-row.tracker-sos { border-left: 3px solid var(--danger); }
+
+/* Selected volunteer: Signal Blue hairline (outline, not a side stripe) on the raised ground, and the
+   report action underneath. */
+.tracker-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tracker-row.tracker-selected { background: var(--bg-card); outline: 1px solid var(--accent); outline-offset: -1px; }
+.tracker-actions { padding: 8px 14px 10px; background: var(--bg-card); border-bottom: 1px solid var(--border); }
+.tracker-report {
+  width: 100%; min-height: 34px; padding: 6px 10px; font-size: 12.5px; font-weight: 600; line-height: 1.3;
+  background: var(--bg-panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px;
+}
+.tracker-report:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .tracker-report:hover { background: var(--accent); color: #fff; opacity: 1; } }
+
+.map-context {
+  position: absolute; z-index: 65; min-width: 180px; padding: 4px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .55);
+}
+.mc-item {
+  display: block; width: 100%; text-align: left; padding: 9px 12px; min-height: 36px;
+  background: transparent; color: var(--text); font-size: 13px; font-weight: 600; border-radius: 6px;
+}
+.mc-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-card); }
+@media (hover: hover) and (pointer: fine) { .mc-item:hover { background: var(--bg-card); opacity: 1; } }
 
 .tracker-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .tracker-age {
