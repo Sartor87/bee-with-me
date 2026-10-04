@@ -205,3 +205,36 @@ async def mark_repeats_due(conn: asyncpg.Connection) -> list[str]:
         RETURNING a.id::text
     """)
     return [r['id'] for r in rows]
+
+
+async def list_alerts(conn: asyncpg.Connection, state: str, limit: int, offset: int) -> list[FireAlertOut]:
+    where = ' WHERE a.resolved_at IS NULL' if state == 'open' else ''
+    rows = await conn.fetch(ALERT_OUT_SELECT + where + ' ORDER BY a.triggered_at DESC LIMIT $1 OFFSET $2',
+                            limit, offset)
+    return [FireAlertOut.from_row(r) for r in rows]
+
+
+async def acknowledge_alert(conn: asyncpg.Connection, alert_id: str, user_id) -> tuple[FireAlertOut | None, bool]:
+    """Idempotent. Acknowledging stops the repeats but never resolves the alert (BP-02)."""
+    changed = await conn.fetchval("""
+        UPDATE fire_alerts SET acknowledged_at = NOW(), acknowledged_by = $2::uuid
+        WHERE id = $1::uuid AND resolved_at IS NULL AND acknowledged_at IS NULL
+        RETURNING 1
+    """, alert_id, str(user_id))
+    return await get_alert_out(conn, alert_id), bool(changed)
+
+
+async def acknowledge_all(conn: asyncpg.Connection, user_id) -> list[str]:
+    rows = await conn.fetch("""
+        UPDATE fire_alerts SET acknowledged_at = NOW(), acknowledged_by = $1::uuid
+        WHERE resolved_at IS NULL AND acknowledged_at IS NULL
+        RETURNING id::text
+    """, str(user_id))
+    return [r['id'] for r in rows]
+
+
+async def count_targets(conn: asyncpg.Connection) -> dict:
+    from .proximity import TARGET_POSITION_MAX_AGE_MIN
+    _, hq = await load_alarm_settings(conn)
+    rescuers = await load_rescuer_targets(conn, TARGET_POSITION_MAX_AGE_MIN)
+    return {'hq': hq is not None, 'rescuers': len(rescuers)}

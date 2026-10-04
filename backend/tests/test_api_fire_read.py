@@ -9,10 +9,18 @@ from fastapi.testclient import TestClient
 
 from backend.auth import get_current_user
 from backend.database import get_conn
-from backend.fire import poller
+from backend.fire import poller, repository
 from backend.fire.models import hotspot_state
 
 pytestmark = pytest.mark.Trait("Task", "T10")
+
+
+@pytest.fixture(autouse=True)
+def _no_targets(monkeypatch):
+    """/status also counts alarm targets (T16); the mocked connection has no settings row."""
+    async def no_targets(conn):
+        return {'hq': False, 'rescuers': 0}
+    monkeypatch.setattr(repository, 'count_targets', no_targets)
 
 T = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
 

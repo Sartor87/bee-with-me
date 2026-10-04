@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -7,6 +8,10 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user, require_role
 from ..database import get_conn
+from ..fire import repository as fire_repository
+from ..fire.service import notify as fire_notify
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/api/devices', tags=['devices'])
 
@@ -150,11 +155,26 @@ async def delete_device_permanent(
     _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
     async with conn.transaction():
+        # Open fire alerts for this device end now, with a reason (BP-02); resolved rows keep the history
+        # (device_id -> NULL through the FK). Must run before the delete so none is left open and orphaned.
+        resolved = await conn.fetch(
+            "UPDATE fire_alerts SET resolved_at = NOW(), resolve_reason = 'disabled' "
+            "WHERE device_id = $1 AND resolved_at IS NULL RETURNING id::text",
+            device_id,
+        )
         await conn.execute('DELETE FROM sos_alerts       WHERE device_id = $1', device_id)
         await conn.execute('DELETE FROM location_events  WHERE device_id = $1', device_id)
         await conn.execute('DELETE FROM repeater_events  WHERE device_id = $1', device_id)
         deleted = await conn.fetchval(
             'DELETE FROM devices WHERE id = $1 RETURNING id', device_id
         )
-    if deleted is None:
-        raise HTTPException(status_code=404, detail='Device not found')
+        if deleted is None:
+            # unknown device: nothing was deleted, so do not resolve anything either
+            raise HTTPException(status_code=404, detail='Device not found')
+    for row in resolved:
+        try:
+            out = await fire_repository.get_alert_out(conn, row['id'])
+            if out is not None:
+                await fire_notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
+        except Exception:
+            logger.warning('fire alert %s resolved but its update was not broadcast', row['id'], exc_info=True)
