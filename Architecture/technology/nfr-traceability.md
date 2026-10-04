@@ -17,6 +17,6 @@ Mutable; update when a mechanism or check changes.
 | M-06: fire alarm radius | Settings row, admin-editable | EFFIS plan T12, T14 | Target |
 | TP-02: online sources degrade gracefully | Timeouts, size limits, last good data with age | EFFIS plan T8, T9 tests | Target |
 | DP-01: data stays on the machine | Loopback listeners (ADR 12); no telemetry; bounding box only to EFFIS | Review check DP-01 | Met except weather in the browser (R-05) |
-| DP-02: restricted access | JWT, admin for writes | — | Gaps: R-02, R-09, R-21, R-22, R-23 |
+| DP-02: restricted access | JWT, admin for writes | — | Gaps: R-09; `/ws` open by design (ADR 15) |
 | DP-03: explicit lifetime | Retention cleanup, backup pruning | — | Gaps: R-14, R-16, R-20 |
 | Availability of the field laptop | DB container auto-restart | — | ⚠️ RTO/RPO not defined (R-01, R-11) |

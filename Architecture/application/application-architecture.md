@@ -233,15 +233,14 @@ sequenceDiagram
 | Identity | Local accounts in `users` ([ADR 8](../decisions/0008-local-accounts-jwt.md)) | Unchanged |
 | Tokens | JWT HS256: access 60 min, refresh 7 days; stored by the SPA | Unchanged |
 | Roles | `admin` for all writes; reads need only a login | Admin-only deletes (BR-07) |
-| `/ws` | **No authentication** (R-02) | Token on connect before multi-user use |
+| `/ws` | Open by design ([ADR 15](../decisions/0015-live-channel-open-by-design.md)); reachable only on loopback (ADR 12) | Unchanged |
 | `/uploads` | **No authentication** (R-09) | Served through an authenticated endpoint |
 | CORS | `*` (R-03) | Local origins only |
 | First login | Default `admin`/`admin` on an empty database (R-08) | Forced password change |
-| `rescuer` vs `viewer` | No difference in the API today | ⚠️ owner: are these roles used? |
+| `rescuer`, `viewer` | Exist in the schema; only admin accounts log in (owner, 2026-10-04) | Unchanged |
 
-> ⚠️ **Requires stakeholder input (owner):** do `rescuer` and `viewer` accounts exist in practice, and should a
-> `viewer` (for example a partner on the wall display) see blood types, phones and PINs? Today every logged-in
-> user can read them (R-23).
+Only admin accounts log in. The login endpoint does not check the role: any active person with a username and a
+password can log in, so the rule holds because only admins are given credentials (R-23).
 
 ---
 

@@ -213,7 +213,7 @@ background (target state). Everything else runs on the field machine.
 | Fire data | None | EFFIS burnt areas and hotspots stored locally, freshness shown, proximity alarm | EFFIS plan, P1 to P5 |
 | HQ location | Browser localStorage | Database (shared by all screens) | EFFIS plan, P3 |
 | Schema changes | Manual | Numbered migrations, backup before migrate, restore scripts | Done (EFFIS P0) |
-| Live channel security | `/ws` unauthenticated, CORS `*` | Authenticated before multi-user use | Roadmap item |
+| Live channel | `/ws` open, CORS `*`, all listeners on loopback | `/ws` stays open by design; CORS restricted | [ADR 15](decisions/0015-live-channel-open-by-design.md), [ADR 12](decisions/0012-loopback-only-network-exposure.md) |
 
 > ⚠️ **Requires stakeholder input (owner):** are the online basemaps and weather overlays used during real
 > operations, or only when preparing at base? This decides how urgent the TP-01 gap is.
@@ -224,7 +224,8 @@ background (target state). Everything else runs on the field machine.
   gateway ([ADR 2](decisions/0002-single-field-machine-intranet-deployment.md)).
 - Intranet only: the system is not built to be exposed to the internet.
 - No internet is guaranteed at run time.
-- One operator today; roles `admin`, `rescuer`, `viewer` exist.
+- One operator today. Only admin accounts log in; `rescuer` and `viewer` exist in the schema but are not
+  used for login (owner, 2026-10-04). About ten RescuerBee devices in total, not one per volunteer.
 - Infrastructure in containers (Podman first, Docker as the alternative); backend and frontend run on the
   host.
 - The frame protocol is defined by the hardware (`docs/PROTOCOL.md`) and changes only with the hardware
@@ -323,11 +324,13 @@ devices and appear on the map but do not use the system. The command post team r
 Any organisation can take part in an operation, including state services such as the fire service and the
 military; partners receive information by radio or phone. The admin is responsible for devices. Any
 logged-in user may resolve an alarm. Operation data must be preserved after the operation. There is no data
-protection officer and there are no business KPIs beyond M-01 to M-06.
+protection officer and there are no business KPIs beyond M-01 to M-06. Personal data is processed on the
+basis of the volunteer's contract with ASP, with no separate consent; special-category data such as blood type
+is not covered by that basis ([ADR 16](decisions/0016-lawful-basis-asp-contract.md)).
 
 > ⚠️ **Requires stakeholder input (owner):** whether partners see the map or receive exports; how long and
-> in what form operation data is kept (it conflicts with the 90-day retention cleanup today, R-20); how
-> volunteers' consent is recorded (R-19).
+> in what form operation data is kept (it conflicts with the 90-day retention cleanup today, R-20); the lawful
+> basis for blood type and for partner personnel (R-19).
 
 ### 3.5 Baseline and target
 
@@ -379,7 +382,8 @@ flowchart LR
 ```
 
 > ⚠️ **Requires stakeholder input (owner):** classification levels, where backups are stored and whether they
-> are encrypted, the purpose of the stored PIN, and how long fire data and alerts are kept (BR-09).
+> are encrypted, and how long fire data and alerts are kept (BR-09). The PIN is the volunteer's identification
+> PIN, an identifier, not a secret (owner, 2026-10-04).
 
 ### 4.2 Application architecture
 
@@ -412,9 +416,10 @@ flowchart LR
 | 5. Records and reporting | Export API, retention cleanup, field reports (target) |
 | 6. System stewardship | Auth, migration runner, start/backup/restore scripts |
 
-**Main gaps found in Phase C** (risk register): the stored PIN is plain text and readable by any logged-in user
-(R-21); the live channel sends phones and photo paths to every client on the network (R-22); reads are not
-restricted by role, so a viewer sees health data (R-23); the serial and HID readers both start on every boot
+**Findings in Phase C, as resolved with the owner on 2026-10-04:** the PIN is the volunteer's identification
+PIN, not a secret (R-21 closed); the open live channel is by design and protected by loopback binding
+(R-22 accepted, [ADR 15](decisions/0015-live-channel-open-by-design.md)); only admins log in, so role-based
+reads are a low risk (R-23); the serial and HID readers both start on every boot
 (both stay, R-24).
 
 **Future integrations.** Wind data comes first (wind-shift warnings), then possibly APRS and Meshtastic. Each

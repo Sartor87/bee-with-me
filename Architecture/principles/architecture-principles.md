@@ -41,6 +41,11 @@ it upholds and which it trades off.
 
 > ⚠️ **Requires stakeholder input (owner):** the retention period for position history and for backups after an operation ends. DP-03 needs a number.
 
+**Lawful basis.** Volunteers' personal data is processed on the basis of their contract with ASP; no separate
+consent is collected ([ADR 16](../decisions/0016-lawful-basis-asp-contract.md)). Special categories of
+personal data (GDPR Article 9, for example blood type) are not covered by that basis: a new special-category
+field needs a confirmed basis and an ADR (DP-02).
+
 ### Technology principles: offline first
 
 | ID | Principle | Statement | Rationale | Implications |
@@ -77,8 +82,9 @@ When principles conflict, use this priority order:
 4. Document the conflict and its resolution in the relevant ADR.
 
 Example: fire alarms send rescuer names and distances to every connected screen (BP-02) over a WebSocket
-that does not yet authenticate (against DP-02). Life safety wins for the single-operator intranet
-deployment; the gap is recorded as a TODO and must be closed before multi-user use.
+that does not authenticate (against DP-02). Life safety wins: a screen must never go dark because of a login.
+The owner keeps `/ws` open by design ([ADR 15](../decisions/0015-live-channel-open-by-design.md)); DP-02 is
+protected by binding every listener to loopback ([ADR 12](../decisions/0012-loopback-only-network-exposure.md)).
 
 > ⚠️ **Requires stakeholder input (owner):** confirm this priority order. Some organisations put data protection above all else.
 

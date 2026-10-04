@@ -9,8 +9,8 @@ Proposed (records the baseline 1.7.1)
 **TOGAF Phase:** C (Application Architecture)
 **Decision Maker(s):** Project owner (kvelev)
 **Stakeholders:** HQ operator, command post team, contributors
-**Principles:** upholds BP-01, BP-02 (data is stored before it is shown); trades off DP-02 while `/ws` is not
-authenticated (R-02, R-22)
+**Principles:** upholds BP-01, BP-02 (data is stored before it is shown); trades off DP-02 (`/ws` is open by
+design, ADR 15; loopback only, ADR 12)
 
 ## Context
 
@@ -33,8 +33,8 @@ after a reload from REST endpoints (live positions, open alerts), not from the s
 - Reload and reconnect are safe because REST is the source of state (BP-02).
 
 **Negative / Trade-offs:**
-- Broadcast to every client: no per-user filtering; with no authentication on `/ws`, anyone on the LAN gets
-  names, phones, photo paths and positions (R-02, R-22).
+- Broadcast to every client: no per-user filtering; `/ws` is open by design (ADR 15), so whoever reaches the
+  backend gets names, phones, photo paths and positions. Loopback binding (ADR 12) limits that to the laptop.
 - Notifications are lost while the listener is reconnecting; clients must refetch after reconnect.
 - `pg_notify` payloads are limited to 8000 bytes.
 

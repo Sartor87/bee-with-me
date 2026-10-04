@@ -94,7 +94,7 @@ Legend: green = in baseline 1.7.1; amber = in baseline with a gap; blue dashed =
 | 5.1 | Movement export | Export positions as CSV, GeoJSON or PDF | ✅ no row cap | Capped and streamed | G-05 | DP-02 |
 | 5.2 | Field reports | Record what was seen in the field (for example a fire report) | ❌ | EFFIS plan P5 | G-03 | |
 | 5.3 | Data retention | Keep operation data as long as required, then delete it | ⚠️ 90 days by default, keyed on the device clock; conflicts with BR-09 | Keyed on server receive time; period agreed with BR-09 | G-04 | DP-03 |
-| 6.1 | Access control | Log in; roles `admin`, `rescuer`, `viewer` | ⚠️ live channel open, default password | `/ws` authenticated, admin-only deletes | G-04 | DP-02 |
+| 6.1 | Access control | Admins log in; live channel open by design on loopback (ADR 15) | ⚠️ default password | Forced password change, admin-only deletes | G-04 | DP-02 |
 | 6.2 | Install and start | One start script on Windows or Linux | ✅ dev servers, manual start | Built release, restart after crash | G-05 | TP-03 |
 | 6.3 | Backup, restore, upgrade | Backup before every migration; restore into a side database | ✅ | Restore tested before each release | G-05 | TP-03, BP-03 |
 
@@ -118,17 +118,23 @@ military (owner, 2026-10-03). Partners bring their own people, who may carry Res
 registered in the people register.
 
 > 📝 **Assumption:** partner organisations do not get their own accounts; at most they watch the wall
-> display at the command post. If partners get accounts or screens, `/ws` authentication (R-02) and roles
-> become a precondition, and data sharing with state services needs a legal basis.
+> display at the command post. Screens on other machines would need a new decision on network exposure
+> (ADR 12, ADR 15), and data sharing with state services needs a lawful basis.
 
 > ⚠️ **Requires stakeholder input (owner):** do partner organisations (especially the military) see the map
 > or receive exports, and do they set rules on what may be stored about their people?
 
-The operating organisation has **no data protection officer** (owner, 2026-10-03). The people register holds
-blood types, which are health data (a special category under GDPR, Article 9).
+The operating organisation has **no data protection officer** (owner, 2026-10-03). Volunteers' personal data
+is processed on the basis of their **contract with ASP**; no separate consent is needed (owner, 2026-10-04,
+[ADR 16](../decisions/0016-lawful-basis-asp-contract.md)). That basis does **not** cover special categories
+(GDPR Article 9): the people register holds blood types, which are health data.
 
-> ⚠️ **Requires stakeholder input (owner):** how volunteers' consent is recorded, and who answers a request to
-> see or delete a person's data. See R-19.
+Only admin accounts log in (owner, 2026-10-04). There are about ten RescuerBee devices in total, handed out to
+some volunteers per operation, not one per person.
+
+> ⚠️ **Requires stakeholder input (owner, with legal advice):** the lawful basis for blood type, and for
+> registering partner personnel who are not under an ASP contract; who answers a request to see or delete a
+> person's data. See R-19.
 
 ---
 
@@ -258,7 +264,7 @@ longer (or no) retention period, or an export archived outside the live database
 | 5.3 vs BR-09 | Retention deletes data the owner requires to keep | Operation record lost after 90 days (R-20) | Owner decision, then roadmap |
 | 5.2 Field reports | Missing | Field observations not recorded | EFFIS P5 |
 | 5.3 Data retention | Keyed on device clock; period not agreed | Data kept too long or deleted early (R-16) | Roadmap + owner decision |
-| 6.1 Access control | `/ws` open, default password | Anyone on the LAN sees everything (R-02, R-08) | Roadmap |
+| 6.1 Access control | Default password | First login with `admin`/`admin` (R-08) | Roadmap |
 | 6.2 Install and start | Dev servers, no restart | Tracking stops after a crash (R-11) | Roadmap |
 | Response record | Alarm response happens by radio; only a free-text note is stored | After-action review relies on memory | Accepted (ADR 3) |
 

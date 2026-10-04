@@ -40,7 +40,8 @@ The backend runs on the host (it needs the USB device); the database and tile se
 **Negative / Trade-offs:**
 - The field machine is a single point of failure (R-01); backups and a tested restore are the only
   recovery path.
-- Security relies on the local network being trusted; `/ws` and CORS are open today (R-02, R-03).
+- Security relies on the network boundary: every listener is on loopback (ADR 12); `/ws` is open by design
+  (ADR 15) and CORS is open today (R-03).
 - Scaling beyond one gateway and one machine needs a new ADR.
 
 ## Considered options
@@ -56,7 +57,7 @@ The backend runs on the host (it needs the USB device); the database and tile se
 | Risk ID | Description | Impact | Mitigation |
 |---------|-------------|--------|------------|
 | R-01 | Machine failure stops tracking | H | Backups, restore scripts, documented recovery |
-| R-02 | Unauthenticated live channel on a shared network | H | Authenticate `/ws` before multi-user use |
+| R-02 | Open live channel | H | Accepted by design (ADR 15); loopback only (ADR 12) |
 
 ## Related
 

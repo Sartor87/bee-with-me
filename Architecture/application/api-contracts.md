@@ -36,7 +36,7 @@ flowchart LR
 | Auth | `POST /api/auth/login` | none | Form login → access + refresh token |
 | | `POST /api/auth/refresh` | refresh token | New tokens |
 | | `GET /api/auth/me` | login | Current user |
-| People | `GET /api/users/`, `GET /api/users/{id}` | login | List and detail **including personal data and PIN** (R-21, R-23) |
+| People | `GET /api/users/`, `GET /api/users/{id}` | login | List and detail, including personal data and the identification PIN (only admins log in) |
 | | `POST /api/users/`, `PUT /api/users/{id}` | admin | Create, update |
 | | `POST /api/users/{id}/photo` | admin | Upload photo to `/uploads` |
 | | `POST /api/users/import` | admin | Excel import (`.xls`, `.xlsx`) |
@@ -75,12 +75,13 @@ The plan is authoritative for exact paths and payloads; copy them here when each
 
 ## 3. WebSocket `/ws`
 
-Server → client only; the client may send text to keep the connection alive. **No authentication** (R-02).
+Server → client only; the client may send text to keep the connection alive. **No authentication, by design**
+([ADR 15](../decisions/0015-live-channel-open-by-design.md)); reachable only on loopback (ADR 12).
 Every message is JSON with a `type`.
 
 | `type` | Source channel | Payload | Status |
 |--------|----------------|---------|--------|
-| `location_update` | `pg_notify('location_update')` | `device_id`, `user_id`, `full_name`, `rank`, `photo_url`, **`phone`**, `mgrs`, `latitude`, `longitude`, `altitude_m`, `speed_knots`, `course_deg`, `battery_voltage`, `gnss_satellites`, `gnss_valid`, `sos_active`, `repeater_mode`, `recorded_at`, `received_at`, `groups[]` | Baseline (R-22: phone and photo to every client) |
+| `location_update` | `pg_notify('location_update')` | `device_id`, `user_id`, `full_name`, `rank`, `photo_url`, **`phone`**, `mgrs`, `latitude`, `longitude`, `altitude_m`, `speed_knots`, `course_deg`, `battery_voltage`, `gnss_satellites`, `gnss_valid`, `sos_active`, `repeater_mode`, `recorded_at`, `received_at`, `groups[]` | Baseline (by design, ADR 15) |
 | `sos_alert` | `pg_notify('sos_alert')` | `id`, `device_id`, `user_id`, `dev_sn`, `full_name`, `rank`, `triggered_at` | Baseline |
 | `serial_status` | Direct broadcast by the reader | Reader state, last frame time, frame count | Baseline |
 | `fire_data_updated` | `pg_notify('fire_data_updated')` | `fetched_at`, `hotspot_count`, `burnt_area_count`, `upstream_state` (`live`, `no_recent_detections`, `error`) | Target (T9) |

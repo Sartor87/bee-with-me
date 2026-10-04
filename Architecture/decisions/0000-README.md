@@ -24,6 +24,8 @@ Index of all ADRs for Bee With Me. Format and rules: [ADR 1](0001-record-archite
 | [0012](0012-loopback-only-network-exposure.md) | Every listener on loopback; screens are attached to the field laptop | Proposed | 2026-10-03 | D |
 | [0013](0013-secrets-and-settings-in-env.md) | Secrets and settings in a local .env file | Proposed | 2026-10-03 | D |
 | [0014](0014-run-from-source-git-pull.md) | Run from source, update with git pull, no packaged release or CI for now | Proposed | 2026-10-03 | D |
+| [0015](0015-live-channel-open-by-design.md) | The live channel /ws is open by design | Proposed | 2026-10-04 | C, D |
+| [0016](0016-lawful-basis-asp-contract.md) | Lawful basis for personal data: the volunteer contract with ASP | Proposed | 2026-10-04 | B, C |
 
 ## Writing a new ADR (people and agents)
 
