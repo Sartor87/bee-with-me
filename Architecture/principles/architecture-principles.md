@@ -44,7 +44,8 @@ it upholds and which it trades off.
 **Lawful basis.** Volunteers' personal data is processed on the basis of their contract with ASP; no separate
 consent is collected ([ADR 16](../decisions/0016-lawful-basis-asp-contract.md)). Special categories of
 personal data (GDPR Article 9, for example blood type) are not covered by that basis: a new special-category
-field needs a confirmed basis and an ADR (DP-02).
+field needs a confirmed basis and an ADR (DP-02). **The system does not describe a person's medical
+condition** (owner, 2026-10-04): no field, note, report or AI output records it.
 
 ### Technology principles: offline first
 

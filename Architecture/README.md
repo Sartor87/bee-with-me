@@ -13,6 +13,8 @@ along the TOGAF ADM. Everything is Markdown with Mermaid diagrams.
 | know the data, its classification and lifetime | [data/](data/) |
 | know the components and interfaces | [application/](application/) |
 | know the technology, operations and coding rules | [technology/](technology/) |
+| run the system as an administrator (Bulgarian) | [guides/admin-guide.md](guides/admin-guide.md) |
+| see what may come later | [roadmap/future-capabilities.md](roadmap/future-capabilities.md) |
 | know why something is built the way it is | [decisions/0000-README.md](decisions/0000-README.md) (ADR index) |
 
 ## For coding agents
@@ -49,8 +51,13 @@ Architecture/
 ├── decisions/
 │   ├── 0000-README.md                ADR index and how to write one
 │   └── NNNN-short-title.md           one ADR per decision (adr-tools layout)
-└── governance/
-    └── risk-register.md              risks (mutable)
+├── governance/
+│   └── risk-register.md              risks (mutable)
+├── guides/
+│   └── admin-guide.md                administrator guide, Bulgarian (mutable)
+└── roadmap/
+    ├── future-capabilities.md        catalogue FC-xx, input to Phase E (mutable)
+    └── fc-NN-*.md                    assessment of one future capability (FC-01: assistant, hardware)
 ```
 
 Supporting documents (data model, API contracts, technology catalogue, engineering standards, roadmap)

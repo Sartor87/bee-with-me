@@ -24,7 +24,8 @@ copy of data.
 
 **Lawful basis** ([ADR 16](../decisions/0016-lawful-basis-asp-contract.md)): the volunteer's contract with ASP
 covers ordinary personal data. Special-category data (blood type, possibly health notes) is not covered; it is
-marked **Special** in the register below until the owner confirms a basis (R-19).
+marked **Special** in the register below until the owner confirms a basis (R-19). The system does not record
+descriptions of a person's medical condition (owner, 2026-10-04); free-text notes must not be used for that.
 
 > 📝 **Assumption:** blood type is health data (GDPR Article 9); a person's live position counts as
 > Restricted because it reveals where they are.

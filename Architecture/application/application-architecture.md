@@ -239,8 +239,8 @@ sequenceDiagram
 | First login | Default `admin`/`admin` on an empty database (R-08) | Forced password change |
 | `rescuer`, `viewer` | Exist in the schema; only admin accounts log in (owner, 2026-10-04) | Unchanged |
 
-Only admin accounts log in. The login endpoint does not check the role: any active person with a username and a
-password can log in, so the rule holds because only admins are given credentials (R-23).
+Only admin accounts log in: the login endpoint accepts only the roles in `LOGIN_ROLES` (default `admin`), with the
+same error as a wrong password (B47; R-23 closed).
 
 ---
 

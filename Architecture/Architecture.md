@@ -479,7 +479,12 @@ cause), SOLID as applied here, logging without personal data, and tagged test-fi
 
 ## 6. Phase E: Opportunities & Solutions
 
-*To be written in Phase E.*
+*To be written in Phase E, after the field exercise, which is the main source of requirements for the roadmap.*
+
+Inputs collected so far: the capability gaps (Section 3, supporting document Section 7), the risk register, and
+the catalogue of future capabilities [roadmap/future-capabilities.md](roadmap/future-capabilities.md) (wind data,
+APRS, Meshtastic, packaged release, operation entity, and an AI operator assistant assessed in
+[roadmap/fc-01-ai-assistant.md](roadmap/fc-01-ai-assistant.md)).
 
 ## 7. Phase F: Migration Planning
 
