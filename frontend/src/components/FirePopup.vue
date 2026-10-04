@@ -52,12 +52,27 @@
         <dd><span class="fp-mono">{{ properties.effis_fire_id }}</span></dd>
       </div>
     </dl>
+
+    <dl v-if="coords" class="fp-rows fp-coords">
+      <div v-for="row in coordRows" :key="row.id" class="fp-row">
+        <dt>{{ row.label }}</dt>
+        <dd class="fp-copy">
+          <span class="fp-mono fp-value" :data-testid="`fp-${row.id}`">{{ row.text }}</span>
+          <button type="button" class="fp-copy-btn" :data-testid="`fp-copy-${row.id}`"
+                  :aria-label="`${t('fire.popup.copy')}: ${row.label}`" @click="copy(row)">
+            {{ copiedId === row.id ? (copyOk ? t('fire.popup.copied') : t('fire.popup.copyFailed')) : t('fire.popup.copy') }}
+          </button>
+        </dd>
+      </div>
+    </dl>
+    <p class="fp-live" role="status" aria-live="polite" data-testid="fp-copy-status">{{ liveMsg }}</p>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { forward as toMGRS } from 'mgrs'
 
 // Every property is rendered as text through Vue interpolation; field-report notes and
 // dismiss notes are user text and must never reach innerHTML. `isAdmin` is accepted now so
@@ -66,6 +81,8 @@ const props = defineProps({
   kind:       { type: String, required: true, validator: v => v === 'hotspot' || v === 'burnt_area' },
   properties: { type: Object, required: true },
   isAdmin:    { type: Boolean, default: false },
+  // WGS84 [lon, lat] in degrees (the map hands over EPSG:3857; MapView converts).
+  lonLat:     { type: Array, default: null },
 })
 const emit = defineEmits(['close'])
 
@@ -129,13 +146,75 @@ const burnedAgo = computed(() => {
   return t('fire.popup.burnedDaysAgo', { n: Math.floor(ms / DAY) })
 })
 
+// Coordinates: decimal degrees, `lat, lon`, 5 decimals, always a decimal point (toFixed is
+// locale-free) so the text pastes into other tools whatever the UI language.
+const coords = computed(() => {
+  const ll = props.lonLat
+  if (!Array.isArray(ll) || ll.length < 2) return null
+  const lon = Number(ll[0]), lat = Number(ll[1])
+  if (!Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
+  return { lat, lon }
+})
+
+const mgrsText = computed(() => {
+  if (!coords.value) return ''
+  try { return toMGRS([coords.value.lon, coords.value.lat], 5) } catch { return '' }
+})
+
+const coordRows = computed(() => {
+  const c = coords.value
+  if (!c) return []
+  const rows = [{
+    id: 'latlon',
+    label: t(props.kind === 'hotspot' ? 'fire.popup.coordinates' : 'fire.popup.clickedPoint'),
+    text: `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}`,
+  }]
+  if (mgrsText.value) rows.push({ id: 'mgrs', label: t('fire.popup.mgrs'), text: mgrsText.value })
+  return rows
+})
+
+const copiedId = ref('')
+const copyOk = ref(false)
+const liveMsg = ref('')
+let feedbackTimer = null
+
+// navigator.clipboard exists only in secure contexts (https or localhost); the field laptop
+// may be reached over plain http on the intranet, so fall back to execCommand.
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true } catch { /* try the fallback */ }
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.setAttribute('aria-hidden', 'true')
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none'
+  document.body.appendChild(ta)
+  ta.select()
+  ta.setSelectionRange(0, text.length)
+  let ok = false
+  try { ok = document.execCommand('copy') } catch { ok = false }
+  ta.remove()
+  return ok
+}
+
+async function copy(row) {
+  const ok = await writeClipboard(row.text)
+  copiedId.value = row.id
+  copyOk.value = ok
+  liveMsg.value = t(ok ? 'fire.popup.copied' : 'fire.popup.copyFailed')
+  clearTimeout(feedbackTimer)
+  feedbackTimer = setTimeout(() => { copiedId.value = ''; liveMsg.value = '' }, 2500)
+}
+
 function onKey(e) { if (e.key === 'Escape') emit('close') }
 onMounted(() => window.addEventListener('keydown', onKey))
-onUnmounted(() => window.removeEventListener('keydown', onKey))
+onUnmounted(() => { window.removeEventListener('keydown', onKey); clearTimeout(feedbackTimer) })
 </script>
 
 <style scoped>
 .fire-popup {
+  position: relative;
   width: 260px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -167,5 +246,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   border: 1px solid var(--border); background: var(--bg-card);
   color: var(--text-muted); font-size: 11px; font-weight: 600;
 }
+.fp-coords { border-top: 1px solid var(--border); }
+.fp-copy { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+.fp-value { overflow-wrap: anywhere; user-select: all; }
+.fp-copy-btn {
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 3px 10px; min-height: 28px; font-size: 12px; font-weight: 600;
+  white-space: nowrap;
+}
+.fp-copy-btn:hover { background: var(--bg-card); opacity: 1; }
+.fp-copy-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fp-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .fp-notes dd { white-space: pre-wrap; max-height: 96px; overflow-y: auto; }
 </style>

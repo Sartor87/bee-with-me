@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
 import FirePopup from './FirePopup.vue'
 import { i18n } from '../i18n/index.js'
 
@@ -42,5 +42,61 @@ describe('FirePopup unknown values', () => {
   it('known states still render their label [B32]', () => {
     const text = mountPopup('hotspot', { id: 'x', source: 'viirs', acquired_at: '2026-10-01T00:00:00Z', state: 'dismissed' }).text()
     expect(text).toContain('Dismissed')
+  })
+})
+
+describe('FirePopup coordinates', () => {
+  const mountAt = (kind, lonLat) =>
+    mount(FirePopup, { props: { kind, properties: { id: 'x', source: 'viirs', acquired_at: '2026-10-01T00:00:00Z' }, lonLat }, global: { plugins: [i18n] }, attachTo: document.body })
+
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); delete navigator.clipboard })
+
+  it('hotspot shows lat, lon with 5 decimals and an MGRS row [COORDS]', () => {
+    const w = mountAt('hotspot', [23.3219, 42.69751])
+    expect(w.text()).toContain('Coordinates')
+    expect(w.get('[data-testid="fp-latlon"]').text()).toBe('42.69751, 23.32190')
+    expect(w.get('[data-testid="fp-mgrs"]').text()).toMatch(/^34T[A-Z]{2}\d{10}$/)
+  })
+
+  it('burnt area labels the coordinates as the clicked point [COORDS]', () => {
+    const w = mountAt('burnt_area', [25.5, 42.25])
+    expect(w.text()).toContain('Clicked point')
+    expect(w.get('[data-testid="fp-latlon"]').text()).toBe('42.25000, 25.50000')
+  })
+
+  it('no coordinates row without lonLat [COORDS]', () => {
+    expect(mountAt('hotspot', null).find('[data-testid="fp-latlon"]').exists()).toBe(false)
+  })
+
+  it('copy writes the exact text and announces Copied [COORDS]', async () => {
+    const writeText = vi.fn().mockResolvedValue()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const w = mountAt('hotspot', [23.3219, 42.69751])
+    await w.get('[data-testid="fp-copy-latlon"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('42.69751, 23.32190')
+    expect(w.get('[data-testid="fp-copy-status"]').attributes('aria-live')).toBe('polite')
+    expect(w.get('[data-testid="fp-copy-status"]').text()).toBe('Copied')
+  })
+
+  it('a rejected clipboard write falls back, and failure shows Copy failed [COORDS]', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) }, configurable: true })
+    document.execCommand = vi.fn().mockReturnValue(false)
+    const w = mountAt('hotspot', [23.3219, 42.69751])
+    await w.get('[data-testid="fp-copy-latlon"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-testid="fp-copy-status"]').text()).toBe('Copy failed')
+  })
+
+  it('without navigator.clipboard it uses a hidden textarea and execCommand [COORDS]', async () => {
+    let copied = null
+    document.execCommand = vi.fn(() => { copied = document.activeElement?.value ?? document.querySelector('textarea')?.value; return true })
+    const w = mountAt('hotspot', [23.3219, 42.69751])
+    await w.get('[data-testid="fp-copy-latlon"]').trigger('click')
+    await flushPromises()
+    expect(document.execCommand).toHaveBeenCalledWith('copy')
+    expect(copied).toBe('42.69751, 23.32190')
+    expect(document.querySelector('textarea')).toBeNull()
+    expect(w.get('[data-testid="fp-copy-status"]').text()).toBe('Copied')
   })
 })

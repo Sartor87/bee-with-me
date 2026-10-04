@@ -96,6 +96,7 @@
         v-if="firePopup"
         :kind="firePopup.kind"
         :properties="firePopup.properties"
+        :lon-lat="firePopupLonLat"
         :is-admin="authStore.user?.role === 'admin'"
         @close="closeFirePopup"
       />
@@ -402,6 +403,12 @@ function toggleFire(name) {
   if (!on && firePopup.value && (name === 'hotspots') === (firePopup.value.kind === 'hotspot')) closeFirePopup()
   fireStore.setLayer(name, on).catch(() => { /* fetchFailed drives the pill */ })
 }
+
+// The overlay coordinate is in the map projection (EPSG:3857); the popup wants WGS84.
+const firePopupLonLat = computed(() => {
+  const c = firePopup.value?.coordinate
+  return Array.isArray(c) ? toLonLat(c) : null
+})
 
 function closeFirePopup() {
   firePopup.value = null

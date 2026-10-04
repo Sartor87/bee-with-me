@@ -313,6 +313,12 @@ export default {
       ended:        'Край',
       fireId:       'ID на пожара',
       burnedDaysAgo: 'изгоряла преди {n} дн',
+      coordinates:  'Координати',
+      clickedPoint: 'Избрана точка',
+      mgrs:         'MGRS',
+      copy:         'Копирай',
+      copied:       'Копирано',
+      copyFailed:   'Копирането не успя',
     },
   },
   fireAlarm: {

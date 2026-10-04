@@ -314,6 +314,12 @@ export default {
       ended:        'Ended',
       fireId:       'Fire ID',
       burnedDaysAgo: 'burned {n} d ago',
+      coordinates:  'Coordinates',
+      clickedPoint: 'Clicked point',
+      mgrs:         'MGRS',
+      copy:         'Copy',
+      copied:       'Copied',
+      copyFailed:   'Copy failed',
     },
   },
   fireAlarm: {
