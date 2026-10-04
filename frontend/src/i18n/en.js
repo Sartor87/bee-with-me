@@ -6,7 +6,6 @@ export default {
     groups:  'Teams',
     devices: 'Devices',
     export:  'Export',
-    logout:  'Logout',
     about:   'About',
     settings:'Settings',
   },
@@ -204,6 +203,10 @@ export default {
     alertTitle: 'SOS Activated',
   },
   settings: {
+    account:          'Account',
+    signedInAs:       'Signed in as {name}',
+    logout:           'Log out',
+    logoutHint:       'You will need to sign in again to use the map.',
     title:            'Settings',
     fireAlarm:        'Fire alarm',
     hqAlarm:          'Alarm near HQ',

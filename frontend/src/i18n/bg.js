@@ -6,7 +6,6 @@ export default {
     groups:  'Екипи',
     devices: 'Устройства',
     export:  'Експорт',
-    logout:  'Изход',
     about:   'За нас',
     settings:'Настройки',
   },
@@ -203,6 +202,10 @@ export default {
     alertTitle: 'SOS Активиран',
   },
   settings: {
+    account:          'Профил',
+    signedInAs:       'Влезли сте като {name}',
+    logout:           'Изход',
+    logoutHint:       'За да ползвате картата, ще трябва да влезете отново.',
     title:            'Настройки',
     fireAlarm:        'Пожарна аларма',
     hqAlarm:          'Аларма край щаба',

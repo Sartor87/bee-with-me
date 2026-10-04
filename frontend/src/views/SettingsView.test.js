@@ -128,3 +128,39 @@ describe('SettingsView against a changing server', () => {
     expect(w.text()).toContain('Could not confirm the save. Reload to check.')
   })
 })
+
+describe('logout in Settings', () => {
+  it('Settings has a Log out button that signs out and returns to the login page [LOGOUT]', async () => {
+    const { createRouter, createMemoryHistory } = await import('vue-router')
+    const { useAuthStore } = await import('../stores/auth')
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    localStorage.setItem('token', 't'); localStorage.setItem('refresh_token', 'r')
+    const auth = useAuthStore()
+    auth.token = 't'; auth.user = { role: 'admin', full_name: 'Test Admin' }
+    getSettings.mockResolvedValue({ ...BASE })
+    const page = { template: '<i />' }
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: '/settings', component: page }, { path: '/login', component: page }] })
+    router.push('/settings'); await router.isReady()
+    const w = mount(SettingsView, { global: { plugins: [pinia, i18n, router] } })
+    await flushPromises()
+    const btn = w.find('[data-test=logout]')
+    expect(btn.text()).toBe(en.settings.logout)
+    expect(btn.classes()).not.toContain('danger')   // not destructive: no red
+    expect(w.text()).toContain('Test Admin')
+    await btn.trigger('click')
+    await flushPromises()
+    expect(auth.token).toBe('')
+    expect(localStorage.getItem('token')).toBeNull()
+    expect(router.currentRoute.value.path).toBe('/login')
+  })
+
+  it('the Log out button is there even when the settings failed to load [LOGOUT]', async () => {
+    getSettings.mockRejectedValue(new Error('down'))
+    const w = mountView()
+    await flushPromises()
+    expect(w.find('.msg-warn').exists()).toBe(true)
+    expect(w.find('[data-test=logout]').exists()).toBe(true)
+  })
+})

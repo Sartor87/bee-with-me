@@ -124,18 +124,32 @@
         <span v-if="saveState === 'clean'" class="msg-note" role="status">{{ t('settings.nothingToSave') }}</span>
       </div>
     </form>
+
+    <!-- Outside the load/save states above: signing out must work even when settings failed to load. -->
+    <section class="card account" aria-labelledby="account-title">
+      <h3 id="account-title" class="section-title">{{ t('settings.account') }}</h3>
+      <p v-if="auth.user?.full_name" class="who">{{ t('settings.signedInAs', { name: auth.user.full_name }) }}</p>
+      <div class="row">
+        <button type="button" class="secondary" data-test="logout" @click="onLogout">{{ t('settings.logout') }}</button>
+        <span class="hint-inline">{{ t('settings.logoutHint') }}</span>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
+import { routerKey } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
+import { useAuthStore } from '../stores/auth'
 import { detailOf } from '../api/client'
 import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
 
 const { t } = useI18n()
 const store = useSettingsStore()
+const auth = useAuthStore()
+const router = inject(routerKey, null)
 
 const draft = ref({})
 const loadFailed = ref(false)
@@ -279,6 +293,12 @@ async function onClearHQ() {
   }
 }
 
+// Same logic the sidebar button had: the auth store clears the session, then back to the login page.
+function onLogout() {
+  auth.logout()
+  router?.push('/login')
+}
+
 // Any edit hides a stale result; the confirm step goes away if the edit undoes the switch-off.
 watch(draft, () => {
   saveState.value = ''
@@ -289,6 +309,9 @@ watch(draft, () => {
 <style scoped>
 .page { padding: 24px; flex: 1; max-width: 720px; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
+.account { margin-top: 16px; }
+.who { font-size: 14px; margin-bottom: 4px; }
+.hint-inline { font-size: 13px; color: var(--text-muted); }
 .section-title { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-muted); }
 .section-title.sub { margin-top: 8px; }
 .muted { font-size: 13px; color: var(--text-muted); margin-bottom: 12px; }

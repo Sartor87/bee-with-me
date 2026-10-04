@@ -20,7 +20,6 @@
             @click="switchLocale(loc.code)"
           >{{ loc.label }}</button>
         </div>
-        <button class="secondary" @click="handleLogout">{{ t('nav.logout') }}</button>
       </div>
     </nav>
 
@@ -37,7 +36,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { RouterLink, RouterView, useRouter } from 'vue-router'
+import { RouterLink, RouterView } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import { LOCALES, setLocale } from '../i18n'
@@ -47,7 +46,6 @@ import logoUrl from '../assets/asp-logo-1.png'
 
 const { t, locale } = useI18n()
 const auth   = useAuthStore()
-const router = useRouter()
 
 const currentLocale = computed(() => locale.value)
 // Cosmetic only: the router guard is what keeps non-admins off admin routes.
@@ -55,11 +53,6 @@ const visibleNav = computed(() =>
   NAV_ITEMS.filter(item => !item.adminOnly || auth.user?.role === 'admin'))
 
 function switchLocale(code) { setLocale(code) }
-
-async function handleLogout() {
-  auth.logout()
-  router.push('/login')
-}
 </script>
 
 <style scoped>

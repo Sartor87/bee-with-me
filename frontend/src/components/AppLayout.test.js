@@ -9,7 +9,7 @@ import AppLayout from './AppLayout.vue'
 import { useAuthStore } from '../stores/auth'
 import { i18n } from '../i18n/index.js'
 
-async function navFor(role) {
+async function mountFor(role) {
   const pinia = createPinia()
   setActivePinia(pinia)
   useAuthStore().user = { role, full_name: 'Test' }
@@ -22,7 +22,10 @@ async function navFor(role) {
   const w = mount(AppLayout, {
     global: { plugins: [pinia, i18n, router], stubs: { SOSBanner: true, RouterView: true } },
   })
-  return w.findAll('a.nav-item').map(a => a.attributes('href'))
+  return w
+}
+async function navFor(role) {
+  return (await mountFor(role)).findAll('a.nav-item').map(a => a.attributes('href'))
 }
 
 describe('AppLayout navigation', () => {
@@ -33,5 +36,15 @@ describe('AppLayout navigation', () => {
 
   it('shows them to admins [B38]', async () => {
     expect(await navFor('admin')).toContain('/settings')
+  })
+})
+
+describe('logout location', () => {
+  it('the layout has no logout control next to the language switch [LOGOUT]', async () => {
+    const w = await mountFor('admin')
+    const footer = w.find('.sidebar-footer')
+    expect(footer.find('.lang-row').exists()).toBe(true)
+    expect(footer.findAll('button').every(b => b.classes().includes('lang-btn'))).toBe(true)
+    expect(w.text()).not.toMatch(/log ?out|изход/i)
   })
 })
