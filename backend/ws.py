@@ -21,7 +21,10 @@ RECONNECT_DELAY      = 5    # seconds between reconnect attempts on the LISTEN c
 HEALTHCHECK_INTERVAL = 30   # seconds between liveness pings — catches a connection that
                              # died silently (e.g. Postgres/Docker paused by system sleep)
 
-FORWARDED_CHANNELS = ('location_update', 'sos_alert', 'fire_data_updated')
+FORWARDED_CHANNELS = (
+    'location_update', 'sos_alert',
+    'fire_data_updated', 'fire_alert', 'fire_alert_repeat', 'fire_alert_updated',
+)
 
 
 class WSManager:

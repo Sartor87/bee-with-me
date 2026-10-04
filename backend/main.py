@@ -17,6 +17,7 @@ from .routers import settings as settings_router
 from .ws import manager
 from .fire import poller as fire_poller
 from .fire.repository import prune_fire_data
+from .fire.service import service as fire_alarm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,6 +140,11 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_old_locations())
     fire_task = asyncio.create_task(fire_poller.run())
     fire_task.add_done_callback(lambda t: _log_task_failure(t, 'Fire poller'))
+    # Hooks only signal re-evaluation; the single alarm actor does the work and never raises into a router/poller.
+    fire_poller.after_refresh = fire_alarm.request_evaluation
+    settings_router.after_change = fire_alarm.request_evaluation
+    alarm_task = asyncio.create_task(fire_alarm.run())
+    alarm_task.add_done_callback(lambda t: _log_task_failure(t, 'Fire alarm'))
 
     # Serial (LoRaWAN) reader — runs only when a real port is available
     serial_task = None
@@ -165,6 +171,7 @@ async def lifespan(app: FastAPI):
     notify_task.cancel()
     cleanup_task.cancel()
     fire_task.cancel()
+    alarm_task.cancel()
     if serial_task:
         serial_task.cancel()
     if hid_task:

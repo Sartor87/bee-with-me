@@ -202,3 +202,13 @@ async def migrated_conn(scratch_conn):
     from backend.db.migrate import load_migrations, migrate
     await migrate(scratch_conn, load_migrations())
     return scratch_conn
+
+
+@pytest_asyncio.fixture()
+async def scratch_pool(migrated_conn, scratch_db):
+    """asyncpg pool on the migrated scratch database."""
+    pool = await asyncpg.create_pool(**scratch_db, min_size=1, max_size=4)
+    try:
+        yield pool
+    finally:
+        await pool.close()

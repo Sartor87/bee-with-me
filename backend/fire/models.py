@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel
 
 
 def iso(value) -> str | None:
@@ -57,3 +60,53 @@ def burnt_area_feature(row) -> dict:
             'area_ha': row.get('area_ha'),
         },
     }
+
+
+ALERT_OUT_SELECT = """
+    SELECT a.id, a.target_type::text AS target_type, a.device_id, a.user_id, u.full_name, u.rank,
+           a.distance_m, a.triggered_at, a.acknowledged_at, a.resolved_at,
+           a.resolve_reason::text AS resolve_reason,
+           h.id AS hotspot_id, h.latitude, h.longitude, h.acquired_at, h.source::text AS source
+    FROM fire_alerts a
+    JOIN fire_hotspots h ON h.id = a.hotspot_id
+    LEFT JOIN users u ON u.id = a.user_id
+"""
+
+
+class FireAlertHotspotOut(BaseModel):
+    id: UUID
+    latitude: float
+    longitude: float
+    acquired_at: datetime
+    source: str
+
+
+class FireAlertOut(BaseModel):
+    """One shape for REST (GET /api/fire/alerts) and WebSocket (fire_alert, fire_alert_updated).
+
+    Carries the rescuer's name and rank (the operator needs them) but never a phone, a photo path or the HQ position.
+    """
+    id: UUID
+    target_type: str
+    device_id: UUID | None
+    user_id: UUID | None
+    full_name: str | None
+    rank: str | None
+    hotspot: FireAlertHotspotOut
+    distance_m: int
+    triggered_at: datetime
+    acknowledged_at: datetime | None
+    resolved_at: datetime | None
+    resolve_reason: str | None
+
+    @classmethod
+    def from_row(cls, row) -> 'FireAlertOut':
+        r = dict(row)
+        return cls(
+            id=r['id'], target_type=r['target_type'], device_id=r['device_id'], user_id=r['user_id'],
+            full_name=r['full_name'], rank=r['rank'], distance_m=r['distance_m'],
+            triggered_at=r['triggered_at'], acknowledged_at=r['acknowledged_at'],
+            resolved_at=r['resolved_at'], resolve_reason=r['resolve_reason'],
+            hotspot=FireAlertHotspotOut(id=r['hotspot_id'], latitude=r['latitude'], longitude=r['longitude'],
+                                        acquired_at=r['acquired_at'], source=r['source']),
+        )
