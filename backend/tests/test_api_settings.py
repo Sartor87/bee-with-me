@@ -13,10 +13,12 @@ pytestmark = pytest.mark.Trait("Task", "T12")
 
 ROW = {'id': 1, 'hq_latitude': None, 'hq_longitude': None, 'is_hq_alarm_enabled': True,
        'is_rescuer_alarm_enabled': True, 'hq_radius_m': 10000, 'rescuer_radius_m': 3000,
-       'alarm_max_age_hours': 24, 'repeat_minutes': 5, 'updated_by': None,
+       'alarm_max_age_hours': 24, 'repeat_minutes': 5, 'is_rescuer_photo_on_map_enabled': True,
+       'updated_by': None,
        'updated_at': datetime(2026, 10, 2, tzinfo=timezone.utc)}
 BODY = {k: ROW[k] for k in ('hq_latitude', 'hq_longitude', 'is_hq_alarm_enabled', 'is_rescuer_alarm_enabled',
-                            'hq_radius_m', 'rescuer_radius_m', 'alarm_max_age_hours', 'repeat_minutes')}
+                            'hq_radius_m', 'rescuer_radius_m', 'alarm_max_age_hours', 'repeat_minutes',
+                            'is_rescuer_photo_on_map_enabled')}
 # B37: PUT /api/settings now requires the updated_at the client last saw.
 BODY = {**BODY, 'expected_updated_at': ROW['updated_at'].isoformat()}
 
@@ -80,12 +82,12 @@ def _hook(monkeypatch):
 @B37
 def test_put_stale_expected_updated_at_is_409_and_writes_nothing(client, mock_conn, monkeypatch):
     calls = _hook(monkeypatch)
-    mock_conn.fetchrow = AsyncMock(return_value=None)   # WHERE ... updated_at = $10 matched nothing
+    mock_conn.fetchrow = AsyncMock(return_value=None)   # WHERE ... updated_at = $11 matched nothing
     mock_conn.fetchval = AsyncMock(return_value=1)      # but the row exists
     resp = client.put('/api/settings', json=BODY)
     assert resp.status_code == 409 and resp.json() == {'detail': 'settings_stale'}
     sql = mock_conn.fetchrow.call_args.args[0]
-    assert 'updated_at = $10' in sql
+    assert 'updated_at = $11' in sql
     assert mock_conn.fetchrow.call_args.args[-1] == ROW['updated_at']
     assert calls == []
 
@@ -227,3 +229,37 @@ async def test_put_with_the_returned_updated_at_succeeds_once_then_is_stale(
             assert await migrated_conn.fetchval('SELECT hq_radius_m FROM settings WHERE id = 1') == 5000
     finally:
         test_app.dependency_overrides.clear()
+
+
+F1 = pytest.mark.Trait("Task", "F1")
+
+
+@F1
+def test_get_returns_rescuer_photo_flag(client, mock_conn):
+    mock_conn.fetchrow = AsyncMock(return_value={**ROW, 'is_rescuer_photo_on_map_enabled': False})
+    assert client.get('/api/settings').json()['is_rescuer_photo_on_map_enabled'] is False
+
+
+@F1
+def test_put_requires_rescuer_photo_flag(client, mock_conn):
+    body = {k: v for k, v in BODY.items() if k != 'is_rescuer_photo_on_map_enabled'}
+    assert client.put('/api/settings', json=body).status_code == 422
+    mock_conn.fetchrow.assert_not_called()
+
+
+@F1
+@pytest.mark.parametrize('value', ['true', 1, 0, None])
+def test_put_rejects_non_boolean_rescuer_photo_flag(client, mock_conn, value):
+    resp = client.put('/api/settings', json={**BODY, 'is_rescuer_photo_on_map_enabled': value})
+    assert resp.status_code == 422
+    mock_conn.fetchrow.assert_not_called()
+
+
+@F1
+def test_put_saves_rescuer_photo_flag(client, mock_conn):
+    mock_conn.fetchrow = AsyncMock(return_value={**ROW, 'is_rescuer_photo_on_map_enabled': False})
+    resp = client.put('/api/settings', json={**BODY, 'is_rescuer_photo_on_map_enabled': False})
+    assert resp.status_code == 200 and resp.json()['is_rescuer_photo_on_map_enabled'] is False
+    sql, *args = mock_conn.fetchrow.call_args.args
+    assert 'is_rescuer_photo_on_map_enabled = $9' in sql and 'updated_at = $11' in sql
+    assert args[8] is False

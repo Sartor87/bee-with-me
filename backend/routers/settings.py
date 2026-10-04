@@ -49,6 +49,7 @@ class SettingsIn(BaseModel):
     rescuer_radius_m: Annotated[StrictInt, Field(ge=100, le=100_000)]
     alarm_max_age_hours: Annotated[StrictInt, Field(ge=1, le=168)]
     repeat_minutes: Annotated[StrictInt, Field(ge=1, le=60)]
+    is_rescuer_photo_on_map_enabled: StrictBool
 
     @model_validator(mode='after')
     def _hq_both_or_neither(self):
@@ -97,20 +98,21 @@ async def put_settings(body: SettingsUpdate, conn: Conn,
     row = await conn.fetchrow(
         """UPDATE settings SET hq_latitude = $1, hq_longitude = $2, is_hq_alarm_enabled = $3,
                is_rescuer_alarm_enabled = $4, hq_radius_m = $5, rescuer_radius_m = $6,
-               alarm_max_age_hours = $7, repeat_minutes = $8, updated_by = $9
-           WHERE id = 1 AND updated_at = $10 RETURNING *""",
+               alarm_max_age_hours = $7, repeat_minutes = $8,
+               is_rescuer_photo_on_map_enabled = $9, updated_by = $10
+           WHERE id = 1 AND updated_at = $11 RETURNING *""",
         body.hq_latitude, body.hq_longitude, body.is_hq_alarm_enabled, body.is_rescuer_alarm_enabled,
-        body.hq_radius_m, body.rescuer_radius_m, body.alarm_max_age_hours, body.repeat_minutes, user['id'],
-        body.expected_updated_at,
+        body.hq_radius_m, body.rescuer_radius_m, body.alarm_max_age_hours, body.repeat_minutes,
+        body.is_rescuer_photo_on_map_enabled, user['id'], body.expected_updated_at,
     )
     if row is None:
         if not await _row_exists(conn):
             raise _missing()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='settings_stale')
     out = _out(row)
-    logger.info('settings updated by user %s (hq_alarm=%s, rescuer_alarm=%s, hq_radius_m=%s, rescuer_radius_m=%s)',
+    logger.info('settings updated by user %s (hq_alarm=%s, rescuer_alarm=%s, hq_radius_m=%s, rescuer_radius_m=%s, rescuer_photo_on_map=%s)',
                 user['id'], body.is_hq_alarm_enabled, body.is_rescuer_alarm_enabled,
-                body.hq_radius_m, body.rescuer_radius_m)
+                body.hq_radius_m, body.rescuer_radius_m, body.is_rescuer_photo_on_map_enabled)
     _changed()
     return out
 
