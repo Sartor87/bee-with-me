@@ -10,7 +10,7 @@ from ..auth import get_current_user, require_role
 from ..database import get_conn
 from ..fire import poller, repository
 from ..fire.models import FireAlertOut, burnt_area_feature, hotspot_feature, iso, zone_out
-from ..fire.parse import _storable
+from ..fire.parse import is_storable
 from ..fire.poller import notify_data_changed
 from ..fire.service import notify
 from ..fire.service import service as fire_alarm
@@ -124,27 +124,30 @@ NOTES_MAX = 1000
 
 def _text_ok(value: str | None, max_len: int) -> str | None:
     """Free text typed by an operator must be storable (no NUL, no lone surrogate): refuse it, never alter it."""
-    if value is not None and not _storable(value, max_len):
+    if value is not None and not is_storable(value, max_len):
         raise ValueError('text contains characters that cannot be stored')
     return value
 
 
-class _Texts(BaseModel):
-    @field_validator('notes', 'label', check_fields=False, mode='after')
-    @classmethod
-    def _storable_text(cls, value, info):
-        return _text_ok(value, 255 if info.field_name == 'label' else NOTES_MAX)
+def _notes_validator():
+    return field_validator('notes', mode='after')(classmethod(lambda cls, value: _text_ok(value, NOTES_MAX)))
 
 
-class DismissIn(_Texts):
+def _label_validator():
+    return field_validator('label', mode='after')(classmethod(lambda cls, value: _text_ok(value, 255)))
+
+
+class DismissIn(BaseModel):
     notes: str | None = Field(default=None, max_length=NOTES_MAX)
+    _notes_ok = _notes_validator()
 
 
-class FieldReportIn(_Texts):
+class FieldReportIn(BaseModel):
     device_id: UUID | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
     notes: str | None = Field(default=None, max_length=NOTES_MAX)
+    _notes_ok = _notes_validator()
 
     @model_validator(mode='after')
     def _exactly_one_location(self):
@@ -157,12 +160,14 @@ class FieldReportIn(_Texts):
         return self
 
 
-class ZoneIn(_Texts):
+class ZoneIn(BaseModel):
     label: str = Field(min_length=1, max_length=255)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     radius_m: int = Field(default=1000, ge=50, le=20_000)
     notes: str | None = Field(default=None, max_length=NOTES_MAX)
+    _label_ok = _label_validator()
+    _notes_ok = _notes_validator()
 
 
 class ZoneUpdate(ZoneIn):

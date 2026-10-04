@@ -3,7 +3,10 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -189,6 +192,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title='Bee With Me API', version=APP_VERSION, lifespan=lifespan)
+
+def _json_safe(value):
+    """Make every string UTF-8 encodable: a lone surrogate becomes escaped text instead of crashing the response."""
+    if isinstance(value, str):
+        return value.encode('utf-8', 'backslashreplace').decode('utf-8')
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {_json_safe(k): _json_safe(v) for k, v in value.items()}
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """FastAPI's default 422, but safe for input that cannot be encoded (BP-03). Never logs the body (DP-02)."""
+    return JSONResponse(status_code=422, content={'detail': _json_safe(jsonable_encoder(exc.errors()))})
+
 
 app.add_middleware(
     CORSMiddleware,

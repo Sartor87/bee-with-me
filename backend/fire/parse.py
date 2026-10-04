@@ -114,7 +114,7 @@ def _features(collection) -> list:
     return collection['features']
 
 
-def _storable(text: str, max_len: int = MAX_TEXT_LEN) -> bool:
+def is_storable(text: str, max_len: int = MAX_TEXT_LEN) -> bool:
     """True when Postgres TEXT and asyncpg accept the string: no NUL, valid UTF-8 (no lone surrogate), bounded."""
     if len(text) > max_len or '\x00' in text:
         return False
@@ -132,7 +132,7 @@ def _id(value) -> str | None:
     if isinstance(value, float) and not math.isfinite(value):   # sources.py turns absurd integers into NaN
         return None
     text = value if isinstance(value, str) else str(value)
-    return text if _storable(text) else None
+    return text if is_storable(text) else None
 
 
 def _class(value) -> str | None:
@@ -140,7 +140,7 @@ def _class(value) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.replace('\x00', '')
-    return text if text and _storable(text) else None
+    return text if text and is_storable(text) else None
 
 
 def _area_ha(value) -> float | None:
