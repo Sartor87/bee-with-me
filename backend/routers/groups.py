@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user, require_role
 from ..database import get_conn
+from ..json_columns import decode_json_columns
 
 router = APIRouter(prefix='/api/groups', tags=['groups'])
 
@@ -67,7 +68,8 @@ async def list_groups(
             ORDER BY g.name
             LIMIT $1 OFFSET $2
         """, limit, offset)
-    return {'items': [dict(r) for r in rows], 'total': total, 'limit': limit, 'offset': offset}
+    items = [decode_json_columns(r, 'members') if include_members else dict(r) for r in rows]
+    return {'items': items, 'total': total, 'limit': limit, 'offset': offset}
 
 
 @router.post('/', status_code=status.HTTP_201_CREATED)

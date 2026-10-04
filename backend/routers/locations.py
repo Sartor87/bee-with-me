@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ..config import settings
 from ..database import get_conn
+from ..json_columns import decode_json_columns
 
 router = APIRouter(prefix='/api/locations', tags=['locations'])
 
@@ -50,7 +51,7 @@ async def live_positions(
         GROUP BY le.id, le.device_id, le.user_id, u.full_name, u.rank, u.photo_url, u.phone, d.dev_sn, d.name, sa.id
         ORDER BY le.device_id, le.received_at DESC
     """, settings.live_position_max_age_hours)
-    return [dict(r) for r in rows]
+    return [decode_json_columns(r, 'groups') for r in rows]
 
 
 @router.get('/sos')

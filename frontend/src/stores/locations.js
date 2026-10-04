@@ -1,12 +1,17 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { getLivePositions, getOpenSOS, resolveSOS as apiResolve, getTrail } from '../api'
+import { normaliseGroups } from '../lib/groups'
 import { contactAt, freshnessOf, LOST, STALE } from '../lib/freshness'
 
 const TRAIL_MINUTES = 30
 const TRAIL_MS = TRAIL_MINUTES * 60 * 1000
 
 const SNAPSHOT_KEY = 'bwm.positions.snapshot'
+
+function normalisePositions(map) {
+  return Object.fromEntries(Object.entries(map).map(([id, p]) => [id, normaliseGroups(p)]))
+}
 
 /** Last known picture, kept so a reload paints immediately instead of showing an empty
  *  map while the first request is in flight. Restored positions keep their original
@@ -17,7 +22,7 @@ function loadSnapshot() {
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!parsed?.positions || typeof parsed.positions !== 'object') return null
-    return parsed
+    return { ...parsed, positions: normalisePositions(parsed.positions) }
   } catch { return null }
 }
 
@@ -74,7 +79,7 @@ export const useLocationsStore = defineStore('locations', () => {
 
   async function fetchLive() {
     const rows = await getLivePositions()
-    positions.value = Object.fromEntries(rows.map(r => [r.device_id, r]))
+    positions.value = Object.fromEntries(rows.map(r => [r.device_id, normaliseGroups(r)]))
     markSynced()
     saveSnapshot(positions.value)
   }
@@ -126,7 +131,7 @@ export const useLocationsStore = defineStore('locations', () => {
       })
     }
 
-    positions.value[data.device_id] = { ...existing, ...data, sos_active: effectiveSOS }
+    positions.value[data.device_id] = normaliseGroups({ ...existing, ...data, sos_active: effectiveSOS })
     markSynced()
     saveSnapshot(positions.value)
 

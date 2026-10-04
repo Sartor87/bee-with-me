@@ -146,4 +146,29 @@ describe('useLocationsStore', () => {
     await store.resolveSOS('sos-1')
     expect(store.hasSOS).toBe(false)
   })
+
+  it('fetchLive turns a JSON-string groups into an array [B50]', async () => {
+    getLivePositions.mockResolvedValue([
+      { device_id: 'dev-1', groups: '[{"id":"g","color":"#fff","is_leader":true}]' },
+      { device_id: 'dev-2', groups: 'garbage' },
+      { device_id: 'dev-3' },
+    ])
+    const store = useLocationsStore()
+    await store.fetchLive()
+    expect(store.positions['dev-1'].groups).toEqual([{ id: 'g', color: '#fff', is_leader: true }])
+    expect(store.positions['dev-2'].groups).toEqual([])
+    expect(store.positions['dev-3'].groups).toEqual([])
+  })
+
+  it('a snapshot saved with string groups loads as an array [B50]', async () => {
+    localStorage.setItem('bwm.positions.snapshot', JSON.stringify({
+      savedAt: new Date().toISOString(),
+      positions: { 'dev-1': { device_id: 'dev-1', groups: '[{"id":"g"}]' } },
+    }))
+    vi.resetModules()
+    const { useLocationsStore: fresh } = await import('./locations')
+    setActivePinia(createPinia())
+    expect(fresh().positions['dev-1'].groups).toEqual([{ id: 'g' }])
+    localStorage.removeItem('bwm.positions.snapshot')
+  })
 })

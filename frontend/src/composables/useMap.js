@@ -19,6 +19,7 @@ import Graticule from 'ol/layer/Graticule'
 import ScaleLine from 'ol/control/ScaleLine'
 import { forward as toMGRS } from 'mgrs'
 import { useSettings } from './useSettings'
+import { normaliseGroups } from '../lib/groups'
 import { freshnessOf, LIVE, LOST } from '../lib/freshness'
 import { hotspotStyleKey } from '../lib/fireStyle'
 import { hexToRgba } from '../lib/color'
@@ -419,7 +420,13 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     forceGraticuleRedraw()
   }
 
-  function upsertFeature(pos) {
+  // One malformed row must never blank every marker (B50): isolate each upsert.
+  function safeUpsert(pos) {
+    try { upsertFeature(pos) } catch { console.warn('Skipped a position that could not be drawn') }
+  }
+
+  function upsertFeature(rawPos) {
+    const pos         = normaliseGroups(rawPos)
     const id          = pos.device_id
     const leaderGroup = pos.groups?.find(g => g.is_leader)
     const color       = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
@@ -758,7 +765,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   })
 
   watch(positionList, (list) => {
-    list.forEach(upsertFeature)
+    list.forEach(safeUpsert)
     removeStaleFeatures(list.map(p => p.device_id))
   }, { deep: true })
 
@@ -887,7 +894,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   function onMapContextMenu(cb) { contextMenuCb = cb }
 
   function refreshMarkers(list) {
-    list.forEach(upsertFeature)
+    list.forEach(safeUpsert)
     removeStaleFeatures(list.map(p => p.device_id))
   }
 

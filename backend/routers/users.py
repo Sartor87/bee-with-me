@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user, hash_password, require_role
 from ..database import get_conn
+from ..json_columns import decode_json_columns
 from ..fire import repository as fire_repository
 from ..fire.service import notify_alerts_updated
 
@@ -80,7 +81,7 @@ async def list_users(
         ORDER BY u.full_name
         LIMIT $1 OFFSET $2
     """, limit, offset)
-    return {'items': [dict(r) for r in rows], 'total': total, 'limit': limit, 'offset': offset}
+    return {'items': [decode_json_columns(r, 'groups') for r in rows], 'total': total, 'limit': limit, 'offset': offset}
 
 
 @router.post('/', status_code=status.HTTP_201_CREATED)
@@ -128,7 +129,7 @@ async def get_user(
     """, user_id)
     if row is None:
         raise HTTPException(status_code=404, detail='User not found')
-    return dict(row)
+    return decode_json_columns(row, 'groups')
 
 
 @router.put('/{user_id}')
