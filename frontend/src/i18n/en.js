@@ -325,7 +325,9 @@ export default {
   fireAlarm: {
     region:         'Fire alarms',
     title:          'Fire near people',
-    titleQuiet:     'Fire near people, acknowledged',
+    ackedCount:     '{n} acknowledged fire alert | {n} acknowledged fire alerts',
+    ackedShow:      'Show',
+    ackedHide:      'Hide',
     hq:             'HQ',
     unknownRescuer: 'Unknown rescuer',
     detail:         '{distance} from the nearest detection, detected {age}',

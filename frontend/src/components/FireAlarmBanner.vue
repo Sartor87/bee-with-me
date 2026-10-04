@@ -7,23 +7,25 @@
     :role="hasUnack ? 'alert' : 'region'"
     :aria-label="t('fireAlarm.region')"
   >
-    <div class="fb-stripe" aria-hidden="true"></div>
+    <template v-if="hasUnack">
+      <div class="fb-stripe" aria-hidden="true"></div>
 
-    <header class="fb-head">
-      <svg class="fb-flame" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M12.6 2c.5 3.3 5.4 5.6 5.4 10.6A6 6 0 0 1 6 12.8c0-2.3 1.1-3.8 2.3-5 .2 1.5.9 2.5 1.9 3C9.7 8 10.4 4.4 12.6 2z" />
-      </svg>
-      <h2 class="fb-title">{{ hasUnack ? t('fireAlarm.title') : t('fireAlarm.titleQuiet') }}</h2>
-      <span class="fb-count" aria-hidden="true">{{ fire.alerts.length }}</span>
-      <span class="fb-spacer"></span>
-      <button v-if="soundNeedsClick" type="button" class="fb-btn fb-sound" @click="unlock">
-        {{ t('fireAlarm.soundBlocked') }}
-      </button>
-      <button
-        v-if="fire.unacknowledged.length > 1"
-        type="button" class="fb-btn fb-btn-main" :disabled="allBusy" @click="ackAll"
-      >{{ allBusy ? t('fireAlarm.busy') : t('fireAlarm.acknowledgeAll') }}</button>
-    </header>
+      <header class="fb-head">
+        <svg class="fb-flame" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12.6 2c.5 3.3 5.4 5.6 5.4 10.6A6 6 0 0 1 6 12.8c0-2.3 1.1-3.8 2.3-5 .2 1.5.9 2.5 1.9 3C9.7 8 10.4 4.4 12.6 2z" />
+        </svg>
+        <h2 class="fb-title">{{ t('fireAlarm.title') }}</h2>
+        <span class="fb-count" aria-hidden="true">{{ fire.unacknowledged.length }}</span>
+        <span class="fb-spacer"></span>
+        <button v-if="soundNeedsClick" type="button" class="fb-btn fb-sound" @click="unlock">
+          {{ t('fireAlarm.soundBlocked') }}
+        </button>
+        <button
+          v-if="fire.unacknowledged.length > 1"
+          type="button" class="fb-btn fb-btn-main" :disabled="allBusy" @click="ackAll"
+        >{{ allBusy ? t('fireAlarm.busy') : t('fireAlarm.acknowledgeAll') }}</button>
+      </header>
+    </template>
 
     <p v-if="soundUnsupportedNow" class="fb-note">{{ t('fireAlarm.soundUnsupported') }}</p>
     <p v-if="fire.alertsHidden > 0" class="fb-note fb-hidden" role="status">
@@ -31,8 +33,9 @@
     </p>
     <p v-if="ackError" class="fb-note fb-error" role="alert">{{ ackError }}</p>
 
-    <ul class="fb-list">
-      <li v-for="a in rows" :key="a.id" :class="['fb-row', { 'fb-row-acked': a.acknowledged_at }]">
+    <!-- Unacknowledged alerts are never collapsible (BP-02). -->
+    <ul v-if="unackRows.length" class="fb-list">
+      <li v-for="a in unackRows" :key="a.id" class="fb-row">
         <div class="fb-who">
           <span class="fb-name">{{ targetName(a) }}</span>
           <span v-if="a.target_type !== 'hq' && a.rank" class="fb-rank">{{ a.rank }}</span>
@@ -43,14 +46,46 @@
         </i18n-t>
         <div class="fb-actions">
           <button type="button" class="fb-btn" @click="showOnMap(a)">{{ t('fireAlarm.showOnMap') }}</button>
-          <span v-if="a.acknowledged_at" class="fb-acked">{{ t('fireAlarm.acknowledged') }}</span>
           <button
-            v-else
             type="button" class="fb-btn fb-btn-main" :disabled="busy.has(a.id)" @click="ack(a)"
           >{{ busy.has(a.id) ? t('fireAlarm.busy') : t('fireAlarm.acknowledge') }}</button>
         </div>
       </li>
     </ul>
+
+    <!-- Acknowledged but still open: quiet slate, one compact row when collapsed. -->
+    <div v-if="ackRows.length" class="fb-ackzone">
+      <button
+        type="button" class="fb-toggle"
+        :aria-expanded="ackCollapsed ? 'false' : 'true'" aria-controls="fb-ack-list"
+        @click="toggleAck"
+      >
+        <svg class="fb-flame fb-flame-sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12.6 2c.5 3.3 5.4 5.6 5.4 10.6A6 6 0 0 1 6 12.8c0-2.3 1.1-3.8 2.3-5 .2 1.5.9 2.5 1.9 3C9.7 8 10.4 4.4 12.6 2z" />
+        </svg>
+        <span class="fb-toggle-label">{{ t('fireAlarm.ackedCount', { n: ackRows.length }, ackRows.length) }}</span>
+        <span class="fb-toggle-act">
+          {{ ackCollapsed ? t('fireAlarm.ackedShow') : t('fireAlarm.ackedHide') }}
+          <span :class="['fb-chev', { 'fb-chev-open': !ackCollapsed }]" aria-hidden="true"></span>
+        </span>
+      </button>
+      <ul v-show="!ackCollapsed" id="fb-ack-list" class="fb-list fb-list-acked">
+        <li v-for="a in ackRows" :key="a.id" class="fb-row fb-row-acked">
+          <div class="fb-who">
+            <span class="fb-name">{{ targetName(a) }}</span>
+            <span v-if="a.target_type !== 'hq' && a.rank" class="fb-rank">{{ a.rank }}</span>
+          </div>
+          <i18n-t keypath="fireAlarm.detail" tag="p" class="fb-detail">
+            <template #distance><span class="fb-mono fb-distance">{{ distanceText(a.distance_m) }}</span></template>
+            <template #age><span class="fb-mono">{{ ageText(a.hotspot.acquired_at) }}</span></template>
+          </i18n-t>
+          <div class="fb-actions">
+            <button type="button" class="fb-btn" @click="showOnMap(a)">{{ t('fireAlarm.showOnMap') }}</button>
+            <span class="fb-acked">{{ t('fireAlarm.acknowledged') }}</span>
+          </div>
+        </li>
+      </ul>
+    </div>
   </section>
 </template>
 
@@ -70,10 +105,23 @@ const router = useRouter()
 
 const hasUnack = computed(() => fire.unacknowledged.length > 0)
 
-// Open and unacknowledged first, nearest to people first inside each group.
-const rows = computed(() =>
-  [...fire.alerts].sort((a, b) =>
-    (!!a.acknowledged_at - !!b.acknowledged_at) || (a.distance_m - b.distance_m)))
+// Nearest to people first inside each group. The two groups are rendered apart so the
+// unacknowledged one can never be folded away.
+const byDistance = (a, b) => a.distance_m - b.distance_m
+const unackRows = computed(() => fire.alerts.filter(a => !a.acknowledged_at).sort(byDistance))
+const ackRows = computed(() => fire.alerts.filter(a => a.acknowledged_at).sort(byDistance))
+
+// The operator's choice for the acknowledged group, per browser. Collapsed unless they opened it;
+// blocked or broken storage must not break the banner.
+const ACK_COLLAPSED_KEY = 'bwm.fireAlarm.ackCollapsed'
+function readCollapsed() {
+  try { return localStorage.getItem(ACK_COLLAPSED_KEY) !== '0' } catch { return true }
+}
+const ackCollapsed = ref(readCollapsed())
+function toggleAck() {
+  ackCollapsed.value = !ackCollapsed.value
+  try { localStorage.setItem(ACK_COLLAPSED_KEY, ackCollapsed.value ? '1' : '0') } catch { /* blocked: kept for this page only */ }
+}
 
 function targetName(a) {
   if (a.target_type === 'hq') return t('fireAlarm.hq')
@@ -239,6 +287,27 @@ onUnmounted(() => {
 .fb-error { color: var(--fire-alarm-text); background: rgba(0,0,0,.35); padding: 4px 10px; border-radius: 4px; width: fit-content; }
 
 .fb-list { list-style: none; padding: 4px 0 8px; }
+.fb-list-acked { padding-top: 0; }
+
+/* Acknowledged zone: always the quiet slate, also inside a live banner (Glow Is An Alarm). */
+.fb-ackzone { background: var(--bg-panel); color: var(--text-muted); }
+.fire-banner-live .fb-ackzone { border-top: 1px solid var(--border); }
+.fb-toggle {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 6px 20px;
+  background: transparent; color: var(--text-muted); border: 0; text-align: left;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.fb-toggle:hover { color: var(--text); }
+.fb-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.fb-flame-sm { width: 16px; height: 16px; }
+.fb-toggle-label { flex: 1; min-width: 0; }
+.fb-toggle-act { display: inline-flex; align-items: center; gap: 8px; color: var(--accent); }
+.fb-chev {
+  width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.fb-chev-open { transform: translateY(2px) rotate(-135deg); }
+.fb-ackzone .fb-btn, .fire-banner-live .fb-ackzone .fb-btn { color: var(--text); border-color: var(--border); }
 .fb-row {
   display: grid; grid-template-columns: minmax(120px, 220px) 1fr auto; align-items: center;
   gap: 4px 16px; padding: 8px 20px;
@@ -258,7 +327,7 @@ onUnmounted(() => {
 @media (max-width: 760px) {
   .fb-row { grid-template-columns: 1fr; }
   .fb-actions { justify-content: flex-start; }
-  .fb-head, .fb-row { padding-left: 14px; padding-right: 14px; }
+  .fb-head, .fb-row, .fb-toggle { padding-left: 14px; padding-right: 14px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .fire-banner-live { animation: none; box-shadow: 0 3px 14px color-mix(in srgb, var(--fire-alarm) 45%, transparent); }

@@ -44,6 +44,7 @@ async function mountBanner() {
 describe('FireAlarmBanner', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    localStorage.clear()
     i18n.global.locale.value = 'en'
     toneState.mockReturnValue('running')
     playFireTone.mockReturnValue('running')
@@ -82,6 +83,7 @@ describe('FireAlarmBanner', () => {
     await flushPromises()
     await w.find('.fb-btn-main').trigger('click')
     await flushPromises()
+    await w.find('.fb-toggle').trigger('click')       // acknowledged rows are collapsed by default
     expect(w.findAll('.fb-row')).toHaveLength(1)
     expect(w.find('.fb-row-acked').exists()).toBe(true)
     expect(w.find('.fire-banner-live').exists()).toBe(false)
@@ -169,5 +171,121 @@ describe('FireAlarmBanner', () => {
     await flushPromises()
     expect(playFireTone).not.toHaveBeenCalled()
     expect(w.find('.fb-hidden').exists()).toBe(false)
+  })
+})
+
+describe('FireAlarmBanner acknowledged section', () => {
+  const KEY = 'bwm.fireAlarm.ackCollapsed'
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    vi.restoreAllMocks()
+    i18n.global.locale.value = 'en'
+    toneState.mockReturnValue('running')
+    playFireTone.mockReturnValue('running')
+  })
+  const acked = (id, extra = {}) => alert(id, { acknowledged_at: new Date().toISOString(), ...extra })
+
+  it('unacknowledged alerts have no collapse control and always show in full [COLLAPSE]', async () => {
+    const { w, fire } = await mountBanner()
+    fire.applyFireAlert(alert('a1'))
+    fire.applyFireAlert(alert('a2'))
+    await flushPromises()
+    expect(w.find('.fb-toggle').exists()).toBe(false)
+    expect(w.findAll('.fb-row').every(r => r.isVisible())).toBe(true)
+    expect(w.text()).toContain(en.fireAlarm.acknowledgeAll)
+    expect(w.findAll('.fb-btn-main').length).toBeGreaterThan(2)
+    expect(w.find('.fire-banner-live').exists()).toBe(true)
+  })
+
+  it('acknowledged alerts are collapsed by default with the right count, plural in both languages [COLLAPSE]', async () => {
+    const { w, fire } = await mountBanner()
+    fire.alerts = [acked('a1'), acked('a2'), acked('a3')]
+    await flushPromises()
+    const toggle = w.find('.fb-toggle')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe('fb-ack-list')
+    expect(w.find('#fb-ack-list').exists()).toBe(true)
+    expect(w.find('#fb-ack-list').isVisible()).toBe(false)
+    expect(toggle.text()).toContain('3 acknowledged fire alerts')
+    expect(toggle.text()).toContain(en.fireAlarm.ackedShow)
+    expect(toggle.element.tagName).toBe('BUTTON')
+    // quiet: no live styling, no stripe, no alert role, no unack controls
+    expect(w.find('.fire-banner-live').exists()).toBe(false)
+    expect(w.find('.fb-stripe').exists()).toBe(false)
+    expect(w.find('.fire-banner').attributes('role')).toBe('region')
+    fire.alerts = [acked('a1')]
+    await flushPromises()
+    expect(w.find('.fb-toggle').text()).toContain('1 acknowledged fire alert')
+    expect(w.find('.fb-toggle').text()).not.toContain('alerts')
+    i18n.global.locale.value = 'bg'
+    fire.alerts = [acked('a1'), acked('a2')]
+    await flushPromises()
+    expect(w.find('.fb-toggle').text()).toContain('2 потвърдени пожарни аларми')
+    expect(bg.fireAlarm.ackedShow).toBeTruthy()
+    expect(bg.fireAlarm.ackedHide).toBeTruthy()
+  })
+
+  it('the toggle expands and collapses the list and the choice persists [COLLAPSE]', async () => {
+    const first = await mountBanner()
+    first.fire.alerts = [acked('a1'), acked('a2')]
+    await flushPromises()
+    await first.w.find('.fb-toggle').trigger('click')
+    expect(first.w.find('.fb-toggle').attributes('aria-expanded')).toBe('true')
+    expect(first.w.find('#fb-ack-list').isVisible()).toBe(true)
+    expect(first.w.findAll('.fb-row-acked')).toHaveLength(2)
+    expect(first.w.find('.fb-toggle').text()).toContain(en.fireAlarm.ackedHide)
+    expect(localStorage.getItem(KEY)).toBe('0')
+    first.w.unmount()
+
+    const second = await mountBanner()               // a new page load remembers it
+    second.fire.alerts = [acked('a1')]
+    await flushPromises()
+    expect(second.w.find('.fb-toggle').attributes('aria-expanded')).toBe('true')
+    await second.w.find('.fb-toggle').trigger('click')
+    expect(second.w.find('#fb-ack-list').isVisible()).toBe(false)
+    expect(localStorage.getItem(KEY)).toBe('1')
+  })
+
+  it('works when storage is blocked [COLLAPSE]', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked') })
+    const { w, fire } = await mountBanner()
+    fire.alerts = [acked('a1')]
+    await flushPromises()
+    expect(w.find('.fb-toggle').attributes('aria-expanded')).toBe('false')
+    await w.find('.fb-toggle').trigger('click')
+    expect(w.find('.fb-toggle').attributes('aria-expanded')).toBe('true')
+    expect(w.find('#fb-ack-list').isVisible()).toBe(true)
+  })
+
+  it('a new unacknowledged alert shows in full while acknowledged ones stay collapsed [COLLAPSE]', async () => {
+    const { w, fire } = await mountBanner()
+    fire.alerts = [acked('a1'), acked('a2')]
+    await flushPromises()
+    expect(w.find('.fire-banner-live').exists()).toBe(false)
+    fire.applyFireAlert(alert('n1', { full_name: 'Maria Georgieva' }))
+    await flushPromises()
+    expect(w.find('.fire-banner-live').exists()).toBe(true)
+    expect(w.find('.fire-banner').attributes('role')).toBe('alert')
+    const live = w.findAll('.fb-row').filter(r => !r.classes('fb-row-acked'))
+    expect(live).toHaveLength(1)
+    expect(live[0].isVisible()).toBe(true)
+    expect(live[0].text()).toContain('Maria Georgieva')
+    expect(live[0].text()).toContain(en.fireAlarm.acknowledge)
+    expect(w.find('.fb-toggle').attributes('aria-expanded')).toBe('false')
+    expect(w.find('#fb-ack-list').isVisible()).toBe(false)
+  })
+
+  it('the sound-blocked button shows only while something is unacknowledged [COLLAPSE]', async () => {
+    toneState.mockReturnValue('blocked')
+    playFireTone.mockReturnValueOnce('blocked')
+    const { w, fire } = await mountBanner()
+    fire.alerts = [acked('a1')]
+    await flushPromises()
+    expect(w.find('.fb-sound').exists()).toBe(false)
+    fire.applyFireAlert(alert('n1'))
+    await flushPromises()
+    expect(w.find('.fb-sound').exists()).toBe(true)
   })
 })

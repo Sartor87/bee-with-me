@@ -324,7 +324,9 @@ export default {
   fireAlarm: {
     region:         'Пожарни аларми',
     title:          'Пожар близо до хора',
-    titleQuiet:     'Пожар близо до хора, потвърдено',
+    ackedCount:     '{n} потвърдена пожарна аларма | {n} потвърдени пожарни аларми',
+    ackedShow:      'Покажи',
+    ackedHide:      'Скрий',
     hq:             'Щаб',
     unknownRescuer: 'Неизвестен спасител',
     detail:         '{distance} от най-близкото засичане, засечено {age}',
