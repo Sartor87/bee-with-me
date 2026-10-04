@@ -76,4 +76,28 @@ describe('useWebSocket fire refetch', () => {
     expect(fire.fetchOpenAlerts).toHaveBeenCalledTimes(loc.fetchLive.mock.calls.length)
     expect(fire.fetchOpenAlerts).toHaveBeenCalled()
   })
+  it('after disconnect() a late onclose schedules no reconnect and no resync [B58]', async () => {
+    const { connect, disconnect } = useWebSocket()
+    connect()
+    sockets[0].onopen()
+    disconnect()
+    vi.clearAllMocks()                        // drop the catch-up pull a reconnect onopen does
+    sockets[0].onclose?.()                    // the browser fires close after socket.close()
+    await vi.advanceTimersByTimeAsync(3_000 + 45_000 * 2)
+    expect(sockets).toHaveLength(1)
+    expect(loc.fetchLive).not.toHaveBeenCalled()
+  })
+
+  it('connect() after disconnect() works again and leaves one live socket [B58]', async () => {
+    const { connect, disconnect } = useWebSocket()
+    connect()
+    disconnect()
+    connect()
+    sockets[0].onclose?.()                    // stale close from the first socket
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(sockets).toHaveLength(2)
+    sockets[1].onclose()                      // unexpected drop still reconnects
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(sockets).toHaveLength(3)
+  })
 })

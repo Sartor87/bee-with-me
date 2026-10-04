@@ -13,6 +13,8 @@ let socket = null
 let reconnectTimer = null
 let resyncTimer = null
 let hasConnectedBefore = false
+// Set by an explicit disconnect() (logout, unmount); only the next connect() clears it.
+let stopped = false
 
 export function useWebSocket() {
   const store = useLocationsStore()
@@ -29,11 +31,23 @@ export function useWebSocket() {
     fireStore.fetchOpenAlerts().catch(() => { /* alertsFailed drives the banner notice */ })
   }
 
-  function connect() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    socket = new WebSocket(`${proto}://${location.host}/ws`)
+  function detach(sock) {
+    if (!sock) return
+    sock.onopen = sock.onmessage = sock.onclose = sock.onerror = null
+  }
 
-    socket.onopen = () => {
+  function connect() {
+    stopped = false
+    clearTimeout(reconnectTimer)
+    // A quick re-login must not leave the previous socket alive next to the new one.
+    const previous = socket
+    detach(previous)
+    previous?.close()
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const sock = new WebSocket(`${proto}://${location.host}/ws`)
+    socket = sock
+
+    sock.onopen = () => {
       store.setConnected(true)
       if (hasConnectedBefore) {
         // Reconnected after a drop (sleep/wake, network blip, backend restart) — any
@@ -48,7 +62,7 @@ export function useWebSocket() {
       hasConnectedBefore = true
     }
 
-    socket.onmessage = (event) => {
+    sock.onmessage = (event) => {
       const msg = JSON.parse(event.data)
       if (msg.type === 'location_update') store.applyLocationUpdate(msg)
       if (msg.type === 'sos_alert')       store.applySOSAlert(msg)
@@ -60,21 +74,24 @@ export function useWebSocket() {
       if (msg.type === 'fire_alert_updated') fireStore.applyFireAlertUpdated(msg)
     }
 
-    socket.onclose = () => {
+    sock.onclose = () => {
+      if (stopped || socket !== sock) return
       store.setConnected(false)
       reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS)
     }
 
-    socket.onerror = () => socket.close()
+    sock.onerror = () => sock.close()
 
     clearInterval(resyncTimer)
     resyncTimer = setInterval(resync, RESYNC_INTERVAL_MS)
   }
 
   function disconnect() {
+    stopped = true
     clearTimeout(reconnectTimer)
     clearInterval(resyncTimer)
     store.setConnected(false)
+    detach(socket)
     socket?.close()
   }
 

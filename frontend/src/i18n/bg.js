@@ -21,6 +21,7 @@ export default {
     trackers:      'Тракери',
     noTrackers:    'Няма активни тракери',
     noFix:         'без GPS',
+    latLon:        'Шир/Дълж',
     silenceNotice: 'Няма връзка с {n} тракер(а) над 10 мин',
     silenceLost:   '{n} над 30 мин',
     feedLost:      'Връзката на живо е прекъсната — данни към {time}, свързване…',
