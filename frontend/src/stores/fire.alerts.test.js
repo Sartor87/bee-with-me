@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 
 vi.mock('../api', () => ({
@@ -20,7 +20,9 @@ describe('fire alerts in useFireStore', () => {
     localStorage.clear()
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    vi.useFakeTimers()
   })
+  afterEach(() => { vi.useRealTimers() })
 
   it('a new alert is added once and rings once [T17]', () => {
     const store = useFireStore()
@@ -43,6 +45,7 @@ describe('fire alerts in useFireStore', () => {
   it('one repeat message rings once however many alerts it lists [T17]', () => {
     const store = useFireStore()
     store.applyFireAlert(alert('a1')); store.applyFireAlert(alert('a2'))
+    vi.advanceTimersByTime(5000)   // past the ring coalescing window
     const before = store.ringToken
     store.applyFireAlertRepeat({ alert_ids: ['a1', 'a2'] })
     expect(store.ringToken).toBe(before + 1)
@@ -134,7 +137,8 @@ describe('fire alerts in useFireStore', () => {
   it('acknowledging an alert that was resolved meanwhile drops it quietly [T17]', async () => {
     const store = useFireStore()
     store.applyFireAlert(alert('a1'))
-    acknowledgeFireAlert.mockRejectedValue(Object.assign(new Error('Alert not found'), { status: 404 }))
+    // The API answers 200 with the resolved row, never 404.
+    acknowledgeFireAlert.mockResolvedValue(alert('a1', { resolved_at: 'r', resolve_reason: 'out_of_range' }))
     await store.acknowledge('a1')
     expect(store.alerts).toHaveLength(0)
   })

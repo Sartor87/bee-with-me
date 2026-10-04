@@ -148,6 +148,9 @@ export const useFireStore = defineStore('fire', () => {
   const alerts       = ref([])
   const ringToken    = ref(0)
   const alertsFailed = ref(false)   // the last load of the open alerts failed: the list may be incomplete (BP-01)
+  // Open alerts the server holds beyond what the last load returned (its row limit): the banner
+  // says so instead of silently showing a partial list (BP-01, BP-02).
+  const alertsHidden = ref(0)
   const unacknowledged = computed(() => alerts.value.filter(a => !a.acknowledged_at))
 
   // "Show on map": MapView consumes it (centres, then clears it).
@@ -165,11 +168,31 @@ export const useFireStore = defineStore('fire', () => {
   let alertsInflight = 0
   let alertsLog = []
 
-  const ring = () => { ringToken.value += 1 }
+  // The first load (page open, login) restores alarms silently; every later load that brings an
+  // unacknowledged alert nobody has been told about rings (a lost push must not mean a silent alarm).
+  // `seen` holds every id a load has listed; `rang` every id a tone was played for. A push that
+  // follows a fetch (or the other way round) never rings twice and never goes missing: a push
+  // for an alert only the silent first load listed still rings, because a reload brings no pushes.
+  let alertsLoadedOnce = false
+  const seen = new Set()
+  const rang = new Set()
+
+  // Several alerts in one tick, or a fetch and a push for the same event, play ONE tone: a ring
+  // is dropped when another started less than RING_GAP_MS ago (the tone is about 1.3 s long).
+  const RING_GAP_MS = 1500
+  let lastRingAt = -Infinity
+  const ring = () => {
+    const at = Date.now()
+    if (at - lastRingAt < RING_GAP_MS) return
+    lastRingAt = at
+    ringToken.value += 1
+  }
   const clean = ({ type, ...rest }) => { void type; return rest }   // drop the WebSocket envelope key
 
   function upsertAlert(next) {
     next = clean(next)
+    // Resolved means gone, whichever way the row reached us (push, acknowledge response).
+    if (next.resolved_at) { removeAlert(next.id); return false }
     if (alertsInflight) alertsLog.push({ id: next.id, remove: false })
     const idx = alerts.value.findIndex(a => a.id === next.id)
     if (idx === -1) {
@@ -196,6 +219,7 @@ export const useFireStore = defineStore('fire', () => {
     try {
       const fetched = await getFireAlerts({ state: 'open' })
       if (seq !== alertsSeq) return
+      const total = Number.isFinite(fetched.total) ? fetched.total : fetched.length
       const local = new Map(alerts.value.map(a => [a.id, a]))
       let next = fetched.map(a => {
         const mine = local.get(a.id)
@@ -208,6 +232,14 @@ export const useFireStore = defineStore('fire', () => {
       }
       alerts.value = next
       alertsFailed.value = false
+      alertsHidden.value = Math.max(0, total - fetched.length)
+      const fresh = next.filter(a => !a.acknowledged_at && !seen.has(a.id) && !rang.has(a.id))
+      for (const a of next) seen.add(a.id)
+      if (alertsLoadedOnce && fresh.length) {
+        for (const a of fresh) rang.add(a.id)
+        ring()
+      }
+      alertsLoadedOnce = true
     } catch (err) {
       if (seq === alertsSeq) alertsFailed.value = true
       throw err
@@ -219,8 +251,10 @@ export const useFireStore = defineStore('fire', () => {
 
   function applyFireAlert(msg) {
     if (msg.resolved_at) return
-    const isNew = upsertAlert(msg)
-    if (isNew && !msg.acknowledged_at) ring()
+    upsertAlert(msg)
+    const told = msg.acknowledged_at || rang.has(msg.id)
+    rang.add(msg.id)
+    if (!told) ring()
   }
 
   // One repeat message lists every alert that is due: one tone, however many ids it holds.
@@ -241,6 +275,8 @@ export const useFireStore = defineStore('fire', () => {
 
   async function acknowledge(id) {
     try {
+      // upsertAlert drops a row that came back resolved: the server answers 200 for an alert
+      // that was resolved while the click was in flight.
       upsertAlert(await acknowledgeFireAlert(id))
     } catch (err) {
       // Resolved meanwhile (or deleted): nothing left to acknowledge, so it leaves the list.
@@ -253,16 +289,31 @@ export const useFireStore = defineStore('fire', () => {
   // flight stays unacknowledged and keeps ringing.
   async function acknowledgeAll() {
     const ids = new Set(unacknowledged.value.map(a => a.id))
-    await acknowledgeAllFireAlerts()
+    await acknowledgeAllFireAlerts([...ids])
     const now = new Date().toISOString()
     alerts.value = alerts.value.map(a => (ids.has(a.id) && !a.acknowledged_at ? { ...a, acknowledged_at: now } : a))
+  }
+
+  // Logout: the next session starts from nothing. Bumping the sequence drops a load still in flight.
+  function resetAlerts() {
+    alertsSeq++
+    alertsLog = []
+    alerts.value = []
+    ringToken.value = 0
+    focusRequest.value = null
+    alertsFailed.value = false
+    alertsHidden.value = 0
+    alertsLoadedOnce = false
+    lastRingAt = -Infinity
+    seen.clear()
+    rang.clear()
   }
 
   return {
     hotspots, burntAreas, fetchedAt, upstreamState, burntFetchedAt, burntUpstreamState, layers, anyLayerOn,
     shownFetchedAt, shownUpstreamState, fetchFailed,
     fetchHotspots, fetchBurntAreas, refreshVisible, retryFailed, markFeedFailed, setLayer, applyFireDataUpdated,
-    alerts, ringToken, alertsFailed, unacknowledged, focusRequest, requestFocus, clearFocusRequest,
-    fetchOpenAlerts, applyFireAlert, applyFireAlertRepeat, applyFireAlertUpdated, acknowledge, acknowledgeAll,
+    alerts, ringToken, alertsFailed, alertsHidden, unacknowledged, focusRequest, requestFocus, clearFocusRequest,
+    fetchOpenAlerts, applyFireAlert, applyFireAlertRepeat, applyFireAlertUpdated, acknowledge, acknowledgeAll, resetAlerts,
   }
 })

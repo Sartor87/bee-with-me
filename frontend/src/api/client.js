@@ -42,7 +42,7 @@ let isRefreshing = false
 let refreshQueue = []
 
 api.interceptors.response.use(
-  (r) => r.data,
+  (r) => (r.config?.fullResponse ? r : r.data),
   async (err) => {
     const original = err.config
 
@@ -61,8 +61,8 @@ api.interceptors.response.use(
           refreshQueue.push({ resolve, reject })
         }).then((newToken) => {
           original.headers.Authorization = `Bearer ${newToken}`
-          return api(original)
-        }).catch(() => Promise.reject(toApiError(err)))
+          return api(original)   // its own failure (403, 500) is its own error, not the old 401
+        }, () => Promise.reject(toApiError(err)))   // the refresh failed: the session is gone
       }
 
       isRefreshing = true
@@ -71,7 +71,6 @@ api.interceptors.response.use(
         const { access_token, refresh_token } = res.data
         localStorage.setItem('token', access_token)
         localStorage.setItem('refresh_token', refresh_token)
-        api.defaults.headers.common.Authorization = `Bearer ${access_token}`
         refreshQueue.forEach(p => p.resolve(access_token))
         refreshQueue = []
         original.headers.Authorization = `Bearer ${access_token}`

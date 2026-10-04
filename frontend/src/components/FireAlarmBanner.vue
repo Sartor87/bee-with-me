@@ -26,6 +26,9 @@
     </header>
 
     <p v-if="soundUnsupportedNow" class="fb-note">{{ t('fireAlarm.soundUnsupported') }}</p>
+    <p v-if="fire.alertsHidden > 0" class="fb-note fb-hidden" role="status">
+      {{ t('fireAlarm.moreHidden', { n: fire.alertsHidden }, fire.alertsHidden) }}
+    </p>
     <p v-if="ackError" class="fb-note fb-error" role="alert">{{ ackError }}</p>
 
     <ul class="fb-list">
@@ -154,7 +157,8 @@ async function unlock() {
   }
 }
 
-watch(() => fire.ringToken, ring)
+// Only a rise rings: the reset to 0 at logout must not play a tone.
+watch(() => fire.ringToken, (now, before) => { if (now > before) ring() })
 // Restored alarms never ring on load, but the next repeat must be audible: check the state as
 // soon as something needs it.
 watch(hasUnack, (on) => { if (on) tone.value = toneState(); else missedRing = false }, { immediate: true })
@@ -231,6 +235,7 @@ onUnmounted(() => {
 .fb-sound { border-style: dashed; }
 
 .fb-note { margin: 4px 20px 0; font-size: 13px; }
+.fb-hidden { font-weight: 600; }
 .fb-error { color: var(--fire-alarm-text); background: rgba(0,0,0,.35); padding: 4px 10px; border-radius: 4px; width: fit-content; }
 
 .fb-list { list-style: none; padding: 4px 0 8px; }

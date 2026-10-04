@@ -330,6 +330,7 @@ export default {
     acknowledged:   'Acknowledged',
     busy:           'Sending…',
     ackFailed:      'Could not acknowledge. Check the connection and try again.',
+    moreHidden:     'one more alert is not shown | {n} more alerts are not shown',
     loadFailed:     'Fire alarms could not be loaded. The list may be incomplete. Retrying.',
     soundBlocked:   'Sound blocked: click to enable',
     soundUnsupported: 'This browser cannot play the alarm sound. Watch the screen.',

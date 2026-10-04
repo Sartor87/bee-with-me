@@ -66,9 +66,18 @@ export const getFireHotspots   = () => api.get('/fire/hotspots')
 export const getFireBurntAreas = () => api.get('/fire/burnt-areas')
 export const getFireStatus     = () => api.get('/fire/status')
 // The backend defaults to 50 rows; every open alert must reach the banner, so ask for the maximum.
-export const getFireAlerts            = (params) => api.get('/fire/alerts', { params: { limit: 500, ...params } })
-export const acknowledgeFireAlert     = (id)     => api.post(`/fire/alerts/${id}/acknowledge`)
-export const acknowledgeAllFireAlerts = ()       => api.post('/fire/alerts/acknowledge-all')
+// Resolves with the array; `.total` (non-enumerable) is the server's X-Total-Count, so the banner
+// can say when more alerts exist than were returned.
+export const getFireAlerts = async (params) => {
+  const res = await api.get('/fire/alerts', { params: { limit: 500, ...params }, fullResponse: true })
+  const list = Array.isArray(res.data) ? res.data : []
+  const total = Number.parseInt(res.headers?.['x-total-count'], 10)
+  Object.defineProperty(list, 'total', { value: Number.isFinite(total) ? total : list.length })
+  return list
+}
+export const acknowledgeFireAlert     = (id)  => api.post(`/fire/alerts/${id}/acknowledge`)
+// Only the ids the operator could see: an alert that arrived meanwhile stays unacknowledged.
+export const acknowledgeAllFireAlerts = (ids) => api.post('/fire/alerts/acknowledge-all', { alert_ids: ids })
 
 // Settings (HQ + fire alarm)
 export const getSettings  = ()     => api.get('/settings')

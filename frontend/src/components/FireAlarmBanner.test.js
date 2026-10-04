@@ -151,4 +151,23 @@ describe('FireAlarmBanner', () => {
     await flushPromises()
     expect(w.find('.fb-loadfail').text()).toBe(en.fireAlarm.loadFailed)
   })
+  it('says how many alerts are not shown, in both languages, and does not ring on a reset [B43]', async () => {
+    const { w, fire } = await mountBanner()
+    fire.applyFireAlert(alert('a1'))
+    fire.alertsHidden = 1
+    await flushPromises()
+    expect(w.find('.fb-hidden').text()).toBe(en.fireAlarm.moreHidden.split(' | ')[0])
+    fire.alertsHidden = 7
+    await flushPromises()
+    expect(w.find('.fb-hidden').text()).toBe('7 more alerts are not shown')
+    i18n.global.locale.value = 'bg'
+    await flushPromises()
+    expect(w.find('.fb-hidden').text()).toBe('още 7 аларми не са показани')
+    expect(bg.fireAlarm.moreHidden).toContain('|')
+    playFireTone.mockClear()
+    fire.resetAlerts()
+    await flushPromises()
+    expect(playFireTone).not.toHaveBeenCalled()
+    expect(w.find('.fb-hidden').exists()).toBe(false)
+  })
 })

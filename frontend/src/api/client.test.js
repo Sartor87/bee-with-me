@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import axios from 'axios'
 import api, { ApiError, errorText, detailOf } from './client'
 
 const defaultAdapter = api.defaults.adapter
@@ -54,5 +55,48 @@ describe('api client rejections', () => {
     expect(errorText('boom')).toBe('boom')
     expect(errorText(undefined, 'fallback')).toBe('fallback')
     expect(detailOf('settings_stale')).toBe('settings_stale')
+  })
+})
+
+describe('api client session handling [B43]', () => {
+  afterEach(() => { api.defaults.adapter = defaultAdapter; localStorage.clear() })
+
+  function scripted(handlers) {
+    const seen = []
+    api.defaults.adapter = async (config) => {
+      seen.push({ url: config.url, auth: config.headers.Authorization })
+      return handlers.shift()(config)
+    }
+    return seen
+  }
+  const reject = (status, data) => (config) => {
+    const err = new Error(`status ${status}`)
+    err.config = config
+    err.response = { status, data, headers: {}, config }
+    throw err
+  }
+  const ok = (data) => (config) => ({ status: 200, data, headers: {}, config })
+
+  it('a retry after refresh that fails with 403 rejects with 403, not the old 401 [B43]', async () => {
+    localStorage.setItem('token', 'old'); localStorage.setItem('refresh_token', 'r1')
+    const post = vi.spyOn(axios, 'post').mockResolvedValue({ data: { access_token: 'new', refresh_token: 'r2' } })
+    scripted([reject(401, { detail: 'expired' }), reject(403, { detail: 'forbidden' })])
+    const err = await api.get('/x').catch(e => e)
+    expect(err.status).toBe(403)
+    expect(err.detail).toBe('forbidden')
+    post.mockRestore()
+  })
+
+  it('the refreshed token is not sticky: after logout no request carries it [B43]', async () => {
+    localStorage.setItem('token', 'old'); localStorage.setItem('refresh_token', 'r1')
+    const post = vi.spyOn(axios, 'post').mockResolvedValue({ data: { access_token: 'new', refresh_token: 'r2' } })
+    const seen = scripted([reject(401, { detail: 'expired' }), ok({ ok: 1 }), ok({})])
+    await api.get('/x')
+    expect(seen[1].auth).toBe('Bearer new')
+    expect(api.defaults.headers.common.Authorization).toBeUndefined()
+    localStorage.removeItem('token'); localStorage.removeItem('refresh_token')
+    await api.get('/y')
+    expect(seen[2].auth).toBeUndefined()
+    post.mockRestore()
   })
 })
