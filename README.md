@@ -26,7 +26,7 @@ Offline people-tracking application for LoRaWAN-based rescue and volunteer opera
 
 - Python 3.11+
 - Node.js 20+
-- Docker + Docker Compose
+- Podman 4.7+ with a compose provider (`podman compose`), **or** Docker with Docker Compose
 
 ---
 
@@ -53,22 +53,157 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 ### 2. Database
 
 ```bash
-cd docker && docker compose up -d && cd ..
+podman compose -p bee-with-me -f docker/docker-compose.yaml up -d
 ```
 
-The schema (PostGIS + all tables) is applied automatically on first start. To reset and re-apply the schema, destroying all data:
+(Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml up -d`)
+
+Podman on Windows/macOS also needs the `docker-compose.podman-machine.yaml` override — see
+"Podman on Windows/macOS (podman machine)" below.
+
+The backend creates and upgrades the schema itself on start-up: numbered files in
+`backend/db/migrations/` are applied in order and recorded in the `schema_migrations` table.
+Check the state at any time with:
 
 ```bash
-cd docker && docker compose down -v && docker compose up -d && cd ..
+python -m backend.db.migrate status   # exit 0 = up to date, 10 = pending, 2 = database is newer than the app, 3 = database not reachable, 1 = invalid migration files / failed migration
 ```
 
-**After upgrading from an earlier version**, apply the migration for any new columns:
+Every migration file runs under a lock timeout (`MIGRATION_LOCK_TIMEOUT`, default `5s`, form `200ms`, `5s` or
+`1min`): if another session holds a lock on a table the file needs, the start-up fails with a clear
+error naming the file instead of hanging. Nothing is changed; stop the backend and other tools using
+the database, then start again.
 
-```sql
-ALTER TABLE users ADD COLUMN IF NOT EXISTS pin VARCHAR(20);
-ALTER TABLE users ADD COLUMN IF NOT EXISTS is_radio_enthusiast BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_initials VARCHAR(20);
+The start scripts retry only exit 3 (Postgres still starting) for up to 90 s; exit 1 and 2 refuse at once.
+
+The start scripts take a backup (`data/backups/`) before applying pending migrations, and refuse to
+start when they cannot check the database for 90 s. `-SkipContainers` (start.ps1) / `--skip-containers`
+(start.sh) also skips this check and the automatic pre-migration backup — take one manually with
+`scripts/backup.ps1` / `scripts/backup.sh` first.
+
+The backend itself also refuses to apply pending migrations to a database that already holds data
+unless a backup of *that* database was taken first: every backup writes `last-backup.json` next to the
+dump (server `system_identifier`, applied migrations, dump name, time), and the backend migrates only
+when `data/backups/last-backup.json` (setting `BACKUP_MARKER_PATH`) is of the same server, in the
+current migration state, and less than 24 h old. A fresh, empty database needs no backup. A refusal
+changes nothing; run the start script (or `scripts/backup.ps1 -OutDir data\backups` /
+`./scripts/backup.sh data/backups`) and start again. The start scripts run uvicorn without `--reload`,
+so a `git pull` never migrates a running field install behind your back. Developers who want hot
+reload start uvicorn by hand with `ALLOW_MIGRATE_WITHOUT_BACKUP=true` — on development data only:
+
+```powershell
+$env:ALLOW_MIGRATE_WITHOUT_BACKUP='true'; uvicorn backend.main:app --reload
 ```
+
+```bash
+ALLOW_MIGRATE_WITHOUT_BACKUP=true uvicorn backend.main:app --reload
+```
+
+To reset to an empty database (**destroys all data**): stop the backend, run
+`podman compose -p bee-with-me -f docker/docker-compose.yaml down` (Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml down`),
+delete the `data/pgdata` folder (it is a bind mount, `down -v` does not remove it), then
+`podman compose -p bee-with-me -f docker/docker-compose.yaml up -d` (Docker: `docker compose -p bee-with-me -f docker/docker-compose.yaml up -d`).
+
+**Coming back after a reboot.** `restart: unless-stopped` only helps while the container engine runs:
+- Podman on Windows/macOS: `podman machine start` (once per boot), then `podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d` or the start script.
+- Podman on Linux (rootless): `systemctl --user enable --now podman-restart.service` restarts
+  `unless-stopped` containers at login; for start at boot without login also run `loginctl enable-linger $USER`.
+- Docker: Docker Desktop / the docker service restarts the container by itself.
+
+The start scripts use Podman when it is installed and Docker otherwise; set `CONTAINER_ENGINE=docker`
+(or `podman`) to choose explicitly.
+
+The compose project is named `bee-with-me` (containers `bee-with-me-db-1`, `bee-with-me-tiles-1`), so
+the scripts only ever pick this project's database; with the Podman-machine override the data volume
+is `bee-with-me_pgdata`. Every script passes `-p bee-with-me` to compose explicitly (older
+podman-compose versions ignore the `name:` key).
+
+**Upgrading from 1.7.1 or earlier.** Older versions ran as compose project `docker` (containers
+`docker-db-1`, `docker-tiles-1`) on the same ports, so the new project could not start next to them.
+The start scripts handle this once: when a running `docker-db-1` (project `docker`, service `db`) is
+found, they back it up into `data/backups` (`scripts/backup.ps1 -Container <id>` /
+`scripts/backup.sh --container <id>`), refuse to continue if that backup fails, then run
+`podman compose -p docker -f docker/docker-compose.yaml down` (Docker: `docker compose -p docker …`;
+no `-v`, nothing is deleted) and start `bee-with-me`. On the base file the data stays in `data/pgdata`
+and the new project reuses it. With the Podman-machine override the old data is in the volume
+`docker_pgdata` and the new volume `bee-with-me_pgdata` starts empty: the start script stops before
+the backend and prints the restore command for the backup it just took
+(`scripts/restore.ps1 '<dump>'` / `./scripts/restore.sh <dump>`); run it, then start again. The old
+volume is left in place until you remove it yourself.
+This happens only when the old container belongs to **this folder**: its compose `working_dir` label
+is `<this folder>/docker` or its data mount is `<this folder>/data/pgdata` (compared without regard to
+`\` vs `/`, a trailing slash, letter case on Windows, or the WSL `/mnt/<drive>/…` form). A project
+`docker` from another folder (for example a copy of the app installed elsewhere) or from another app
+is never backed up or stopped: the start script stops instead and prints the backup command
+(`-Container <id>` / `--container <id>`), the stop command and the restore command to move that data
+here yourself.
+
+**Podman on Windows/macOS (podman machine).** Start the database with the extra override file:
+`podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml up -d`
+(the start scripts do this automatically). It keeps the Postgres data in a named volume inside the
+Podman VM — Postgres can't set permissions on a Windows-drive folder — and puts Postgres on the VM's
+host network so `localhost:5432` reaches it from Windows. **The data then lives in the VM: `podman
+machine rm` or a reset deletes it — back up with `scripts/backup.ps1` onto another disk.**
+To reset to an empty database in this mode,
+`podman compose -p bee-with-me -f docker/docker-compose.yaml -f docker/docker-compose.podman-machine.yaml down -v`
+removes the named volume instead of deleting `data/pgdata`.
+
+The database only listens on localhost (`127.0.0.1`, in both modes; the tile server too) — the
+backend, the hardware reader and the scripts all run on this machine. To reach it from another
+machine, change the binding in the compose files deliberately (and set a real `POSTGRES_PASSWORD`;
+the backend logs an INSECURE CONFIG line while it is still `change_me`).
+
+Schema changes: add a new numbered file; never edit a file that has already been applied.
+
+#### Backup and restore
+
+Back up with `scripts/backup.ps1 -OutDir E:\bee-backups` (Windows) or `./scripts/backup.sh /media/usb/bee-backups`
+(Linux/macOS) — onto another disk. Both find the database container (`bee-with-me-db-1`) through the
+chosen engine: Podman first, Docker when Podman is not installed (`CONTAINER_ENGINE=docker` to force it).
+They read `POSTGRES_DB` / `POSTGRES_USER` from the environment first, then from `.env` (like the backend).
+These parsing notes apply to the scripts only (the backend reads `.env` through its own settings): in the
+scripts, an environment variable set to an empty string counts as unset (the `.env` value or the default is
+used), `.env` keys match in any case (`postgres_db=` works too), and a leading `export ` is accepted in
+lower case only, like python-dotenv (an `EXPORT KEY=` line is ignored). `-Keep` / `KEEP` must be at least 1;
+the dump just written is never pruned. An empty `-OutDir ''` / `""` writes to `backups` in the project
+folder. Restore refuses the system databases `postgres`, `template0`, `template1` and `template_postgis`.
+
+Dumps hold every name and position of a callout. `backup.ps1` restricts the dump folder to the current
+user (by SID, no inherited permissions) when it creates the folder, and also when it finds an existing
+folder that still inherits its permissions and holds nothing but dumps; any other existing folder is
+left as it is, with a warning. FAT/exFAT USB sticks have no ACLs at all: there the dumps are readable by
+anyone who has the stick, so keep it with you. `backup.sh` makes the dumps `600` (not enforced under
+Git Bash on NTFS — use `backup.ps1` on Windows).
+
+**Restore only dumps you made yourself and kept on trusted media.** `pg_restore` runs as the database
+superuser inside the container, so a crafted dump can do anything the database server can.
+
+To restore a dump (**replaces the whole database**): stop the backend first (close its window / Ctrl+C), then
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\restore.ps1 'E:\bee-backups\beewithme_2026-10-02_101500.dump'
+```
+
+```bash
+./scripts/restore.sh /media/usb/bee-backups/beewithme_2026-10-02_101500.dump
+```
+
+The restore script first checks the dump (`pg_restore -l`) and refuses before touching any database if
+it cannot be read. It then restores into a side database `<db>_restore_<suffix>` in one transaction that
+stops at the first error (`pg_restore --exit-on-error --single-transaction`). Only when that worked does
+it swap: the current database is renamed to `<db>_before_restore_<UTC stamp>` and the restored one to
+`<db>`, so nothing created after the backup survives (including newer `schema_migrations` rows). If the
+restore fails, the side database is dropped and the live database is left as it was. The old database is
+**kept** (the script prints its name); once the restored data is verified, drop it with
+`podman exec bee-with-me-db-1 dropdb -U rescuer <db>_before_restore_<stamp>` (Docker:
+`docker exec …`). Until then the disk holds both copies.
+
+Plain-text dumps (`beewithme_*.sql` from 1.7.1 or earlier) cannot be read by `pg_restore`: the script
+says so and prints the `psql` commands that load one into a scratch database and turn it into a `.dump`
+that it can restore. It refuses while something listens on
+port 8000 (`-Force` / `--force` overrides), asks before replacing anything (`-Yes` / `--yes` skips the
+question) and finally prints `python -m backend.db.migrate status`. It uses the same engine detection
+as the backup (Podman, then Docker).
 
 ### 3. Backend
 
@@ -76,8 +211,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_initials VARCHAR(20);
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r backend/requirements.txt
-uvicorn backend.main:app --reload
+uvicorn backend.main:app
 ```
+
+On a database that already holds data, pending migrations are only applied after a backup (see
+"2. Database"); for hot reload on development data set `ALLOW_MIGRATE_WITHOUT_BACKUP=true`.
 
 API: **http://localhost:8000**  
 Interactive API docs: **http://localhost:8000/docs**
@@ -123,7 +261,7 @@ Setup is otherwise the same as macOS/Linux:
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r backend\requirements.txt
-uvicorn backend.main:app --reload
+uvicorn backend.main:app
 ```
 
 `pip install -r backend/requirements.txt` pulls prebuilt wheels for `hidapi` and `mgrs` on Windows (win_amd64), so no C compiler / Visual Studio Build Tools should be required for a supported Python version (3.10–3.13 as of writing).
@@ -136,33 +274,52 @@ Things that commonly trip up a fresh Windows box:
 
 ### Serial protocol
 
+**Full reference: [`docs/PROTOCOL.md`](docs/PROTOCOL.md)** — field tables, worked examples,
+and a debugging checklist. Summary:
+
 Every frame is wrapped as:
 
 ```
-##<payload>@<CRC16-hex>\r\n
+##<payload>@<CRC>\r\n
 ```
 
-CRC polynomial: `0xACAC`, computed over the payload bytes.
+CRC is **CRC-16/CCITT-FALSE** (poly `0x1021`, init `0xFFFF`), computed over `##<payload>`
+with the marker **included**, and transmitted as a **decimal** integer — not hex. Getting
+either detail wrong means every frame fails CRC and is silently discarded.
 
-#### Cmd=30 — RescuerBee location
+#### Cmd=30 — RescuerBee location (25 fields)
 
 ```
-##30,MsgId,DevSN,Hour,Min,Sec,Day,Mon,Year,GNSSStatus,Lat,Lng,Speed,Satellites,Altitude,Flags,BattVol@<CRC>
+##30,MsgId,DevSN,HWVer,SWVer,Hour,Min,Sec,Day,Mon,Year,GNSSStatus,Lat,Lng,Speed,Course,
+    Satellites,Altitude,Flags,BattVol,CurrMothRxBeeRSSI,CurrMothRxBeeSNR,
+    PrevBeeRxMothRSSI,PrevBeeRxMothSNR,EventID@<CRC>
 ```
 
 | Field | Notes |
 |---|---|
-| GNSSStatus | `A` = valid fix, `V` = no fix (frames with V are dropped) |
-| Flags | Bit 0 = SOS active, Bit 1 = repeater mode |
+| GNSSStatus | `A` = valid fix, `V` = no fix. V frames are **recorded** (flagged `gnss_valid = FALSE`, anchored to the last known fix) — they prove the device is powered and in contact |
+| Flags | Bit 0 (`0x01`) = repeater mode, Bit 1 (`0x02`) = SOS active |
 | BattVol | Volts, e.g. `3.85` |
+| RSSI / SNR ×4 | Link quality both directions — currently parsed past and discarded |
+| EventID | Drives the duplicate filter (15 s window) |
 
-#### Cmd=20 — RescuerRepeater heartbeat
+#### Cmd=20 — RescuerRepeater heartbeat (11 fields)
 
 ```
-##20,MsgId,DevSN,BattVol@<CRC>
+##20,MsgId,DevSN,HWVer,SWVer,BattVol,CurrMRxDevRSSI,CurrMRxDevSNR,
+    PrevDevRxMRSSI,PrevDevRxMSNR,EventID@<CRC>
 ```
 
-Battery voltage only; stored in `repeater_events`, not shown on map.
+Battery voltage only; stored in `repeater_events`, not shown on the map.
+
+#### Cmd=1 — ACK (server → device)
+
+```
+##1,MsgId@<CRC>
+```
+
+Sent **after** a frame is handled successfully, so an unpersisted frame stays
+unacknowledged and may be retransmitted.
 
 ---
 
@@ -193,9 +350,9 @@ backend/
   database.py          asyncpg connection pool
   ws.py                WebSocket manager; pg_notify → broadcast
   hardware_reader/
-    reader.py          Async serial loop (pyserial-asyncio)
-    hid_reader.py      USB HID reader (50 Hz polling, frame reassembly)
-    parser.py          Bee protocol frame parser; CRC-16 poly 0xACAC
+    reader.py          DB handlers + serial loop (run() currently disabled)
+    hid_reader.py      USB HID reader — the active path (50 Hz, frame reassembly, ACK)
+    parser.py          Bee protocol frame parser; CRC-16/CCITT-FALSE (0x1021/0xFFFF)
   routers/
     auth.py            POST /api/auth/login, /refresh, GET /me
     users.py           CRUD + photo upload + XLS import
@@ -208,7 +365,8 @@ backend/
     ws.py              GET /ws WebSocket endpoint
     test.py            POST /api/test/simulate (dev only)
   db/
-    schema.sql         Full PostgreSQL + PostGIS schema
+    migrate.py         Migration runner (python -m backend.db.migrate status|up)
+    migrations/        Numbered SQL migrations; 0001_baseline.sql is the full base schema
   tests/               pytest suite (mocked DB, no real Postgres needed)
 frontend/
   src/
@@ -237,6 +395,10 @@ tools/
 source .venv/bin/activate
 pytest backend/tests/
 ```
+
+The `[sh]` script tests need a real bash. On Windows they use Git Bash (found next to `git.exe`, or
+`%ProgramFiles%\Git\bin\bash.exe`), never the WSL launcher `C:\Windows\System32\bash.exe`; set
+`BWM_TEST_BASH` to a bash path to override. Without one, the `[sh]` cases are skipped.
 
 ---
 

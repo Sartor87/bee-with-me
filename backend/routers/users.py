@@ -14,6 +14,9 @@ from pydantic import BaseModel
 
 from ..auth import get_current_user, hash_password, require_role
 from ..database import get_conn
+from ..json_columns import decode_json_columns
+from ..fire import repository as fire_repository
+from ..fire.service import notify_alerts_updated
 
 router = APIRouter(prefix='/api/users', tags=['users'])
 
@@ -78,7 +81,7 @@ async def list_users(
         ORDER BY u.full_name
         LIMIT $1 OFFSET $2
     """, limit, offset)
-    return {'items': [dict(r) for r in rows], 'total': total, 'limit': limit, 'offset': offset}
+    return {'items': [decode_json_columns(r, 'groups') for r in rows], 'total': total, 'limit': limit, 'offset': offset}
 
 
 @router.post('/', status_code=status.HTTP_201_CREATED)
@@ -126,7 +129,7 @@ async def get_user(
     """, user_id)
     if row is None:
         raise HTTPException(status_code=404, detail='User not found')
-    return dict(row)
+    return decode_json_columns(row, 'groups')
 
 
 @router.put('/{user_id}')
@@ -134,7 +137,7 @@ async def update_user(
     user_id: UUID,
     body: UserUpdate,
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
-    _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
+    admin: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
     updates = body.model_dump(exclude_none=True)
     clear_login = updates.pop('clear_login', False)
@@ -156,13 +159,18 @@ async def update_user(
     if clear_login:
         set_parts.extend(['username = NULL', 'password_hash = NULL'])
 
-    row = await conn.fetchrow(
-        f'UPDATE users SET {", ".join(set_parts)}, updated_at = NOW() WHERE id = $1 '
-        f'RETURNING id, username, full_name, role',
-        user_id, *values,
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail='User not found')
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            f'UPDATE users SET {", ".join(set_parts)}, updated_at = NOW() WHERE id = $1 '
+            f'RETURNING id, username, full_name, role',
+            user_id, *values,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail='User not found')
+        # Deactivating through this edit ends the open rescuer alerts of their devices, like /deactivate.
+        resolved = (await fire_repository.resolve_disabled_alerts(conn, admin['id'], user_id=user_id)
+                    if updates.get('is_active') is False else [])
+    await notify_alerts_updated(conn, resolved)
     return dict(row)
 
 
@@ -348,9 +356,13 @@ async def import_volunteers(
 async def deactivate_user(
     user_id: UUID,
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
-    _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
+    admin: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
-    await conn.execute('UPDATE users SET is_active = FALSE WHERE id = $1', user_id)
+    async with conn.transaction():
+        await conn.execute('UPDATE users SET is_active = FALSE WHERE id = $1', user_id)
+        # Open rescuer alerts of devices this user carries end now, by this admin, in the same transaction.
+        resolved = await fire_repository.resolve_disabled_alerts(conn, admin['id'], user_id=user_id)
+    await notify_alerts_updated(conn, resolved)
 
 
 @router.patch('/{user_id}/reactivate', status_code=status.HTTP_204_NO_CONTENT)

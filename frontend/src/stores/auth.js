@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { login as apiLogin, getMe } from '../api'
+import { useFireStore } from './fire'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') || '')
@@ -23,6 +24,8 @@ export const useAuthStore = defineStore('auth', () => {
     user.value  = null
     localStorage.removeItem('token')
     localStorage.removeItem('refresh_token')
+    // Alarm state belongs to the session that ended.
+    useFireStore().resetAlerts()
   }
 
   return { token, user, login, fetchMe, logout }

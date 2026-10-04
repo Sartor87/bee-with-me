@@ -1,5 +1,183 @@
 # Changelog
 
+## [1.7.1] - 2026-09-08
+
+### Test suites green for the first time
+
+Both suites had drifted far enough from the code that a red run was normal — which meant a
+genuine regression would not have stood out. **Backend 11 failed / 4 errors / 23 passed →
+59 passed. Frontend 8 → 32 passed.** No product behaviour was changed to achieve this; the
+tests were wrong, not the code.
+
+- **`test_parser.py` rewritten against the real wire format.** It had encoded a superseded
+  protocol — CRC computed *without* the `##` marker and rendered as hex, 17-field bee
+  frames — so every frame it constructed was rejected and all 15 parser tests failed. Now
+  32 tests covering the actual 25-field Cmd=30 / 11-field Cmd=20 format, with the CRC
+  algorithm pinned by CRC-16/CCITT-FALSE's published check value
+  (`crc16(b'123456789') == 0x29B1`), real MGRS conversion instead of a mock, flag-bit
+  parametrisation, ACK round-tripping, and truncation/garbage rejection.
+- `test_api_users.py` updated for the paginated response envelope and the
+  `first_name`/`last_name`/`phone` fields that replaced `full_name` on create.
+- `test_api_simulate.py` given the third `fetchrow` the endpoint gained (volunteer lookup).
+- Vitest now runs with a working `localStorage`: Node 22+ ships an inert native global that
+  Vitest's jsdom environment declines to override, so any module touching storage at import
+  time failed to collect. Shimmed in `vitest.setup.js`.
+
+### Protocol documentation corrected
+
+`CLAUDE.md` described hardware that no longer exists, which is a trap for anyone debugging
+the radio link mid-incident:
+
+- CRC documented as poly `0xACAC` over the payload → actually **CRC-16/CCITT-FALSE**
+  (`0x1021`, init `0xFFFF`) over `##`-inclusive payload, transmitted as **decimal**
+- Cmd=30 documented with 17 fields → actually **25** (adds HWVer, SWVer, Course, four
+  RSSI/SNR values, EventID); Cmd=20 documented with 4 → actually **11**
+- **Flag bits were backwards**: documented as bit 0 = SOS, bit 1 = repeater; the code reads
+  bit 0 (`0x01`) = repeater, bit 1 (`0x02`) = SOS
+- Documented "frames with GNSSStatus=V are silently dropped" — no longer true as of 1.7.0
+- Added the Cmd=1 ACK frame, the data-flow diagram corrected to the HID path, and a note
+  that the Devices page's "Active" badge means only `is_active`, never "has ever transmitted"
+
+### Fixed
+
+- Off-by-one length guards in `_parse_bee` (`< 24` → `< 25`) and `_parse_repeater`
+  (`< 10` → `< 11`). Behaviour-neutral — both paths already rejected the frame, one via the
+  guard and one via a caught `IndexError` — but the intent was wrong and untestable.
+- `i18n/index.js` no longer calls `localStorage` unguarded at import time, which would
+  white-screen the entire app before first render in a private window or with site data
+  blocked.
+
+### Known gap documented, not fixed
+
+`_parse_bee` accepts Cyrillic `А` (U+0410) for GNSSStatus, but **that branch is unreachable
+in production**: both readers `.decode('ascii', errors='replace')`, destroying the byte
+before the parser sees it, so such a device reads as "no fix" on every frame. Fixing it
+means changing the decode on the hot path (and the matching encode in `_strip_and_verify`)
+to something byte-preserving — a change that should be made against real hardware rather
+than guessed at. Pinned by `test_cyrillic_a_cannot_survive_the_readers_ascii_decode`.
+
+## [1.7.0] - 2026-09-08
+
+Field-readiness work from the operational audit. The theme throughout: the map must never
+go blank, and must never claim to be live when it isn't.
+
+### SOS could not be cleared from the UI
+
+Two independent causes, both fixed:
+
+- The alert was **re-opened by the very next frame**. A device asserts SOS until it is
+  physically cleared on the hardware, and `_ensure_sos_alert` only checked "is there an
+  unresolved alert?" — so resolving one caused a fresh alert to be created milliseconds
+  later. SOS alerts are now **edge-triggered**: only a FALSE→TRUE transition (compared
+  against the device's previous stored frame) opens one.
+- The `sos_alert` WebSocket payload carried **only `device_id`** — no alert `id`. The
+  banner pushed that partial object into its list, so Resolve posted to
+  `/sos/undefined/resolve`, got a 422, and the rejection was swallowed with no feedback.
+  The payload now carries `id`, `dev_sn`, `full_name`, `rank` and `triggered_at`;
+  `applySOSAlert` merges instead of skipping; and the button reports failures instead of
+  appearing dead.
+- Live updates now broadcast the **effective** SOS state (is there an unresolved alert)
+  rather than the raw wire flag, so the map and `/api/locations/live` agree and a resolved
+  alert stays resolved across reloads.
+
+### Freshness is now honest — one clock, three states
+
+- `recorded_at` (device GNSS clock) and `received_at` (server clock) are **carried
+  separately end to end** and no longer conflated. Every freshness decision, trail prune
+  and checkpoint label uses the server clock; a device with a skewed clock can no longer
+  render itself permanently fresh, nor change its own trail timestamps on reload.
+- Trackers are classified **LIVE / STALE (>10 min) / LOST (>30 min)**, with relative age
+  on every panel row, progressive dimming, and worst-first sorting so whatever needs
+  attention rises to the top on its own.
+- A **silence notice** in the tracker panel when devices stop reporting. Deliberately
+  quiet — no pulse, no sound, no red — it is a "look at this", not the SOS alarm.
+- Ages tick on their own timer, so a panel full of silent trackers can't freeze its own
+  clock at exactly the moment that matters.
+
+### The display survives sleep, reloads and backend restarts
+
+- Last known positions are snapshotted to `localStorage`, so a reload paints the previous
+  picture immediately instead of an empty map. Restored positions keep their original
+  timestamps and so render with their true age — cached, never passed off as live.
+- A **"live feed lost — showing data as of HH:MM:SS"** banner whenever the WebSocket is
+  down.
+- A 45-second reconciliation poll runs independently of WebSocket health, so a half-open
+  socket or a dead server-side listener self-heals instead of silently freezing the map.
+
+### Devices in contact without a GPS fix are no longer invisible
+
+- Frames with `GNSSStatus=V` used to be discarded entirely. They are now recorded
+  (`location_events.gnss_valid`) anchored to the last known fix, and rendered with a
+  dashed amber ring plus a "no fix" tag. "In a gully / indoors / buried" is now
+  distinguishable from "battery dead or out of range" — they call for opposite responses.
+- No-fix frames deliberately do **not** extend the trail; they prove contact, not movement.
+
+### Availability and safety
+
+- `restart: unless-stopped` on both compose services — the database comes back by itself
+  after a reboot or power loss.
+- `scripts/backup.sh` / `scripts/backup.ps1`: timestamped `pg_dump` with retention and
+  documented restore. Run after every operation, onto a separate disk.
+- Retention cleanup now runs shortly after boot and then daily; previously it slept 24h
+  first and so never ran at all on a laptop powered down between operations.
+- `GET /api/locations/live` is bounded to the last 24h (`LIVE_POSITION_MAX_AGE_HOURS`), so
+  trackers from a previous operation stop appearing as ghosts among live rescuers.
+- `POST /api/test/simulate`, which writes **fabricated** positions, is now admin-only and
+  gated behind `ENABLE_TEST_ENDPOINTS` (default **off**).
+- Access tokens now carry an expiry and are verified; expiry verification had been
+  explicitly disabled, making a token lifted from a lost laptop a permanent credential.
+- Loud startup warnings for shipped-default `SECRET_KEY` / `OFFLINE_MAPS_PASSWORD`, and
+  whenever the simulator is enabled. Warns rather than refusing to boot — a hard failure
+  while setting up for a callout is worse than an insecure key.
+- `course_deg` is finally persisted; it was parsed off the wire and dropped on insert.
+- Corrected the DB-reset runbook: `pgdata` is a bind mount, so `docker compose down -v`
+  never cleared it and `schema.sql` never re-ran. Startup migrations are now documented as
+  the required path for schema changes.
+
+## [1.6.0] - 2026-09-08
+
+### Recover from sleep/wake and connection drops without a manual restart
+
+Symptom this addresses: after the machine running the stack sleeps and wakes
+(or Docker/Postgres has any other blip), the map either goes stale/blank or,
+previously, stayed broken until the backend was restarted by hand.
+
+- **Frontend**: `useWebSocket` now re-syncs full state (`fetchLive`, `fetchSOS`,
+  `fetchTrail`) whenever the WebSocket *reconnects* after a drop, not just on
+  first page load. Anything that happened while disconnected (sleep, network
+  blip, backend restart) is otherwise silently missed since there's no gap-fill
+  on the push channel — this makes reconnect pull a fresh snapshot instead of
+  trusting stale state.
+- **Backend**: `WSManager.listen_notifications()` (the dedicated asyncpg
+  connection doing `LISTEN location_update` / `LISTEN sos_alert`) previously
+  had no reconnect logic at all — if that single connection died or went
+  stale (e.g. Docker Desktop pausing Postgres across a system sleep), live
+  pushes stopped forever with no recovery, matching reports of "had to
+  restart the backend to get the map working again." It now retries every 5s
+  on error, and pings the connection every 30s (`SELECT 1`) to catch a
+  connection that's gone stale silently rather than raising — the same
+  pattern already used by the HID and serial readers.
+
+### Trail is cut off when a device is reassigned or unassigned
+
+Symptom this addresses: a physical device gets handed from one volunteer to
+another (or unassigned), and the map's trail line kept splicing the previous
+holder's movement into the new one's, since the trail was only ever bounded
+by device_id + a rolling time window, not by who currently holds the device.
+
+- `devices.assigned_at` (new column, applied via an idempotent `ALTER TABLE
+  ... ADD COLUMN IF NOT EXISTS` at startup — no `docker compose down -v`
+  needed on existing installs) is stamped whenever a device's `user_id`
+  actually changes, via both `PUT /api/devices/{id}/assign` and
+  `PUT /api/devices/{id}`
+- `GET /api/locations/trail` now bounds each device's trail to
+  `GREATEST(now - window, assigned_at)`, so history from before the current
+  assignment never appears
+- Frontend: reassigning a device (from either the Devices page or a
+  volunteer's Assign Device field on the Users page) also clears that
+  device's client-side trail cache immediately, instead of waiting for the
+  next `/trail` poll
+
 ## [1.5.1] - 2026-09-08
 
 ### Map — stale markers after device deletion

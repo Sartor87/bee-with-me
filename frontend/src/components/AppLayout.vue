@@ -7,7 +7,7 @@
       </div>
 
       <RouterLink
-        v-for="item in NAV_ITEMS" :key="item.to"
+        v-for="item in visibleNav" :key="item.to"
         :to="item.to" class="nav-item"
       ><span>{{ item.icon }}</span> {{ t(item.labelKey) }}</RouterLink>
 
@@ -20,12 +20,12 @@
             @click="switchLocale(loc.code)"
           >{{ loc.label }}</button>
         </div>
-        <button class="secondary" @click="handleLogout">{{ t('nav.logout') }}</button>
       </div>
     </nav>
 
     <main class="main-content">
       <SOSBanner />
+      <FireAlarmBanner />
       <RouterView v-slot="{ Component }">
         <KeepAlive include="MapView">
           <component :is="Component" />
@@ -36,27 +36,31 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import { RouterLink, RouterView, useRouter } from 'vue-router'
+import { computed, onMounted } from 'vue'
+import { RouterLink, RouterView } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import { LOCALES, setLocale } from '../i18n'
 import SOSBanner from './SOSBanner.vue'
+import FireAlarmBanner from './FireAlarmBanner.vue'
+import { useFireStore } from '../stores/fire'
 import { NAV_ITEMS } from '../nav-config.js'
 import logoUrl from '../assets/asp-logo-1.png'
 
 const { t, locale } = useI18n()
 const auth   = useAuthStore()
-const router = useRouter()
+const fire   = useFireStore()
 
 const currentLocale = computed(() => locale.value)
+// Cosmetic only: the router guard is what keeps non-admins off admin routes.
+const visibleNav = computed(() =>
+  NAV_ITEMS.filter(item => !item.adminOnly || auth.user?.role === 'admin'))
 
 function switchLocale(code) { setLocale(code) }
 
-async function handleLogout() {
-  auth.logout()
-  router.push('/login')
-}
+// Open fire alarms must be on screen on every page, so they load with the layout (not with the map).
+// A failure shows as a notice in the banner (alertsFailed); the 45 s resync retries it.
+onMounted(() => { fire.fetchOpenAlerts().catch(() => { /* alertsFailed drives the notice */ }) })
 </script>
 
 <style scoped>

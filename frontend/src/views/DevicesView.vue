@@ -69,6 +69,7 @@
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getDevices, createDevice, updateDevice, deleteDevice, reactivateDevice, permanentDeleteDevice, getUsers } from '../api'
+import { errorText } from '../api/client'
 import { useLocationsStore } from '../stores/locations'
 
 const { t } = useI18n()
@@ -101,11 +102,16 @@ function openForm(d) {
 async function save() {
   formError.value = ''
   try {
-    if (editing.value) await updateDevice(editing.value.id, form.value)
-    else               await createDevice(form.value)
+    if (editing.value) {
+      const reassigned = form.value.user_id !== editing.value.user_id
+      await updateDevice(editing.value.id, form.value)
+      if (reassigned) locationsStore.resetTrail(editing.value.id)
+    } else {
+      await createDevice(form.value)
+    }
     showModal.value = false
     await load()
-  } catch (e) { formError.value = e }
+  } catch (e) { formError.value = errorText(e) }
 }
 
 async function deactivate(d) {

@@ -79,6 +79,8 @@ CREATE TABLE devices (
     name        VARCHAR(255),
     device_type device_type NOT NULL DEFAULT 'bee',
     user_id     UUID        REFERENCES users(id) ON DELETE SET NULL,
+    assigned_at TIMESTAMPTZ,  -- when user_id last changed; bounds trail queries so a
+                               -- reassigned device doesn't show the previous volunteer's history
     is_active   BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -107,7 +109,10 @@ CREATE TABLE location_events (
     battery_voltage  REAL,
     sos_active       BOOLEAN      NOT NULL DEFAULT FALSE,
     repeater_mode    BOOLEAN      NOT NULL DEFAULT FALSE,
-    raw_flags        SMALLINT
+    raw_flags        SMALLINT,
+    -- FALSE = device reported GNSSStatus=V (in radio contact, no satellite fix). The
+    -- position columns then carry the last known fix so the row stays mappable.
+    gnss_valid       BOOLEAN      NOT NULL DEFAULT TRUE
 );
 
 -- ------------------------------------------------------------

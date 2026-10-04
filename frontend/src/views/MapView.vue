@@ -3,6 +3,12 @@
   <div class="map-layout">
     <div ref="mapEl" class="map-container" />
 
+    <!-- The map never goes blank, but it must never claim to be live when it isn't. -->
+    <div v-if="!store.wsConnected" class="stale-feed-banner">
+      <span class="stale-feed-dot" />
+      {{ t('map.feedLost', { time: lastSyncLabel }) }}
+    </div>
+
     <!-- Cursor coordinate readout -->
     <div v-if="cursorCoords && (mgrsGridOn || latLonOn)" class="mgrs-readout">
       <span v-if="mgrsGridOn">{{ cursorCoords.mgrs }}</span>
@@ -41,12 +47,33 @@
       <button :class="['bm-btn', { active: measureOn }]" @click="toggleMeasure">
         {{ t('map.measure') }}
       </button>
-      <button :class="['bm-btn', { active: hqMode }]" @click="toggleHQMode">
+      <button v-if="isAdmin" :class="['bm-btn', { active: hqMode }]" :disabled="!settingsReady" @click="toggleHQMode">
         {{ hqLocation ? t('map.hqMove') : t('map.hqSet') }}
       </button>
-      <button v-if="hqLocation" class="bm-btn bm-btn-danger" @click="clearHQ">
+      <button v-if="isAdmin && hqLocation && !hqClearAsk" class="bm-btn bm-btn-danger" @click="hqClearAsk = true">
         {{ t('map.hqClear') }}
       </button>
+      <span v-if="isAdmin && hqLocation && hqClearAsk" class="bm-hq-confirm" role="alertdialog">
+        <span>{{ t('map.hqClearConfirm') }}</span>
+        <button class="bm-btn bm-btn-danger" @click="clearHQ">{{ t('map.hqClearYes') }}</button>
+        <button class="bm-btn" @click="hqClearAsk = false">{{ t('map.hqClearCancel') }}</button>
+      </span>
+      <span v-if="settingsFailed" class="bm-hq-note" role="status">
+        {{ t('map.settingsUnavailable') }}
+        <button class="bm-btn" @click="loadSettings">{{ t('map.settingsRetry') }}</button>
+      </span>
+      <span v-if="hqError" class="bm-hq-error" role="alert">{{ t('map.hqSaveFailed') }}</span>
+      <button
+        v-for="name in fireLayerButtons" :key="name"
+        :class="['bm-btn', { active: fireStore.layers[name] }]"
+        :aria-pressed="fireStore.layers[name]"
+        :data-layer="name"
+        @click="toggleFire(name)"
+      >{{ t(`fire.layers.${name}`) }}</button>
+      <span v-if="isAdmin && fireStore.layers.zones && fireStore.zonesFailed" class="bm-hq-note" role="status">
+        {{ t('fire.zone.loadFailed') }}
+        <button class="bm-btn" @click="retryZones">{{ t('fire.zone.retry') }}</button>
+      </span>
       <template v-if="activeBasemap === 'satellite'">
         <span class="bm-row-break" />
         <button
@@ -56,6 +83,59 @@
         >{{ t(`map.weather.${wl.id}`) }}</button>
       </template>
     </div>
+
+    <!-- Fire data freshness: always shows its age, and says so when it cannot. -->
+    <div v-if="fireDataLayerOn" class="fire-pill" :class="`fire-${firePill.kind}`" role="status">
+      <i18n-t v-if="firePill.time" keypath="fire.asOf" tag="span" class="fire-pill-main">
+        <template #time><span class="fire-time">{{ firePill.time }}</span></template>
+      </i18n-t>
+      <span v-if="firePill.note" class="fire-pill-note">{{ firePill.note }}</span>
+    </div>
+
+    <!-- Licence attribution (text only: the offline build loads nothing from the network). -->
+    <div v-if="fireDataLayerOn" class="fire-attribution">{{ t('fire.attribution') }}</div>
+
+    <!-- OpenLayers moves this element into its overlay; the popup inside is a Vue component. -->
+    <div ref="firePopupEl" class="fire-popup-anchor">
+      <FirePopup
+        v-if="firePopup"
+        :kind="firePopup.kind"
+        :properties="firePopup.properties"
+        :lon-lat="firePopupLonLat"
+        :is-admin="isAdmin"
+        :busy="fireBusy"
+        :error-text="fireError"
+        @close="closeFirePopup"
+        @dismiss="onPopupDismiss"
+        @extinguish="onPopupExtinguish"
+        @create-zone="onPopupCreateZone"
+      />
+    </div>
+
+    <!-- Right-click / long-press on the map: the only item is "Report fire here". -->
+    <div v-if="ctxMenu" ref="ctxMenuEl" class="map-context" role="menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
+      <button type="button" role="menuitem" class="mc-item" data-testid="report-fire-here" @click="reportFromMenu">
+        {{ t('fire.report.here') }}
+      </button>
+    </div>
+
+    <FieldReportForm
+      v-if="dialog?.kind === 'report'"
+      :target="dialog.target"
+      :busy="dialogBusy"
+      :error-text="dialogError"
+      @submit="submitReport"
+      @cancel="closeDialog"
+    />
+    <SuppressionZoneForm
+      v-if="dialog?.kind === 'zone'"
+      :latitude="dialog.latitude"
+      :longitude="dialog.longitude"
+      :busy="dialogBusy"
+      :error-text="dialogError"
+      @submit="submitZone"
+      @cancel="closeDialog"
+    />
 
     <!-- Measure readout -->
     <div v-if="measureReadout" class="measure-readout">
@@ -75,10 +155,22 @@
     </div>
 
     <!-- Tracker panel -->
-    <aside class="tracker-panel">
+    <aside ref="trackerPanelEl" class="tracker-panel">
       <div class="panel-header">
         <span>{{ t('map.trackers') }} ({{ displayList.length }})</span>
         <span v-if="store.hasSOS" class="badge badge-sos sos-pulse">SOS</span>
+      </div>
+
+      <!-- Devices we've stopped hearing from. Deliberately quiet: no pulse, no sound, no red —
+           this is a "look at this" notice, not the SOS alarm. -->
+      <div v-if="store.silentList.length" class="silence-notice">
+        <span class="silence-dot" />
+        <span class="silence-text">
+          {{ t('map.silenceNotice', { n: store.silentList.length }) }}
+          <template v-if="store.lostList.length">
+            · {{ t('map.silenceLost', { n: store.lostList.length }) }}
+          </template>
+        </span>
       </div>
       <div class="rank-search">
         <input
@@ -91,21 +183,41 @@
 
       <!-- Individual mode -->
       <template v-if="viewMode === 'individuals'">
+        <template v-for="pos in displayList" :key="pos.device_id">
         <div
-          v-for="pos in displayList" :key="pos.device_id"
           class="tracker-row"
-          :class="{ 'tracker-sos': pos.sos_active }"
-          @click="focusDevice(pos)"
+          :class="[`fresh-${freshnessOf(pos, nowTick)}`, { 'tracker-sos': pos.sos_active, 'tracker-selected': selectedDeviceId === pos.device_id }]"
+          :data-device-id="pos.device_id"
+          tabindex="0"
+          role="button"
+          :aria-pressed="selectedDeviceId === pos.device_id"
+          @click="selectDevice(pos)"
+          @keydown.enter.self.prevent="selectDevice(pos)"
+          @keydown.space.self.prevent="selectDevice(pos)"
         >
           <div class="tracker-dot" :style="{ background: pos.groups?.[0]?.color ?? '#3b82f6' }" />
           <div class="tracker-info">
             <div class="tracker-name">{{ pos.full_name || pos.device_name || pos.dev_sn }}</div>
-            <div class="tracker-mgrs">{{ pos.mgrs }}</div>
+            <div class="tracker-mgrs">
+              {{ pos.mgrs }}
+              <span v-if="pos.gnss_valid === false" class="no-fix-tag">{{ t('map.noFix') }}</span>
+            </div>
           </div>
-          <div class="tracker-bat" :class="batClass(pos.battery_voltage)">
-            {{ pos.battery_voltage?.toFixed(1) ?? '—' }}V
+          <div class="tracker-meta">
+            <div class="tracker-age" :class="`age-${freshnessOf(pos, nowTick)}`">
+              {{ formatAge(ageMs(pos, nowTick)) }}
+            </div>
+            <div class="tracker-bat" :class="batClass(pos.battery_voltage)">
+              {{ pos.battery_voltage?.toFixed(1) ?? '—' }}V
+            </div>
           </div>
         </div>
+        <div v-if="selectedDeviceId === pos.device_id" class="tracker-actions">
+          <button type="button" class="tracker-report" data-testid="report-fire-row" @click="reportFromRow(pos)">
+            {{ t('fire.report.atPosition') }}
+          </button>
+        </div>
+        </template>
         <div v-if="!displayList.length" class="no-trackers">{{ t('map.noTrackers') }}</div>
       </template>
 
@@ -116,7 +228,13 @@
             <span class="group-section-dot" :style="{ background: group.color }" />
             {{ group.name }}
           </div>
-          <div v-if="group.leader" class="tracker-row tracker-leader" @click="focusDevice(group.leader)">
+          <div v-if="group.leader" class="tracker-row tracker-leader"
+               :class="{ 'tracker-selected': selectedDeviceId === group.leader.device_id }"
+               :data-device-id="group.leader.device_id" tabindex="0" role="button"
+               :aria-pressed="selectedDeviceId === group.leader.device_id"
+               @click="selectDevice(group.leader)"
+               @keydown.enter.self.prevent="selectDevice(group.leader)"
+               @keydown.space.self.prevent="selectDevice(group.leader)">
             <div class="tracker-dot" :style="{ background: group.color }" />
             <div class="tracker-info">
               <div class="tracker-name">
@@ -128,7 +246,12 @@
               {{ group.leader.battery_voltage?.toFixed(1) ?? '—' }}V
             </div>
           </div>
-          <div v-else class="no-leader">{{ t('map.noLeader') }}</div>
+          <div v-if="group.leader && selectedDeviceId === group.leader.device_id" class="tracker-actions">
+            <button type="button" class="tracker-report" data-testid="report-fire-row" @click="reportFromRow(group.leader)">
+              {{ t('fire.report.atPosition') }}
+            </button>
+          </div>
+          <div v-if="!group.leader" class="no-leader">{{ t('map.noLeader') }}</div>
         </template>
         <div v-if="!groupsWithLeaders.length" class="no-trackers">{{ t('map.noTrackers') }}</div>
       </template>
@@ -163,16 +286,26 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 
 defineOptions({ name: 'MapView' })
 import { useI18n } from 'vue-i18n'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import Overlay from 'ol/Overlay'
 import { useLocationsStore } from '../stores/locations'
+import { useFireStore } from '../stores/fire'
+import { useAuthStore } from '../stores/auth'
+import { useSettingsStore } from '../stores/settings'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useMap, BASEMAPS } from '../composables/useMap'
 import { getGroupsWithMembers, getSerialStatus } from '../api'
+import { ageMs, contactAt, formatAge, freshnessOf, byUrgency } from '../lib/freshness'
+import { firePillState } from '../lib/fireStyle'
 import SOSToast from '../components/SOSToast.vue'
+import FirePopup from '../components/FirePopup.vue'
+import FieldReportForm from '../components/FieldReportForm.vue'
+import SuppressionZoneForm from '../components/SuppressionZoneForm.vue'
+import { fireErrorKey } from '../lib/fireErrors'
 
 const OWM_KEY = import.meta.env.VITE_OWM_API_KEY ?? ''
 const WEATHER_LAYERS = [
@@ -198,8 +331,11 @@ const WEATHER_LAYERS = [
   },
 ]
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const store   = useLocationsStore()
+const fireStore = useFireStore()
+const authStore = useAuthStore()
+const settingsStore = useSettingsStore()
 const mapEl   = ref(null)
 
 const activeBasemap  = ref('osm')
@@ -219,10 +355,27 @@ const rankFilter     = ref('')
 // id -> { id, name, color, members: [{id, full_name, rank, is_leader}] }
 const groupsMap      = ref({})
 
+// Drives every relative age in the panel. Without it the ages would only refresh when some
+// other device happens to report, so a panel full of silent trackers would freeze its own
+// clock — exactly when the ages matter most.
+const nowTick = ref(Date.now())
+let tickTimer = null
+
+const lastSyncLabel = computed(() => {
+  if (!store.lastSyncAt) return '—'
+  return new Date(store.lastSyncAt).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+})
+
 const rankFiltered = computed(() => {
   const q = rankFilter.value.trim().toLowerCase()
-  if (!q) return store.positionList
-  return store.positionList.filter(pos => pos.rank?.toLowerCase().includes(q))
+  const list = !q
+    ? store.positionList
+    : store.positionList.filter(pos => pos.rank?.toLowerCase().includes(q))
+  // Worst-first: SOS, then longest out of contact. What needs attention surfaces itself
+  // rather than waiting to be scrolled to.
+  return [...list].sort((a, b) => byUrgency(a, b, nowTick.value))
 })
 
 // In teams mode show only leaders, labelled by team name
@@ -248,21 +401,42 @@ const groupsWithLeaders = computed(() => {
   return Object.values(groupMap).sort((a, b) => a.name.localeCompare(b.name))
 })
 
-const HQ_STORAGE_KEY = 'bwm.hq'
-const hqLocation = ref(loadHQ())
+// HQ lives in the database (settings store); only an admin can place or clear it.
+const isAdmin    = computed(() => authStore.user?.role === 'admin')
+const hqLocation = computed(() => settingsStore.hq)
 const hqMode     = ref(false)
+const hqError    = ref(false)
+const hqClearAsk = ref(false)       // the Clear HQ confirmation is showing
+const settingsFailed = ref(false)   // settings could not be loaded: HQ is unknown, not absent
+const settingsReady  = computed(() => !!settingsStore.settings)
 
-function loadHQ() {
+async function loadSettings() {
+  settingsFailed.value = false
   try {
-    const raw = localStorage.getItem(HQ_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    if (typeof parsed?.lat !== 'number' || typeof parsed?.lon !== 'number') return null
-    return parsed
-  } catch { return null }
+    await settingsStore.fetchSettings()
+  } catch {
+    settingsFailed.value = true
+    return
+  }
+  await settingsStore.migrateLocalHQ()   // handles role and failures itself
 }
 
-const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode } = useMap(
+// Only the latest call may set or clear the error: a slow failure of an earlier click must not
+// show "Could not save HQ" over a newer click that succeeded (the store already serialises the
+// writes, so the latest call also finishes last).
+let hqCall = 0
+async function saveHQ(action) {
+  const mine = ++hqCall
+  hqError.value = false
+  try {
+    await action()
+    if (mine === hqCall) hqError.value = false
+  } catch {
+    if (mine === hqCall) hqError.value = true
+  }
+}
+
+const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick, setZones, onTrackerClick, onMapContextMenu } = useMap(
   mapEl,
   displayList,
   computed(() => store.trails),
@@ -270,13 +444,265 @@ const { map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpo
   (data)   => { measureReadout.value = data },
   groupsMap,
   (coords) => {
-    hqLocation.value = coords
-    localStorage.setItem(HQ_STORAGE_KEY, JSON.stringify(coords))
     hqMode.value = false
     setHQPlacementMode(false)
+    saveHQ(() => settingsStore.setHQ(coords.lat, coords.lon))
   },
+  computed(() => settingsStore.photosOnMap),
 )
 const { connect } = useWebSocket()
+
+// ── Fire layers ──────────────────────────────────────────────────────────────
+const FIRE_LAYER_BUTTONS = ['burnt', 'hotspots', 'zones']
+// Suppression zones are an admin tool: the button, the circles and the zone fetch are admin-only.
+const fireLayerButtons = computed(() => FIRE_LAYER_BUTTONS.filter(n => n !== 'zones' || isAdmin.value))
+// The freshness pill and the licence line describe EFFIS data; zones are our own and need neither.
+const fireDataLayerOn = computed(() => fireStore.layers.burnt || fireStore.layers.hotspots)
+const firePopupEl = ref(null)
+const firePopup   = ref(null)   // { kind, properties, coordinate } | null
+let   fireOverlay = null
+let   fireMap = null
+
+function toggleFire(name) {
+  const on = !fireStore.layers[name]
+  setFireLayerVisible(name, on)
+  if (!on && firePopup.value && name !== 'zones' && (name === 'hotspots') === (firePopup.value.kind === 'hotspot')) closeFirePopup()
+  fireStore.setLayer(name, on).catch(() => { /* fetchFailed / zonesFailed drive the notices */ })
+}
+
+// A new report or zone must be visible where it was just made: switch its layer on if it is off.
+function ensureLayer(name) { if (!fireStore.layers[name]) toggleFire(name) }
+
+function retryZones() { fireStore.fetchZones().catch(() => { /* zonesFailed shows the note */ }) }
+
+// The overlay coordinate is in the map projection (EPSG:3857); the popup wants WGS84.
+const firePopupLonLat = computed(() => {
+  const c = firePopup.value?.coordinate
+  return Array.isArray(c) ? toLonLat(c) : null
+})
+
+function closeFirePopup() {
+  firePopup.value = null
+  fireError.value = ''
+  fireOverlay?.setPosition(undefined)
+}
+
+// ── Popup actions (admin: dismiss, create zone; anyone: extinguish a field report) ──────────
+const fireBusy  = ref(false)
+const fireError = ref('')
+
+// Only one popup action runs at a time. The server answers with the changed row; the popup then
+// shows that row (state chip, notes) instead of the copy it was opened with.
+async function runPopupAction(id, action) {
+  if (fireBusy.value) return
+  fireBusy.value = true
+  fireError.value = ''
+  try {
+    await action()
+    syncPopup(id)
+  } catch (err) {
+    if (firePopup.value?.properties?.id === id) fireError.value = t(fireErrorKey(err))
+  } finally {
+    fireBusy.value = false
+  }
+}
+
+function syncPopup(id) {
+  if (firePopup.value?.properties?.id !== id) return
+  const next = fireStore.hotspots.features.find(f => f.id === id)
+  if (next) firePopup.value = { ...firePopup.value, properties: { ...next.properties } }
+}
+
+const onPopupDismiss    = ({ id, notes }) => runPopupAction(id, () => fireStore.dismissHotspot(id, notes))
+const onPopupExtinguish = ({ id }) => runPopupAction(id, () => fireStore.extinguish(id))
+function onPopupCreateZone() {
+  const ll = firePopupLonLat.value
+  if (!ll) return
+  openDialog({ kind: 'zone', latitude: ll[1], longitude: ll[0] })
+  closeFirePopup()
+}
+
+// ── Dialogs: field report, suppression zone (one at a time) ──────────────────────────────────
+const dialog      = ref(null)   // { kind: 'report', target } | { kind: 'zone', latitude, longitude } | null
+const dialogBusy  = ref(false)
+const dialogError = ref('')
+let   dialogSeq   = 0
+
+function openDialog(next) {
+  closeContextMenu()
+  dialogSeq++
+  dialogBusy.value = false
+  dialogError.value = ''
+  dialog.value = next
+}
+function closeDialog() {
+  dialogSeq++
+  dialog.value = null
+  dialogBusy.value = false
+  dialogError.value = ''
+}
+
+// Runs a write for the open dialog. A dialog that was closed or replaced while the request was
+// in flight takes neither the result nor the error.
+async function runDialogAction(action, context) {
+  if (dialogBusy.value) return false
+  const mine = ++dialogSeq
+  dialogBusy.value = true
+  dialogError.value = ''
+  try {
+    await action()
+    if (mine === dialogSeq) closeDialog()
+    return true
+  } catch (err) {
+    if (mine === dialogSeq) { dialogError.value = t(fireErrorKey(err, context)); dialogBusy.value = false }
+  }
+  return false
+}
+
+async function submitReport({ notes }) {
+  const target = dialog.value?.target
+  if (!target) return
+  if (target.noPosition) return
+  const body = { latitude: target.latitude, longitude: target.longitude, notes }
+  // A 404 here means the running backend lacks the field-report endpoint (older than T18).
+  if (await runDialogAction(() => fireStore.reportFire(body), 'report')) ensureLayer('hotspots')
+}
+
+async function submitZone(values) {
+  const d = dialog.value
+  if (d?.kind !== 'zone') return
+  const body = { ...values, latitude: d.latitude, longitude: d.longitude }
+  if (await runDialogAction(() => fireStore.createZone(body))) ensureLayer('zones')
+}
+
+// ── Volunteer selection and "Report fire at this position" ───────────────────────────────────
+// Selecting a volunteer (panel row, or their marker on the map) reveals the action under their row.
+const selectedDeviceId = ref(null)
+
+function selectDevice(pos) {
+  selectedDeviceId.value = pos.device_id
+  focusDevice(pos)
+}
+
+// The position is frozen here, at the click: the volunteer keeps moving while the operator types,
+// and what the form shows is exactly what is sent. No position, or none from the last 24 h
+// (judged on received_at, the server clock), means nothing can be reported.
+const REPORT_MAX_AGE_MS = 24 * 3_600_000
+function reportFromRow(pos) {
+  const live = store.positions[pos.device_id] ?? null
+  const name = pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+  const age = live ? ageMs(live) : null
+  const lat = Number(live?.latitude), lon = Number(live?.longitude)
+  const usable = !!live && live.latitude != null && live.longitude != null
+    && Number.isFinite(lat) && Number.isFinite(lon) && age != null && age <= REPORT_MAX_AGE_MS
+  openDialog({
+    kind: 'report',
+    target: usable
+      ? { name, latitude: lat, longitude: lon, mgrs: live.mgrs ?? '', receivedAt: contactAt(live), gnssValid: live.gnss_valid }
+      : { name, noPosition: true },
+  })
+}
+
+// A marker click selects that volunteer's row and brings it into view; bare map deselects.
+const trackerPanelEl = ref(null)
+async function onMarkerClick(deviceId) {
+  selectedDeviceId.value = deviceId
+  if (!deviceId) return
+  await nextTick()
+  const row = [...(trackerPanelEl.value?.querySelectorAll('[data-device-id]') ?? [])].find(el => el.dataset.deviceId === deviceId)
+  row?.scrollIntoView?.({ block: 'nearest' })
+}
+// A volunteer who left the list cannot stay selected.
+watch(displayList, (list) => {
+  if (selectedDeviceId.value && !list.some(p => p.device_id === selectedDeviceId.value)) selectedDeviceId.value = null
+})
+
+// ── Right-click / long-press: "Report fire here" ─────────────────────────────────────────────
+const ctxMenu   = ref(null)   // { x, y, coordinate } | null
+const ctxMenuEl = ref(null)
+
+function closeContextMenu() {
+  if (!ctxMenu.value) return
+  ctxMenu.value = null
+  document.removeEventListener('pointerdown', onOutsidePointer, true)
+  document.removeEventListener('keydown', onMenuKey, true)
+}
+function onOutsidePointer(e) { if (!ctxMenuEl.value?.contains(e.target)) closeContextMenu() }
+function onMenuKey(e) { if (e.key === 'Escape') closeContextMenu() }
+
+async function openContextMenu({ coordinate, pixel }) {
+  const width = mapEl.value?.clientWidth ?? 0
+  const height = mapEl.value?.clientHeight ?? 0
+  // Keep the menu inside the map (about 190 x 44 px).
+  const x = Math.max(4, Math.min(pixel[0], width ? width - 196 : pixel[0]))
+  const y = Math.max(4, Math.min(pixel[1], height ? height - 52 : pixel[1]))
+  const first = !ctxMenu.value
+  ctxMenu.value = { x, y, coordinate }
+  if (first) {
+    document.addEventListener('pointerdown', onOutsidePointer, true)
+    document.addEventListener('keydown', onMenuKey, true)
+  }
+  await nextTick()
+  ctxMenuEl.value?.querySelector('button')?.focus()
+}
+
+function reportFromMenu() {
+  const c = ctxMenu.value?.coordinate
+  if (!c) return
+  const [lon, lat] = toLonLat(c)
+  openDialog({ kind: 'report', target: { latitude: lat, longitude: lon } })
+}
+
+// What the pill says; the priority rules live in lib/fireStyle.js (firePillState).
+const firePill = computed(() => {
+  const at = fireStore.shownFetchedAt
+  const time = at
+    ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
+  const state = firePillState({
+    at, upstreamState: fireStore.shownUpstreamState, failed: fireStore.fetchFailed, nowMs: nowTick.value,
+  })
+  return { kind: state.kind, time, note: state.noteKey ? t(state.noteKey) : '' }
+})
+
+onMounted(() => {
+  const m = map()
+  if (!m) return
+  const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  fireOverlay = new Overlay({
+    element: firePopupEl.value,
+    positioning: 'bottom-center',
+    offset: [0, -16],
+    stopEvent: true,
+    autoPan: { animation: { duration: reduce ? 0 : 200 }, margin: 24 },
+  })
+  fireMap = m
+  m.addOverlay(fireOverlay)
+  onFireFeatureClick(async (sel) => {
+    fireError.value = ''
+    firePopup.value = sel
+    // The popup has no size until Vue renders it; position after that so OpenLayers
+    // anchors it by its real width and height.
+    await nextTick()
+    fireOverlay.setPosition(sel ? sel.coordinate : undefined)
+  })
+  setFireLabels({ fieldReport: t('fire.source.field_report') })
+  // Layers remembered from the last session show again after a reload.
+  for (const name of FIRE_LAYER_BUTTONS) setFireLayerVisible(name, fireStore.layers[name] && (name !== 'zones' || isAdmin.value))
+  fireStore.refreshVisible().catch(() => { /* fetchFailed drives the pill */ })
+  if (isAdmin.value && fireStore.layers.zones) retryZones()
+})
+
+// immediate: a remounted MapView shows what the store already holds even if its own first
+// refresh fails.
+watch(() => fireStore.hotspots,   (fc) => { if (!setHotspots(fc))   fireStore.markFeedFailed('hotspots') }, { immediate: true })
+watch(() => fireStore.burntAreas, (fc) => { if (!setBurntAreas(fc)) fireStore.markFeedFailed('burnt') },    { immediate: true })
+watch(locale, () => setFireLabels({ fieldReport: t('fire.source.field_report') }))
+// Only active zones are drawn; Settings may have loaded disabled ones into the same list.
+watch(() => fireStore.zones, (list) => setZones(list.filter(z => z.is_active)), { immediate: true })
+
+onTrackerClick(onMarkerClick)
+onMapContextMenu(openContextMenu)
 
 onMounted(async () => {
   await Promise.all([store.fetchLive(), store.fetchSOS(), store.fetchTrail()])
@@ -290,16 +716,32 @@ onMounted(async () => {
   const m = map()
   if (m) m.on('moveend', scheduleWeatherFetch)
 
-  if (hqLocation.value) setHQ(hqLocation.value)
+  // HQ comes from the database. A failure shows an amber note with a retry; the map and live
+  // data do not depend on it.
+  await loadSettings()
+
+  tickTimer = setInterval(() => { nowTick.value = Date.now() }, 10_000)
 })
 
-watch(hqLocation, (loc) => setHQ(loc))
+// Redraw only when the point moves, not on every settings save.
+watch(hqLocation, (v) => { if (!v) hqClearAsk.value = false })
+watch(() => hqLocation.value && `${hqLocation.value.lat},${hqLocation.value.lon}`,
+  () => setHQ(hqLocation.value), { immediate: true })
 
 onUnmounted(() => {
   clearTimeout(weatherTimer)
+  clearInterval(tickTimer)
   stopWindAnim()
   const m = map()
   if (m) m.un('moveend', scheduleWeatherFetch)
+  // The popup overlay belongs to this view; do not leave it on a map that outlives it.
+  onFireFeatureClick(null)
+  onTrackerClick(null)
+  onMapContextMenu(null)
+  closeContextMenu()
+  if (fireOverlay) fireMap?.removeOverlay(fireOverlay)
+  fireOverlay = null
+  fireMap = null
 })
 
 function switchBasemap(id) {
@@ -350,8 +792,8 @@ function toggleHQMode() {
   setHQPlacementMode(hqMode.value)
 }
 function clearHQ() {
-  hqLocation.value = null
-  localStorage.removeItem(HQ_STORAGE_KEY)
+  hqClearAsk.value = false
+  saveHQ(() => settingsStore.clearHQ())
   if (hqMode.value) {
     hqMode.value = false
     setHQPlacementMode(false)
@@ -581,6 +1023,22 @@ watch(weatherLayerId, async (id) => {
     fetchWindField()
   }
 })
+// "Show on map" from a fire alarm (FireAlarmBanner). The view is kept alive, so a request can
+// land while it is hidden: it waits until the map is on screen, then centres once and is cleared.
+const mapActive = ref(false)
+function consumeFireFocus() {
+  const req = fireStore.focusRequest
+  const m = map()
+  if (!req || !m || !mapActive.value) return
+  fireStore.clearFocusRequest()
+  const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  m.updateSize()
+  m.getView().animate({ center: fromLonLat([req.longitude, req.latitude]), zoom: 12, duration: reduce ? 0 : 500 })
+}
+watch(() => fireStore.focusRequest, consumeFireFocus)
+onActivated(() => { mapActive.value = true; nextTick(consumeFireFocus) })
+onDeactivated(() => { mapActive.value = false })
+
 function focusDevice(pos) {
   const m = map()
   if (m) m.getView().animate({ center: fromLonLat([pos.longitude, pos.latitude]), zoom: 13, duration: 500 })
@@ -633,7 +1091,41 @@ function batClass(v) {
 .bm-btn-weather.active { background: #0369a1; border-color: #0369a1; }
 .bm-btn-danger { color: #f87171; border-color: rgba(248,113,113,0.35); }
 .bm-btn-danger:hover { background: rgba(248,113,113,0.1); color: #fca5a5; }
+.bm-hq-error { font-size: 12px; color: var(--warning); align-self: center; }
+.bm-hq-confirm, .bm-hq-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; align-self: center; }
+.bm-hq-confirm { color: var(--text); }
+.bm-hq-note { color: var(--warning); }
+.bm-btn:disabled { opacity: .45; cursor: not-allowed; }
 .bm-row-break { flex-basis: 100%; height: 0; }
+
+/* Fire data freshness. Neutral when live, muted when quiet or unknown, amber (never red)
+   when stale or failed: red is reserved for alarms. */
+.fire-pill {
+  position: absolute; top: 48px; left: 12px; z-index: 50;
+  display: flex; flex-direction: column; gap: 2px;
+  max-width: 300px; padding: 5px 10px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 4px; font-size: 12px; color: var(--text);
+}
+.fire-pill-main { font-weight: 600; }
+.fire-time { font-family: monospace; font-variant-numeric: tabular-nums; }
+.fire-pill-note { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
+.fire-unknown .fire-pill-main, .fire-quiet .fire-pill-main { color: var(--text-muted); }
+.fire-error {
+  border-color: var(--warning-line);
+  background: linear-gradient(var(--warning-wash), var(--warning-wash)), var(--bg-panel);
+}
+.fire-error .fire-pill-main, .fire-error .fire-pill-note { color: var(--warning); }
+
+.fire-attribution {
+  position: absolute; bottom: 8px; left: 12px; z-index: 50;
+  max-width: max(calc(100% - 300px), 200px); padding: 2px 6px;
+  background: rgba(15,17,23,.78); border-radius: 3px;
+  font-size: 10.5px; line-height: 1.35; color: var(--text-muted);
+  pointer-events: none;
+}
+/* Not positioned: OpenLayers sizes its overlay container from this element. */
+.fire-popup-anchor { display: block; }
 
 .tracker-panel {
   width: 260px; background: var(--bg-panel); border-left: 1px solid var(--border);
@@ -652,6 +1144,111 @@ function batClass(v) {
 .tracker-row:hover { background: var(--bg-card); }
 .tracker-sos    { border-left: 3px solid var(--danger); }
 .tracker-leader { background: rgba(255,200,0,0.04); }
+/* Freshness: the row dims as contact ages, so a silent tracker reads differently from a
+   live one even before you look at the age figure. */
+.tracker-row.fresh-stale .tracker-name,
+.tracker-row.fresh-stale .tracker-mgrs { opacity: .72; }
+.tracker-row.fresh-lost  .tracker-name,
+.tracker-row.fresh-lost  .tracker-mgrs { opacity: .45; }
+.tracker-row.fresh-stale { border-left: 3px solid rgba(234,179,8,.55); }
+.tracker-row.fresh-lost  { border-left: 3px solid rgba(156,163,175,.5); }
+.tracker-row.tracker-sos { border-left: 3px solid var(--danger); }
+
+/* Selected volunteer: Signal Blue hairline (outline, not a side stripe) on the raised ground, and the
+   report action underneath. */
+.tracker-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tracker-row.tracker-selected { background: var(--bg-card); outline: 1px solid var(--accent); outline-offset: -1px; }
+.tracker-actions { padding: 8px 14px 10px; background: var(--bg-card); border-bottom: 1px solid var(--border); }
+.tracker-report {
+  width: 100%; min-height: 34px; padding: 6px 10px; font-size: 12.5px; font-weight: 600; line-height: 1.3;
+  background: var(--bg-panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px;
+}
+.tracker-report:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .tracker-report:hover { background: var(--accent); color: #fff; opacity: 1; } }
+
+.map-context {
+  position: absolute; z-index: 65; min-width: 180px; padding: 4px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .55);
+}
+.mc-item {
+  display: block; width: 100%; text-align: left; padding: 9px 12px; min-height: 36px;
+  background: transparent; color: var(--text); font-size: 13px; font-weight: 600; border-radius: 6px;
+}
+.mc-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-card); }
+@media (hover: hover) and (pointer: fine) { .mc-item:hover { background: var(--bg-card); opacity: 1; } }
+
+.tracker-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.tracker-age {
+  font-size: 11px;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  min-width: 34px;
+  text-align: right;
+}
+.age-stale { color: #eab308; font-weight: 600; }
+.age-lost  { color: var(--danger); font-weight: 600; }
+
+.no-fix-tag {
+  font-family: system-ui;
+  font-size: 9.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #facc15;
+  border: 1px solid rgba(250,204,21,.5);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
+/* Quiet by design — this is not the SOS alarm and must not read like one. */
+.silence-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(234,179,8,.09);
+  border-top: 1px solid rgba(234,179,8,.25);
+  border-bottom: 1px solid rgba(234,179,8,.25);
+  font-size: 12px;
+  color: #eab308;
+}
+.silence-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #eab308; flex-shrink: 0;
+}
+.silence-text { line-height: 1.35; }
+
+.stale-feed-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 15px;
+  border-radius: 20px;
+  background: rgba(120,53,15,.94);
+  border: 1px solid rgba(234,179,8,.5);
+  color: #fde68a;
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 3px 14px rgba(0,0,0,.4);
+}
+.stale-feed-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #eab308; flex-shrink: 0;
+  animation: feed-blink 1.6s ease-in-out infinite;
+}
+@keyframes feed-blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .stale-feed-dot { animation: none; }
+}
+
 .tracker-dot  { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 .tracker-info { flex: 1; min-width: 0; }
 .tracker-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

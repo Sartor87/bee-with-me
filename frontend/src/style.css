@@ -10,7 +10,26 @@
   --accent:    #3b82f6;
   --danger:    #ef4444;
   --warning:   #f59e0b;
+  /* Amber tint and edge for stale/unavailable notices (the fire pill). */
+  --warning-wash: rgba(245, 158, 11, .16);
+  --warning-line: rgba(245, 158, 11, .5);
   --success:   #22c55e;
+  /* Fire layers. Hotspot crimson is a detection signal, not an alarm: SOS/fire alarms keep
+     --danger. Only about 2.8:1 on --bg, so hotspot markers always carry a light ring (see
+     makeHotspotStyle in useMap.js). Ash is history. Inactive is dismissed / suppressed /
+     extinguished. */
+  --fire-hotspot:  #ad1e57;
+  --fire-burnt:    #a8a29e;
+  --fire-inactive: #8892aa;
+  /* Fire ALARM (fire near people), its own family so it is never read as SOS: ember ground,
+     orange edge and flame, warm white text, dark ink on the light acknowledge button. Used only
+     by FireAlarmBanner. Distinct from --danger (SOS), --warning (stale amber) and --fire-hotspot
+     (a detection, not an alarm). Contrast: text on ground 14:1, orange on ground 6:1, ink on
+     warm white 15:1. */
+  --fire-alarm:        #ff6a1f;
+  --fire-alarm-ground: #2b1205;
+  --fire-alarm-text:   #ffe8d6;
+  --fire-alarm-ink:    #1c0b03;
   --sidebar-w: 280px;
 }
 
@@ -67,3 +86,57 @@ tr:hover td { background: var(--bg-card); }
   50%       { opacity: .4; }
 }
 .sos-pulse { animation: sos-pulse 1s ease-in-out infinite; }
+
+/* Map dialogs (field report, suppression zone): a small panel over the map, not a modal, so live
+   positions and alarms stay visible and clickable behind it. Plain panel tokens, no glow; the
+   map area is the page minus the 260px tracker panel. */
+.map-dialog {
+  position: absolute; top: 64px; left: calc((100% - 260px) / 2); transform: translateX(-50%); z-index: 70;
+  width: min(360px, calc(100% - 24px)); max-height: calc(100% - 96px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px; padding: 14px 16px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .55); color: var(--text); font-size: 13px;
+}
+.md-title { font-size: 14px; font-weight: 700; }
+.md-facts { display: flex; flex-direction: column; gap: 4px; }
+.md-fact { display: grid; grid-template-columns: 78px 1fr; gap: 8px; }
+.md-fact dt, .md-fact-label { color: var(--text-muted); font-size: 12px; }
+.md-fact dd { min-width: 0; overflow-wrap: anywhere; }
+.md-point { display: grid; grid-template-columns: 78px 1fr; gap: 8px; }
+.md-mono { font-family: monospace; font-variant-numeric: tabular-nums; font-weight: 600; }
+.md-sub { display: block; color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.md-hint { font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+.md-field { position: relative; }
+.md-field label { font-size: 12px; margin-bottom: 4px; }
+.md-field textarea { resize: vertical; min-height: 64px; max-height: 140px; font: inherit; font-size: 13px; padding: 6px 8px; }
+.md-field textarea:focus { border-color: var(--accent); }
+.md-with-unit { display: flex; align-items: center; gap: 8px; }
+.md-with-unit input { font-family: ui-monospace, monospace; font-weight: 600; }
+.md-unit { font-size: 13px; color: var(--text-muted); }
+.md-count { display: block; text-align: right; font-size: 11px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
+.md-count-near { color: var(--warning); }
+.md-field-error { min-height: 16px; margin-top: 3px; font-size: 12px; color: var(--warning); }
+.md-field input[aria-invalid="true"] { border-color: var(--warning); }
+.md-warn { font-size: 12px; color: var(--warning); line-height: 1.4; }
+.md-error { font-size: 12px; color: var(--warning); line-height: 1.4; }
+.md-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.map-dialog button:disabled, .zone-inline button:disabled { opacity: .45; cursor: not-allowed; }
+.map-dialog button:focus-visible, .zone-inline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Volunteer photo in the map hover tooltip (built in lib/trackerTooltip.js). Red ring is SOS only;
+   stale or lost is dimmed like the marker. No glow. */
+.tt-row { display: flex; align-items: flex-start; gap: 10px; }
+.tt-photo {
+  flex: none;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  background: var(--bg-card);
+}
+.tt-photo--sos   { border: 4px solid var(--danger); }
+.tt-photo--stale { filter: grayscale(1); opacity: .55; }
+/* SOS that went quiet: red ring stays on the wrapper, the photo inside is dimmed with a grey inner edge. */
+.tt-photo-ring { flex: none; display: block; border: 4px solid var(--danger); border-radius: 16px; line-height: 0; }
+.tt-photo-ring .tt-photo { border: 2px solid var(--text-muted); border-radius: 12px; }

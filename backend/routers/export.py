@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+from html import escape
 from datetime import datetime
 from uuid import UUID
 
@@ -103,6 +104,88 @@ async def export_geojson(
     )
 
 
+_EMPTY = '—'
+
+
+def _cell(value) -> str:
+    """Escape one value for the report HTML; None and '' render as an em dash."""
+    if value is None or value == '':
+        return _EMPTY
+    return escape(str(value), quote=True)
+
+
+def refuse_url_fetch(url: str, *args, **kwargs):
+    """WeasyPrint url_fetcher that refuses every URL.
+
+    The report needs no images, fonts or stylesheets, and the names in it come from user input
+    (XLS import): without this, an <img src="file:///…"> in a name would be fetched while rendering.
+    """
+    raise ValueError(f'External resources are disabled in PDF export: {url!r}')
+
+
+def make_refusing_url_fetcher():
+    """A ``weasyprint.urls.URLFetcher`` (WeasyPrint 70.x) that refuses every URL.
+
+    WeasyPrint 70 calls ``url_fetcher(url)`` and, when that raises, reads
+    ``url_fetcher._fail_on_errors`` — a bare function has no such attribute, so the export
+    failed with a 500 as soon as any fetch was attempted. A subclass keeps that contract:
+    ``fetch()`` (which ``__call__`` and ``open()`` both route through) always raises, and
+    ``allowed_protocols=()`` refuses every scheme even if a future version bypassed it.
+    A refused resource is logged by WeasyPrint and skipped; the PDF still renders.
+
+    WeasyPrint is imported here, not at module level, so a missing GTK/Pango runtime only
+    breaks PDF export.
+    """
+    from weasyprint.urls import URLFetcher
+
+    class _RefusingURLFetcher(URLFetcher):
+        def __init__(self):
+            super().__init__(allowed_protocols=(), allow_redirects=False, fail_on_errors=False)
+
+        def fetch(self, url, headers=None):
+            refuse_url_fetch(url)
+
+    return _RefusingURLFetcher()
+
+
+def build_report_html(rows: list[dict], period: str) -> str:
+    rows_html = ''.join(
+        '<tr>'
+        f'<td>{_cell(r.get("full_name"))}</td>'
+        f'<td>{_cell(r.get("rank"))}</td>'
+        f'<td>{_cell(r.get("groups"))}</td>'
+        f'<td>{_cell(r.get("mgrs"))}</td>'
+        f'<td>{_cell(r.get("altitude_m"))}</td>'
+        f'<td>{_cell(r.get("speed_knots"))}</td>'
+        f'<td>{_cell(r.get("battery_voltage"))}</td>'
+        f'<td>{"YES" if r.get("sos_active") else ""}</td>'
+        f'<td>{_cell(r.get("recorded_at"))}</td>'
+        '</tr>'
+        for r in rows
+    )
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ font-family: sans-serif; font-size: 9px; margin: 1cm; }}
+  h1 {{ font-size: 14px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #ccc; padding: 3px 5px; text-align: left; }}
+  th {{ background: #2c3e50; color: white; }}
+  tr:nth-child(even) {{ background: #f5f5f5; }}
+</style>
+</head><body>
+<h1>Rescuer Locator — Location Report</h1>
+<p>Period: {_cell(period)} | Total records: {len(rows)}</p>
+<table>
+  <thead><tr>
+    <th>Name</th><th>Rank</th><th>Groups</th><th>MGRS</th>
+    <th>Alt (m)</th><th>Speed (kn)</th><th>Battery</th><th>SOS</th><th>Time (UTC)</th>
+  </tr></thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</body></html>"""
+
+
 @router.get('/pdf')
 async def export_pdf(
     conn: asyncpg.Connection = Depends(get_conn),
@@ -115,47 +198,8 @@ async def export_pdf(
     from weasyprint import HTML
 
     rows = await _fetch_rows(conn, from_dt, to_dt, group_id, user_id)
-
     period = f"{from_dt or 'all'} → {to_dt or 'now'}"
-    rows_html = ''.join(
-        f"""<tr>
-            <td>{r.get('full_name','—')}</td>
-            <td>{r.get('rank','—')}</td>
-            <td>{r.get('groups','—')}</td>
-            <td>{r['mgrs']}</td>
-            <td>{r.get('altitude_m','—')}</td>
-            <td>{r.get('speed_knots','—')}</td>
-            <td>{r.get('battery_voltage','—')}</td>
-            <td>{'YES' if r.get('sos_active') else ''}</td>
-            <td>{r['recorded_at']}</td>
-        </tr>"""
-        for r in rows
-    )
-
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  body {{ font-family: sans-serif; font-size: 9px; margin: 1cm; }}
-  h1 {{ font-size: 14px; }}
-  table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ border: 1px solid #ccc; padding: 3px 5px; text-align: left; }}
-  th {{ background: #2c3e50; color: white; }}
-  tr:nth-child(even) {{ background: #f5f5f5; }}
-  .sos {{ color: red; font-weight: bold; }}
-</style>
-</head><body>
-<h1>Rescuer Locator — Location Report</h1>
-<p>Period: {period} | Total records: {len(rows)}</p>
-<table>
-  <thead><tr>
-    <th>Name</th><th>Rank</th><th>Groups</th><th>MGRS</th>
-    <th>Alt (m)</th><th>Speed (kn)</th><th>Battery</th><th>SOS</th><th>Time (UTC)</th>
-  </tr></thead>
-  <tbody>{rows_html}</tbody>
-</table>
-</body></html>"""
-
-    pdf = HTML(string=html).write_pdf()
+    pdf = HTML(string=build_report_html(rows, period), url_fetcher=make_refusing_url_fetcher()).write_pdf()
     return Response(
         content=pdf,
         media_type='application/pdf',

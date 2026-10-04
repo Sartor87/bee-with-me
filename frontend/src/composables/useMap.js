@@ -1,4 +1,4 @@
-import { onMounted, onUnmounted, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import Overlay from 'ol/Overlay'
 import Map from 'ol/Map'
 import View from 'ol/View'
@@ -10,16 +10,30 @@ import VectorSource from 'ol/source/Vector'
 import Feature from 'ol/Feature'
 import Point from 'ol/geom/Point'
 import LineString from 'ol/geom/LineString'
+import { circular as circularPolygon } from 'ol/geom/Polygon'
 import { fromLonLat, toLonLat } from 'ol/proj'
+import GeoJSON from 'ol/format/GeoJSON'
 import { Circle, Fill, Stroke, Style, Text } from 'ol/style'
 import RegularShape from 'ol/style/RegularShape'
+import Icon from 'ol/style/Icon'
 import Graticule from 'ol/layer/Graticule'
 import ScaleLine from 'ol/control/ScaleLine'
 import { forward as toMGRS } from 'mgrs'
 import { useSettings } from './useSettings'
+import { normaliseGroups } from '../lib/groups'
+import { freshnessOf, LIVE, LOST } from '../lib/freshness'
+import { renderTrackerTooltip } from '../lib/trackerTooltip'
+import { createLongPress } from '../lib/longPress'
+import { hotspotStyleKey } from '../lib/fireStyle'
+import { hexToRgba } from '../lib/color'
+import { PHOTO_SIZE, markerZIndex, onPhotoLoaded, photoCanvas, photoImage, ringFor, safePhotoUrl } from '../lib/photoMarker'
 
 const DEFAULT_COLOR = '#3b82f6'
-const STALE_MS = 10 * 60 * 1000   // 10 minutes
+
+// Long press on touch: 600 ms held within 10 px.
+const LONG_PRESS_MS = 600
+const LONG_PRESS_SLOP_PX = 10
+const LONG_PRESS_DEDUPE_MS = 800
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371
@@ -92,23 +106,106 @@ function makeMGRSLabel(lon, lat) {
   }
 }
 
-function hexToRgba(hex, alpha) {
-  if (!hex || !hex.startsWith('#') || hex.length < 7) return `rgba(59,130,246,${alpha})`
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b},${alpha})`
+// Fire colours live as tokens in style.css (--fire-*). OpenLayers paints on a canvas and
+// cannot read CSS variables, so resolve them when a style is built. Fallbacks only matter
+// without a DOM.
+function fireToken(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    return v || fallback
+  } catch { return fallback }
 }
 
-function makeMarkerStyle(color, isSOS, name, isTeam, isStale) {
-  const radius     = isSOS ? 10 : isTeam ? 10 : 7
-  const fillColor  = isStale ? 'rgba(156,163,175,0.45)' : (isSOS ? '#ef4444' : color)
-  const strokeCol  = isStale ? 'rgba(255,255,255,0.35)' : '#fff'
+// Hotspot look per style key. Age fades fill and ring so the newest detections read first;
+// state (dismissed / suppressed / extinguished) goes hollow and grey; a field report is a
+// diamond, never a circle, so it cannot pass for a satellite detection.
+function makeHotspotStyle(key, fieldReportLabel) {
+  const ember    = fireToken('--fire-hotspot', '#ad1e57')
+  const inactive = fireToken('--fire-inactive', '#8892aa')
+  const ring     = fireToken('--text', '#e2e8f0')
+  const circle = (radius, fill, stroke) => new Style({
+    image: new Circle({ radius, fill: fill ? new Fill({ color: fill }) : undefined, stroke }),
+  })
+  // The ember is dark on a dark map (about 2.8:1 on --bg), so every hotspot carries a thin
+  // light ring: newest is solid, older ones fade, but the ring never drops below what keeps
+  // the dot findable on dark and satellite basemaps. No glow: glow is an alarm signal.
+  const E = (alpha) => hexToRgba(ember, alpha, '#ad1e57')
+  const R = (alpha) => hexToRgba(ring, alpha, '#e2e8f0')
+  switch (key) {
+    case 'age_24h': return circle(6, E(1),   new Stroke({ color: R(1),    width: 1.75 }))
+    case 'age_3d':  return circle(5, E(0.7), new Stroke({ color: R(0.8),  width: 1.5 }))
+    case 'age_7d':  return circle(4, E(0.45), new Stroke({ color: R(0.6), width: 1.25 }))
+    case 'field_report':
+      return new Style({
+        image: new RegularShape({
+          points: 4, radius: 9, angle: 0,
+          fill: new Fill({ color: ember }), stroke: new Stroke({ color: ring, width: 2 }),
+        }),
+        text: fieldReportLabel ? new Text({
+          text: fieldReportLabel, offsetY: 20,
+          font: 'bold 12px system-ui',
+          fill: new Fill({ color: ring }), stroke: new Stroke({ color: '#000', width: 3 }),
+        }) : undefined,
+      })
+    case 'suppressed':
+      return circle(5, null, new Stroke({ color: hexToRgba(inactive, 0.9, '#8892aa'), width: 1.5, lineDash: [3, 3] }))
+    default: // dismissed, extinguished
+      return circle(4, null, new Stroke({ color: hexToRgba(inactive, 0.8, '#8892aa'), width: 1.5 }))
+  }
+}
+
+// Burnt areas are history, not alarm: neutral ash, never red.
+function makeBurntStyle() {
+  const ash = fireToken('--fire-burnt', '#a8a29e')
   return new Style({
+    fill:   new Fill({ color: hexToRgba(ash, 0.28, '#a8a29e') }),
+    stroke: new Stroke({ color: hexToRgba(ash, 0.9, '#a8a29e'), width: 1.5 }),
+  })
+}
+
+// Suppression zones: an operator's "ignore detections here" circle. Muted, dashed and hollow like a
+// suppressed hotspot (inactive grey-blue), never red, no glow. The label is canvas text, so a
+// user-typed label can never act as markup; it is clipped so a long one cannot cover the map.
+const ZONE_LABEL_MAX = 28
+function makeZoneStyle(label) {
+  const inactive = fireToken('--fire-inactive', '#8892aa')
+  const ring     = fireToken('--text', '#e2e8f0')
+  const text = String(label ?? '')
+  return new Style({
+    fill:   new Fill({ color: hexToRgba(inactive, 0.1, '#8892aa') }),
+    stroke: new Stroke({ color: hexToRgba(inactive, 0.95, '#8892aa'), width: 1.5, lineDash: [6, 5] }),
+    text: text ? new Text({
+      text: text.length > ZONE_LABEL_MAX ? `${text.slice(0, ZONE_LABEL_MAX - 1)}…` : text,
+      font: '600 12px system-ui',
+      fill: new Fill({ color: ring }), stroke: new Stroke({ color: '#000', width: 3 }),
+    }) : undefined,
+  })
+}
+
+export function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
+  const radius   = isSOS ? 10 : isTeam ? 10 : 7
+  const isStale  = freshness !== LIVE
+  const isLost   = freshness === LOST
+  // Lost contact fades further than merely stale, so "we haven't heard from them in half an
+  // hour" is distinguishable from "they're a few minutes overdue" at a glance.
+  const fillColor = isSOS ? '#ef4444'
+    : isLost  ? 'rgba(156,163,175,0.22)'
+    : isStale ? 'rgba(156,163,175,0.45)'
+    : color
+  const strokeCol = isStale ? 'rgba(255,255,255,0.35)' : '#fff'
+
+  const style = new Style({
+    zIndex: markerZIndex(isSOS, freshness),
     image: new Circle({
       radius,
       fill:   new Fill({ color: fillColor }),
-      stroke: new Stroke({ color: strokeCol, width: isTeam ? 3 : 2 }),
+      // Dashed ring = in radio contact but no satellite fix: the position shown is the last
+      // known one, not where they are now.
+      stroke: new Stroke({
+        color:    noFix ? '#facc15' : strokeCol,
+        width:    isTeam ? 3 : 2,
+        lineDash: noFix ? [3, 2] : undefined,
+      }),
     }),
     text: new Text({
       text:    name || '',
@@ -116,6 +213,29 @@ function makeMarkerStyle(color, isSOS, name, isTeam, isStale) {
       fill:    new Fill({ color: '#fff' }),
       stroke:  new Stroke({ color: '#000', width: 3 }),
       font:    isTeam ? 'bold 14px system-ui' : 'bold 13px system-ui',
+    }),
+  })
+  return style
+}
+
+// Photo variant of the marker: same label, same states, the dot replaced by a round photo with
+// a state ring. Returns null (the caller keeps the dot) while the image is loading, after it
+// failed, or when the browser cannot draw it.
+export function makePhotoMarkerStyle(url, color, isSOS, name, freshness, noFix) {
+  const img = photoImage(url)
+  if (!img) return null
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+  const canvas = photoCanvas(url, img, ringFor({ color, isSOS, freshness, noFix }), dpr)
+  if (!canvas) return null
+  return new Style({
+    image: new Icon({ img: canvas, imgSize: [canvas.width, canvas.height], scale: 1 / dpr }),
+    zIndex: markerZIndex(isSOS, freshness),
+    text: new Text({
+      text:    name || '',
+      offsetY: -(PHOTO_SIZE / 2 + 10),
+      fill:    new Fill({ color: '#fff' }),
+      stroke:  new Stroke({ color: '#000', width: 3 }),
+      font:    'bold 13px system-ui',
     }),
   })
 }
@@ -158,7 +278,7 @@ function makeCheckpointStyle(color, index, isLast, showLabels, recordedAt) {
   })
 }
 
-export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, groupsMap, onHQPlaced) {
+export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, groupsMap, onHQPlaced, showPhotos = ref(true)) {
   let map = null
   let basemapLayer = makeBasemapLayer('osm')
   let checkpointNumbersVisible = false
@@ -181,6 +301,32 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   // Checkpoint dot layer
   const checkpointSource = new VectorSource()
   const checkpointLayer  = new VectorLayer({ source: checkpointSource, zIndex: 6, visible: false })
+
+  // Fire layers: history (burnt areas) and detections (hotspots) sit under the trackers and
+  // trails, hidden until the operator turns them on.
+  const geojson       = new GeoJSON()
+  const burntSource   = new VectorSource()
+  const burntLayer    = new VectorLayer({ source: burntSource, zIndex: 3, visible: false })
+  const hotspotSource = new VectorSource()
+  const hotspotStyles = {}
+  let   fieldReportLabel = ''
+  const hotspotLayer  = new VectorLayer({
+    source: hotspotSource, zIndex: 3.5, visible: false,
+    style: (feature) => {
+      const key = hotspotStyleKey(feature.getProperties(), Date.now())
+      return (hotspotStyles[key] ??= makeHotspotStyle(key, fieldReportLabel))
+    },
+  })
+  let burntStyleCache = null
+  burntLayer.setStyle(() => (burntStyleCache ??= makeBurntStyle()))
+  // Suppression zones sit under the hotspots so a detection inside a zone stays clickable.
+  const zoneSource = new VectorSource()
+  const zoneLayer  = new VectorLayer({ source: zoneSource, zIndex: 3.4, visible: false })
+  let fireTimer = null
+  let fireClickCb = null
+  let trackerClickCb = null
+  let contextMenuCb = null
+  let onContextMenuEvent = null, onPressDown = null, onPressMove = null, endPressFn = null, longPress = null
 
   // Measure layer
   const measureSource = new VectorSource()
@@ -301,15 +447,52 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     forceGraticuleRedraw()
   }
 
-  function upsertFeature(pos) {
-    const id          = pos.device_id
+  // One malformed row must never blank every marker (B50): isolate each upsert.
+  function safeUpsert(pos) {
+    try { upsertFeature(pos) } catch { console.warn('Skipped a position that could not be drawn') }
+  }
+
+  // One place decides how a marker looks. Photo only for an individual (never the team dot in
+  // the groups view) with the setting on and a same-origin photo that has loaded; every other
+  // case, including a failed load, is the dot.
+  function styleFor(pos) {
     const leaderGroup = pos.groups?.find(g => g.is_leader)
-    const color       = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
-    const isSOS       = pos.sos_active
-    const isStale     = pos.recorded_at
-      ? Date.now() - new Date(pos.recorded_at).getTime() > STALE_MS
-      : false
-    const label = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+    const color     = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
+    const freshness = freshnessOf(pos)
+    const noFix     = pos.gnss_valid === false
+    const isTeam    = !!pos.displayLabel
+    const label     = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
+    if (!isTeam && showPhotos.value !== false) {
+      const url = safePhotoUrl(pos.photo_url)
+      const photo = url && makePhotoMarkerStyle(url, color, pos.sos_active, label, freshness, noFix)
+      if (photo) return photo
+    }
+    return makeMarkerStyle(color, pos.sos_active, label, isTeam, freshness, noFix)
+  }
+
+  // Photos finish loading in separate tasks, so a microtask would not merge them (N restyles of N
+  // markers on start). One restyle per animation frame (50 ms timer where there is no rAF) covers
+  // every photo that arrived meanwhile (B56).
+  let restyleHandle = null
+  let restyleViaRaf = false
+  function scheduleRestyle() {
+    if (restyleHandle != null) return
+    const run = () => { restyleHandle = null; restyleAll() }
+    restyleViaRaf = typeof requestAnimationFrame === 'function'
+    restyleHandle = restyleViaRaf ? requestAnimationFrame(run) : setTimeout(run, 50)
+  }
+  // Every open map hears about every finished photo, not only the one that started the load.
+  const offPhotoLoaded = onPhotoLoaded(scheduleRestyle)
+  function restyleAll() {
+    source.getFeatures().forEach(f => {
+      const pos = f.get('pos')
+      if (pos) f.setStyle(styleFor(pos))
+    })
+  }
+
+  function upsertFeature(rawPos) {
+    const pos = normaliseGroups(rawPos)
+    const id  = pos.device_id
 
     let feature = source.getFeatureById(id)
     if (!feature) {
@@ -318,7 +501,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       source.addFeature(feature)
     }
     feature.getGeometry().setCoordinates(fromLonLat([pos.longitude, pos.latitude]))
-    feature.setStyle(makeMarkerStyle(color, isSOS, label, !!pos.displayLabel, isStale))
+    feature.setStyle(styleFor(pos))
     feature.setProperties({ pos }, true)
   }
 
@@ -374,7 +557,9 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     points.forEach((p, i) => {
       const isLast = i === points.length - 1
       const f = new Feature({ geometry: new Point(fromLonLat([p.lon, p.lat])) })
-      f.setStyle(makeCheckpointStyle(color, i, isLast, checkpointNumbersVisible, p.recorded_at))
+      // Label with the server clock, same as every other time the operator sees — a device
+      // with a skewed GNSS clock would otherwise stamp checkpoints with times that never were.
+      f.setStyle(makeCheckpointStyle(color, i, isLast, checkpointNumbersVisible, p.received_at ?? p.recorded_at))
       f.set('deviceId', deviceId)
       f.set('recordedAt', p.recorded_at)
       f.set('cpIndex', i)
@@ -432,7 +617,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
     map = new Map({
       target:   mapRef.value,
-      layers:   [basemapLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
+      layers:   [basemapLayer, burntLayer, zoneLayer, hotspotLayer, graticule, trailLayer, checkpointLayer, hqLayer, vectorLayer, measureLayer],
       view:     new View({ center: fromLonLat([25.0, 42.5]), zoom: 7 }),
       overlays: [tooltip],
       controls: [new ScaleLine({ units: 'metric', bar: false, minWidth: 100 })],
@@ -447,41 +632,9 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       if (feature) {
         const stored = feature.get('pos')
         const pos    = positionList.value?.find(p => p.device_id === feature.getId()) ?? stored
-        const isTeam = !!pos.displayLabel
-        const sos    = pos.sos_active    ? '<span style="color:#ef4444;font-weight:700"> 🚨 SOS</span>' : ''
-        const bat    = pos.battery_voltage != null ? `<br>🔋 ${pos.battery_voltage.toFixed(1)} V` : ''
-        const time   = pos.recorded_at   ? `<br>🕐 ${new Date(pos.recorded_at).toLocaleTimeString()}` : ''
-
-        if (isTeam) {
-          const leaderGroup = pos.groups?.find(g => g.is_leader)
-          const gDetail     = leaderGroup ? (groupsMap?.value ?? {})[leaderGroup.id] : null
-          const members     = gDetail?.members ?? []
-          const desc        = gDetail?.description
-            ? `<br><span style="font-size:11px;color:#aaa;font-style:italic">${gDetail.description}</span>`
-            : ''
-          const memberList  = members.length
-            ? '<br><span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.05em">Members</span><br>' +
-              members.map(m =>
-                `<span style="color:${m.is_leader ? '#ffc900' : '#ccc'}">`+
-                `${m.is_leader ? '★ ' : '· '}${m.full_name}${m.rank ? ` (${m.rank})` : ''}</span>`
-              ).join('<br>')
-            : ''
-          tooltipEl.innerHTML =
-            `<strong>${pos.displayLabel}</strong>${sos}` +
-            desc +
-            (pos.full_name ? `<br><span style="font-size:11px;color:#aaa">${pos.full_name}${pos.rank ? ` · ${pos.rank}` : ''}</span>` : '') +
-            `<br><span style="font-family:monospace;font-size:11px">${pos.mgrs ?? ''}</span>` +
-            bat + time + memberList
-        } else {
-          const name  = pos.full_name || pos.device_name || `SN:${pos.dev_sn}`
-          const rep   = pos.repeater_mode ? '<span style="color:#a78bfa"> ↩ Repeater</span>' : ''
-          const phone = pos.phone ? `<br>📞 ${pos.phone}` : ''
-          const alt   = pos.altitude_m != null ? `<br>⛰ ${pos.altitude_m} m` : ''
-          tooltipEl.innerHTML =
-            `<strong>${name}</strong>${sos}${rep}` +
-            `<br><span style="font-family:monospace;font-size:11px">${pos.mgrs ?? ''}</span>` +
-            alt + bat + time + phone
-        }
+        const leaderGroup = pos.displayLabel ? pos.groups?.find(g => g.is_leader) : null
+        const gDetail     = leaderGroup ? (groupsMap?.value ?? {})[leaderGroup.id] : null
+        renderTrackerTooltip(tooltipEl, pos, gDetail, { showPhotos: showPhotos.value !== false })
         tooltipEl.style.display = 'block'
         tooltip.setPosition(evt.coordinate)
         map.getTargetElement().style.cursor = 'pointer'
@@ -517,7 +670,11 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       }),
     })
 
+    // The release of a long press raises a click: it belongs to the menu, not to the map.
+    const clickSwallowed = () => !!longPress?.shouldSwallowClick()
+
     map.on('click', (evt) => {
+      if (clickSwallowed()) return
       if (hqPlacementMode) {
         const [lon, lat] = toLonLat(evt.coordinate)
         onHQPlaced?.({ lat, lon })
@@ -547,27 +704,89 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       }
     })
 
+    // Fire features: a tracker wins when both are hit; clicking bare map closes the popup.
+    const fireHit = (pixel) => {
+      const hotspot = map.forEachFeatureAtPixel(pixel, f => f, { layerFilter: l => l === hotspotLayer, hitTolerance: 6 })
+      if (hotspot) return { kind: 'hotspot', feature: hotspot }
+      const burnt = map.forEachFeatureAtPixel(pixel, f => f, { layerFilter: l => l === burntLayer })
+      return burnt ? { kind: 'burnt_area', feature: burnt } : null
+    }
+    const trackerHit = (pixel) => map.hasFeatureAtPixel(pixel, { layerFilter: l => l === vectorLayer, hitTolerance: 5 })
+
+    map.on('click', (evt) => {
+      if (clickSwallowed()) return
+      if (hqPlacementMode || measureMode || !fireClickCb) return
+      // A tracker click opens the tracker popup and closes any fire popup.
+      if (trackerHit(evt.pixel)) {
+        fireClickCb(null)
+        const marker = map.forEachFeatureAtPixel(evt.pixel, f => f, { layerFilter: l => l === vectorLayer, hitTolerance: 5 })
+        if (marker && marker.getId() != null) trackerClickCb?.(String(marker.getId()))
+        return
+      }
+      const hit = fireHit(evt.pixel)
+      if (!hit) { fireClickCb(null); trackerClickCb?.(null); return }
+      const props = { ...hit.feature.getProperties() }
+      delete props.geometry
+      fireClickCb({
+        kind: hit.kind,
+        properties: props,
+        coordinate: hit.kind === 'hotspot' ? hit.feature.getGeometry().getCoordinates() : evt.coordinate,
+      })
+    })
+
+    map.on('pointermove', (evt) => {
+      if (evt.dragging || hqPlacementMode || measureMode) return
+      if (trackerHit(evt.pixel)) return
+      if (fireHit(evt.pixel)) map.getTargetElement().style.cursor = 'pointer'
+    })
+
+    // "Report fire here": right-click on a mouse, long-press on touch. Both hand over the clicked
+    // coordinate (EPSG:3857) and its pixel inside the map element; the view decides what to offer.
+    // Touch browsers may fire `contextmenu` after a long press as well, so one gesture is reported
+    // once (a second report within LONG_PRESS_DEDUPE_MS is dropped).
+    const viewport = map.getViewport()
+    let lastContextAt = -Infinity
+    const reportContext = (clientX, clientY) => {
+      const now = performance.now()
+      if (now - lastContextAt < LONG_PRESS_DEDUPE_MS) return
+      lastContextAt = now
+      if (!contextMenuCb || hqPlacementMode || measureMode) return
+      const pixel = map.getEventPixel({ clientX, clientY })
+      const coordinate = map.getCoordinateFromPixel(pixel)
+      if (coordinate) contextMenuCb({ coordinate, pixel })
+    }
+    onContextMenuEvent = (e) => { e.preventDefault(); reportContext(e.clientX, e.clientY) }
+    viewport.addEventListener('contextmenu', onContextMenuEvent)
+
+    longPress = createLongPress({ onLongPress: reportContext, ms: LONG_PRESS_MS, slopPx: LONG_PRESS_SLOP_PX })
+    onPressDown = longPress.down
+    onPressMove = longPress.move
+    viewport.addEventListener('pointerdown', onPressDown)
+    viewport.addEventListener('pointermove', onPressMove)
+    viewport.addEventListener('pointerup', longPress.end)
+    viewport.addEventListener('pointercancel', longPress.end)
+    endPressFn = longPress.end
+
+    // Hotspots fade with age; repaint each minute so they do so without a refetch.
+    fireTimer = setInterval(() => { if (hotspotLayer.getVisible()) hotspotLayer.changed() }, 60_000)
+
     // Re-evaluate stale state every minute without needing a new WS frame
     staleTimer = setInterval(() => {
-      source.getFeatures().forEach(f => {
-        const pos = f.get('pos')
-        if (!pos) return
-        const leaderGroup = pos.groups?.find(g => g.is_leader)
-        const color   = leaderGroup?.color ?? pos.groups?.[0]?.color ?? DEFAULT_COLOR
-        const isStale = pos.recorded_at
-          ? Date.now() - new Date(pos.recorded_at).getTime() > STALE_MS
-          : false
-        const label = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
-        f.setStyle(makeMarkerStyle(color, pos.sos_active, label, !!pos.displayLabel, isStale))
-      })
+      restyleAll()
     }, 60_000)
 
   })
 
   watch(positionList, (list) => {
-    list.forEach(upsertFeature)
+    list.forEach(safeUpsert)
     removeStaleFeatures(list.map(p => p.device_id))
   }, { deep: true })
+
+  // The setting changed: redraw every marker now.
+  watch(showPhotos, () => {
+    ;(positionList.value ?? []).forEach(safeUpsert)
+    restyleAll()
+  })
 
   watch(trails, (trailMap) => {
     Object.entries(trailMap).forEach(([deviceId, points]) => {
@@ -579,8 +798,23 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   }, { deep: true })
 
   onUnmounted(() => {
+    offPhotoLoaded()
+    if (restyleHandle != null) {
+      restyleViaRaf ? cancelAnimationFrame(restyleHandle) : clearTimeout(restyleHandle)
+      restyleHandle = null
+    }
+    const viewport = map?.getViewport()
+    if (viewport) {
+      viewport.removeEventListener('contextmenu', onContextMenuEvent)
+      viewport.removeEventListener('pointerdown', onPressDown)
+      viewport.removeEventListener('pointermove', onPressMove)
+      viewport.removeEventListener('pointerup', endPressFn)
+      viewport.removeEventListener('pointercancel', endPressFn)
+    }
+    endPressFn?.()
     map?.setTarget(null)
     clearInterval(staleTimer)
+    clearInterval(fireTimer)
   })
 
   function setMeasureMode(on) {
@@ -628,10 +862,65 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     if (map) map.getTargetElement().style.cursor = on ? 'crosshair' : ''
   }
 
+  // Read before clearing: a payload OpenLayers cannot parse keeps the previous features on
+  // screen. Returns false so the caller can show the feed as failed (BP-03). The log line
+  // carries no feature content.
+  function replaceFeatures(source, fc, what) {
+    let features
+    try {
+      features = geojson.readFeatures(fc, { featureProjection: 'EPSG:3857' })
+    } catch {
+      console.warn('fire layer: unreadable %s GeoJSON, keeping previous features', what)
+      return false
+    }
+    source.clear(true)
+    source.addFeatures(features)
+    return true
+  }
+
+  function setBurntAreas(fc)  { return replaceFeatures(burntSource, fc, 'burnt-area') }
+  function setHotspots(fc)    { return replaceFeatures(hotspotSource, fc, 'hotspot') }
+
+  // Zones arrive as plain rows ({ id, label, latitude, longitude, radius_m }). Each becomes a true
+  // geodesic circle (a Web Mercator circle would be about a third too large at 42 N). A row that
+  // cannot be drawn is skipped, so one bad zone never hides the rest.
+  function setZones(list) {
+    const features = []
+    for (const z of Array.isArray(list) ? list : []) {
+      const lon = Number(z?.longitude), lat = Number(z?.latitude), r = Number(z?.radius_m)
+      if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(r) || r <= 0) continue
+      const geometry = circularPolygon([lon, lat], r, 64).transform('EPSG:4326', 'EPSG:3857')
+      const f = new Feature({ geometry, zoneId: z.id })
+      f.setId(z.id)
+      f.setStyle(makeZoneStyle(z.label))
+      features.push(f)
+    }
+    zoneSource.clear(true)
+    zoneSource.addFeatures(features)
+    return features.length
+  }
+
+  function setFireLayerVisible(name, visible) {
+    if (name === 'burnt')    burntLayer.setVisible(visible)
+    if (name === 'hotspots') hotspotLayer.setVisible(visible)
+    if (name === 'zones')    zoneLayer.setVisible(visible)
+  }
+
+  function setFireLabels({ fieldReport }) {
+    fieldReportLabel = fieldReport || ''
+    for (const k of Object.keys(hotspotStyles)) delete hotspotStyles[k]
+    hotspotLayer.changed()
+  }
+
+  function onFireFeatureClick(cb) { fireClickCb = cb }
+  // A click on a tracker marker passes its device id; a click on bare map passes null.
+  function onTrackerClick(cb) { trackerClickCb = cb }
+  function onMapContextMenu(cb) { contextMenuCb = cb }
+
   function refreshMarkers(list) {
-    list.forEach(upsertFeature)
+    list.forEach(safeUpsert)
     removeStaleFeatures(list.map(p => p.device_id))
   }
 
-  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode }
+  return { map: () => map, setBasemap, setMGRSGrid, setLatLonGrid, setTrailVisible, setCheckpointNumbers, setMeasureMode, setWeatherLayer, refreshMarkers, setHQ, setHQPlacementMode, setBurntAreas, setHotspots, setFireLayerVisible, setFireLabels, onFireFeatureClick, setZones, onTrackerClick, onMapContextMenu }
 }

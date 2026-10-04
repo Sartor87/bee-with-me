@@ -8,7 +8,9 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from ..auth import get_current_user
+from ..config import settings
 from ..database import get_conn
+from ..json_columns import decode_json_columns
 
 router = APIRouter(prefix='/api/locations', tags=['locations'])
 
@@ -18,18 +20,22 @@ async def live_positions(
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
     _: Annotated[asyncpg.Record, Depends(get_current_user)],
 ):
-    """Latest confirmed position for every active device."""
+    """Latest position for every active device seen within the freshness horizon.
+
+    Bounded by `live_position_max_age_hours` so devices from a previous operation don't
+    linger on the map as ghosts indistinguishable from rescuers currently in the field.
+    """
     rows = await conn.fetch("""
         SELECT DISTINCT ON (le.device_id)
             le.device_id, le.user_id,
             u.full_name, u.rank, u.photo_url, u.phone,
             d.dev_sn, d.name AS device_name,
             le.mgrs, le.latitude, le.longitude,
-            le.altitude_m, le.speed_knots, le.battery_voltage,
-            le.gnss_satellites,
+            le.altitude_m, le.speed_knots, le.course_deg, le.battery_voltage,
+            le.gnss_satellites, le.gnss_valid,
             (le.sos_active AND sa.id IS NOT NULL) AS sos_active,
             le.repeater_mode,
-            le.recorded_at,
+            le.recorded_at, le.received_at,
             COALESCE(
                 json_agg(json_build_object('id', g.id, 'name', g.name, 'color', g.color, 'is_leader', ug.is_leader))
                 FILTER (WHERE g.id IS NOT NULL AND g.is_active = TRUE), '[]'
@@ -41,10 +47,11 @@ async def live_positions(
         LEFT JOIN groups g ON g.id = ug.group_id
         LEFT JOIN sos_alerts sa ON sa.device_id = le.device_id AND sa.resolved_at IS NULL
         WHERE (le.user_id IS NULL OR u.is_active = TRUE)
+          AND le.received_at > NOW() - ($1 * INTERVAL '1 hour')
         GROUP BY le.id, le.device_id, le.user_id, u.full_name, u.rank, u.photo_url, u.phone, d.dev_sn, d.name, sa.id
-        ORDER BY le.device_id, le.recorded_at DESC
-    """)
-    return [dict(r) for r in rows]
+        ORDER BY le.device_id, le.received_at DESC
+    """, settings.live_position_max_age_hours)
+    return [decode_json_columns(r, 'groups') for r in rows]
 
 
 @router.get('/sos')
@@ -86,13 +93,21 @@ async def location_trail(
     _: Annotated[asyncpg.Record, Depends(get_current_user)],
     minutes: int = Query(30, ge=1, le=60),
 ):
-    """Return all location events from the last N minutes, grouped by device_id."""
+    """Return all location events from the last N minutes, grouped by device_id.
+
+    Bounded by the device's current assignment (assigned_at) so a reassigned or
+    unassigned device's trail doesn't splice in the previous volunteer's movement.
+    """
     rows = await conn.fetch("""
-        SELECT le.device_id, le.latitude, le.longitude, le.recorded_at
+        SELECT le.device_id, le.latitude, le.longitude, le.recorded_at, le.received_at
         FROM location_events le
         JOIN devices d ON d.id = le.device_id AND d.is_active = TRUE
-        WHERE le.recorded_at > NOW() - ($1 * INTERVAL '1 minute')
-        ORDER BY le.device_id, le.recorded_at ASC
+        WHERE le.gnss_valid = TRUE
+          AND le.received_at > GREATEST(
+            NOW() - ($1 * INTERVAL '1 minute'),
+            COALESCE(d.assigned_at, '-infinity'::timestamptz)
+        )
+        ORDER BY le.device_id, le.received_at ASC
     """, minutes)
     grouped = defaultdict(list)
     for r in rows:
@@ -100,6 +115,7 @@ async def location_trail(
             'lat': r['latitude'],
             'lon': r['longitude'],
             'recorded_at': r['recorded_at'].isoformat(),
+            'received_at': r['received_at'].isoformat(),
         })
     return dict(grouped)
 

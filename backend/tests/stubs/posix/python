@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stub .venv/bin/python for start.sh tests: the test runner's Python, started in the temp project copy,
+# where `-m pip` and `-m backend.db.migrate` resolve to the stub modules (the current folder comes first
+# on sys.path for -m).
+exec "$BWM_STUB_PYTHON" "$@"

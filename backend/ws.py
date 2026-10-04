@@ -1,9 +1,7 @@
 """
 WebSocket connection manager + PostgreSQL LISTEN/NOTIFY bridge.
 
-The serial reader fires pg_notify on 'location_update' and 'sos_alert'.
-This module listens on those channels and broadcasts JSON to all
-connected browser clients.
+The hardware reader and the fire feature fire pg_notify on the channels in FORWARDED_CHANNELS; this module forwards each one to every connected browser as {'type': <channel>, ...payload}.
 """
 
 from __future__ import annotations
@@ -18,6 +16,15 @@ from fastapi import WebSocket
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+RECONNECT_DELAY      = 5    # seconds between reconnect attempts on the LISTEN connection
+HEALTHCHECK_INTERVAL = 30   # seconds between liveness pings — catches a connection that
+                             # died silently (e.g. Postgres/Docker paused by system sleep)
+
+FORWARDED_CHANNELS = (
+    'location_update', 'sos_alert',
+    'fire_data_updated', 'fire_alert', 'fire_alert_repeat', 'fire_alert_updated', 'fire_zones_updated',
+)
 
 
 class WSManager:
@@ -42,33 +49,52 @@ class WSManager:
                 dead.add(ws)
         self._clients -= dead
 
+    async def _forward(self, _con, _pid, channel: str, payload: str) -> None:
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            logger.warning('Dropped a non-object notification on channel %s', channel)
+            return
+        await self.broadcast({**data, 'type': channel})   # the channel wins: a payload key cannot spoof the type
+
     async def listen_notifications(self) -> None:
-        """Dedicated asyncpg connection that listens for pg_notify events."""
+        """Dedicated asyncpg connection that listens for pg_notify events.
+
+        Reconnects automatically if the connection drops or goes stale (e.g. Docker/
+        Postgres paused by a system sleep) instead of dying silently and requiring a
+        manual backend restart to bring live updates back.
+        """
         dsn = (
             f'postgresql://{settings.postgres_user}:{settings.postgres_password}'
             f'@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}'
         )
-        conn = await asyncpg.connect(dsn)
 
-        async def _on_location(_con, _pid, _channel, payload):
-            data = json.loads(payload)
-            await self.broadcast({'type': 'location_update', **data})
+        while True:
+            conn = None
+            try:
+                conn = await asyncpg.connect(dsn)
+                for channel in FORWARDED_CHANNELS:
+                    await conn.add_listener(channel, self._forward)
+                logger.info('Listening for pg_notify on %s', ', '.join(FORWARDED_CHANNELS))
 
-        async def _on_sos(_con, _pid, _channel, payload):
-            data = json.loads(payload)
-            await self.broadcast({'type': 'sos_alert', **data})
+                while True:
+                    await asyncio.sleep(HEALTHCHECK_INTERVAL)
+                    await conn.execute('SELECT 1')
 
-        await conn.add_listener('location_update', _on_location)
-        await conn.add_listener('sos_alert', _on_sos)
-        logger.info('Listening for pg_notify on location_update + sos_alert')
+            except asyncio.CancelledError:
+                break
 
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await conn.close()
+            except Exception as exc:
+                logger.warning('pg_notify listener error (%s) — reconnecting in %ds', exc, RECONNECT_DELAY)
+                await asyncio.sleep(RECONNECT_DELAY)
+
+            finally:
+                if conn and not conn.is_closed():
+                    await conn.close()
+
+        logger.info('pg_notify listener stopped')
 
 
 manager = WSManager()

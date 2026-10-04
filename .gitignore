@@ -20,6 +20,8 @@
 build/
 node_modules/
 assets/dist/
+frontend/dist/
+backend/uploads/
 *.bundle.js
 *.module.wasm
 
@@ -41,8 +43,15 @@ data/
 #LoraWAN info
 /lorawan/*
 
+# Database dumps (scripts/backup.*): personal data, never commit
+/backups/
+*.dump
+*.dump.partial
+
 # Environment — never commit secrets
 .env
+# temp copies written by start.ps1 / start.sh while the file above is created (a stopped run can leave one)
+.env.new*
 
 /.composer
 /.npm

@@ -65,6 +65,68 @@ describe('useLocationsStore', () => {
     expect(store.sosAlerts).toHaveLength(1)
   })
 
+  it('applySOSAlert merges into an existing entry rather than dropping the alert id', () => {
+    const store = useLocationsStore()
+    // Seeded by an early push that lacked the id (the shape that made Resolve a no-op)
+    store.applySOSAlert({ device_id: 'dev-1' })
+    store.applySOSAlert({ device_id: 'dev-1', id: 'sos-1', full_name: 'Alpha', dev_sn: 42 })
+    expect(store.sosAlerts).toHaveLength(1)
+    expect(store.sosAlerts[0].id).toBe('sos-1')
+    expect(store.sosAlerts[0].full_name).toBe('Alpha')
+  })
+
+  it('applySOSAlert strips the websocket envelope type', () => {
+    const store = useLocationsStore()
+    store.applySOSAlert({ type: 'sos_alert', device_id: 'dev-1', id: 'sos-1' })
+    expect(store.sosAlerts[0]).not.toHaveProperty('type')
+  })
+
+  it('resolveSOS refuses an alert with no id instead of posting undefined', async () => {
+    const store = useLocationsStore()
+    await expect(store.resolveSOS(undefined)).rejects.toThrow(/no id/)
+    expect(resolveSOS).not.toHaveBeenCalled()
+  })
+
+  it('a no-fix frame updates the marker but adds no trail point', () => {
+    const store = useLocationsStore()
+    store.applyLocationUpdate({
+      device_id: 'dev-1', latitude: 42.1, longitude: 24.5,
+      gnss_valid: true, received_at: new Date().toISOString(),
+    })
+    expect(store.trails['dev-1']).toHaveLength(1)
+
+    // Same coordinates carried forward because the device lost its fix — recording this
+    // would draw a leg the rescuer never walked.
+    store.applyLocationUpdate({
+      device_id: 'dev-1', latitude: 42.1, longitude: 24.5,
+      gnss_valid: false, received_at: new Date().toISOString(),
+    })
+    expect(store.trails['dev-1']).toHaveLength(1)
+    expect(store.positions['dev-1'].gnss_valid).toBe(false)
+  })
+
+  it('trail points carry the server clock for pruning and labels', () => {
+    const store = useLocationsStore()
+    store.applyLocationUpdate({
+      device_id: 'dev-1', latitude: 42.1, longitude: 24.5, gnss_valid: true,
+      recorded_at: '2020-01-01T00:00:00Z',            // device clock badly wrong
+      received_at: '2026-09-08T12:00:00Z',
+    })
+    expect(store.trails['dev-1'][0].received_at).toBe('2026-09-08T12:00:00Z')
+  })
+
+  it('silentList and lostList classify by age', () => {
+    const store = useLocationsStore()
+    const ago = (ms) => new Date(Date.now() - ms).toISOString()
+    store.positions = {
+      'a': { device_id: 'a', received_at: ago(1000) },              // live
+      'b': { device_id: 'b', received_at: ago(15 * 60_000) },       // stale
+      'c': { device_id: 'c', received_at: ago(45 * 60_000) },       // lost
+    }
+    expect(store.silentList.map(p => p.device_id).sort()).toEqual(['b', 'c'])
+    expect(store.lostList.map(p => p.device_id)).toEqual(['c'])
+  })
+
   it('resolveSOS removes alert by id', async () => {
     resolveSOS.mockResolvedValue(undefined)
     const store = useLocationsStore()
@@ -83,5 +145,30 @@ describe('useLocationsStore', () => {
     store.sosAlerts = [{ id: 'sos-1', device_id: 'dev-1' }]
     await store.resolveSOS('sos-1')
     expect(store.hasSOS).toBe(false)
+  })
+
+  it('fetchLive turns a JSON-string groups into an array [B50]', async () => {
+    getLivePositions.mockResolvedValue([
+      { device_id: 'dev-1', groups: '[{"id":"g","color":"#fff","is_leader":true}]' },
+      { device_id: 'dev-2', groups: 'garbage' },
+      { device_id: 'dev-3' },
+    ])
+    const store = useLocationsStore()
+    await store.fetchLive()
+    expect(store.positions['dev-1'].groups).toEqual([{ id: 'g', color: '#fff', is_leader: true }])
+    expect(store.positions['dev-2'].groups).toEqual([])
+    expect(store.positions['dev-3'].groups).toEqual([])
+  })
+
+  it('a snapshot saved with string groups loads as an array [B50]', async () => {
+    localStorage.setItem('bwm.positions.snapshot', JSON.stringify({
+      savedAt: new Date().toISOString(),
+      positions: { 'dev-1': { device_id: 'dev-1', groups: '[{"id":"g"}]' } },
+    }))
+    vi.resetModules()
+    const { useLocationsStore: fresh } = await import('./locations')
+    setActivePinia(createPinia())
+    expect(fresh().positions['dev-1'].groups).toEqual([{ id: 'g' }])
+    localStorage.removeItem('bwm.positions.snapshot')
   })
 })

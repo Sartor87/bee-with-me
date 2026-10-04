@@ -20,12 +20,17 @@ def hash_password(plain: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _bcrypt.checkpw(plain.encode(), hashed.encode())
+    try:
+        return _bcrypt.checkpw(plain.encode(), hashed.encode())
+    except ValueError:
+        # bcrypt refuses passwords over 72 bytes and malformed hashes: that is "no match", not a server error
+        return False
 
 
 def create_access_token(user_id: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
     return jwt.encode(
-        {'sub': user_id, 'role': role, 'typ': 'access'},
+        {'sub': user_id, 'role': role, 'typ': 'access', 'exp': expire},
         settings.secret_key,
         algorithm=ALGORITHM,
     )
@@ -64,10 +69,18 @@ async def get_current_user(
         headers={'WWW-Authenticate': 'Bearer'},
     )
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM],
-                             options={'verify_exp': False})
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
         user_id: str = payload.get('sub')
         if user_id is None:
+            raise credentials_error
+        # A 7-day refresh token must not work as a Bearer token. Tokens without `typ` (issued before it was added)
+        # are refused too: those sessions log in once more.
+        if payload.get('typ') != 'access':
+            raise credentials_error
+        # Legacy tokens were issued without an expiry and would otherwise never age out.
+        # python-jose skips the expiry check when the claim is absent, so reject explicitly —
+        # the client's refresh flow exchanges these for a bounded token on the next 401.
+        if 'exp' not in payload:
             raise credentials_error
     except JWTError:
         raise credentials_error
@@ -76,7 +89,8 @@ async def get_current_user(
         'SELECT id, username, full_name, role, is_active FROM users WHERE id = $1',
         user_id,
     )
-    if user is None or not user['is_active']:
+    # The role is read from the DB: a role that may no longer log in (LOGIN_ROLES) has no session either.
+    if user is None or not user['is_active'] or user['role'] not in settings.login_role_set:
         raise credentials_error
     return user
 

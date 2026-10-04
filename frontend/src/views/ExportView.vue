@@ -50,6 +50,7 @@
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getGroups, getUsers, exportCSV, exportGeoJSON, exportPDF } from '../api'
+import { errorText } from '../api/client'
 
 const { t } = useI18n()
 const groups  = ref([])
@@ -83,7 +84,7 @@ async function doExport(type) {
     a.click()
     URL.revokeObjectURL(url)
   } catch (e) {
-    error.value = typeof e === 'string' ? e : 'Export failed'
+    error.value = errorText(e, 'Export failed')
   } finally {
     loading.value = false
   }
