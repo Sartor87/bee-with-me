@@ -470,12 +470,16 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     return makeMarkerStyle(color, pos.sos_active, label, isTeam, freshness, noFix)
   }
 
-  // A photo that finished loading restyles the markers once, however many arrive together.
-  let restylePending = false
+  // Photos finish loading in separate tasks, so a microtask would not merge them (N restyles of N
+  // markers on start). One restyle per animation frame (50 ms timer where there is no rAF) covers
+  // every photo that arrived meanwhile (B56).
+  let restyleHandle = null
+  let restyleViaRaf = false
   function scheduleRestyle() {
-    if (restylePending) return
-    restylePending = true
-    queueMicrotask(() => { restylePending = false; restyleAll() })
+    if (restyleHandle != null) return
+    const run = () => { restyleHandle = null; restyleAll() }
+    restyleViaRaf = typeof requestAnimationFrame === 'function'
+    restyleHandle = restyleViaRaf ? requestAnimationFrame(run) : setTimeout(run, 50)
   }
   // Every open map hears about every finished photo, not only the one that started the load.
   const offPhotoLoaded = onPhotoLoaded(scheduleRestyle)
@@ -795,6 +799,10 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
 
   onUnmounted(() => {
     offPhotoLoaded()
+    if (restyleHandle != null) {
+      restyleViaRaf ? cancelAnimationFrame(restyleHandle) : clearTimeout(restyleHandle)
+      restyleHandle = null
+    }
     const viewport = map?.getViewport()
     if (viewport) {
       viewport.removeEventListener('contextmenu', onContextMenuEvent)

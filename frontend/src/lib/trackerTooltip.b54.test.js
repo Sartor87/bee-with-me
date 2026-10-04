@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { renderTrackerTooltip } from './trackerTooltip'
+import { clearPhotoCache } from './photoMarker'
+
+// The tooltip shows a photo only when the shared cache has it loaded (B56): an Image stub that
+// loads at once stands in for a photo that is already cached.
+beforeEach(() => {
+  clearPhotoCache()
+  globalThis.Image = class { set src(v) { this._src = v; this.onload?.() } get src() { return this._src } }
+})
 
 const base = { full_name: 'Ivan', dev_sn: 1, mgrs: '35TLG1', photo_url: '/uploads/a.jpg', sos_active: true }
 const render = (pos) => { const el = document.createElement('div'); renderTrackerTooltip(el, pos, null); return el }

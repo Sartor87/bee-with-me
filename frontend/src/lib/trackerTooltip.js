@@ -1,7 +1,7 @@
 // Builds the hover tooltip of a tracker marker out of DOM nodes. Every value (names, ranks, phone,
 // group description, device name) is operator or device data, so it is only ever set with
 // `textContent`: never markup, never innerHTML (B52, security F4).
-import { safePhotoUrl } from './photoMarker'
+import { photoImage, safePhotoUrl } from './photoMarker'
 import { freshnessOf, LIVE } from './freshness'
 
 function el(tag, { text, style } = {}) {
@@ -16,11 +16,12 @@ function add(parent, ...children) {
 const br = () => document.createElement('br')
 
 // The photo: same-origin only (the marker's rule, TP-01), set through properties, never markup.
-// A failed load removes the image and nothing is logged (DP-02). The space is reserved up front
-// by the fixed 96 px box, so a failure is the only layout change.
+// The tooltip re-renders on every pointermove, so it never starts a load of its own: it shows the
+// photo only when the shared cache (`photoImage`, with its retry backoff) reports it loaded, and
+// otherwise no image box at all (B56). The first hover warms the cache; nothing is logged (DP-02).
 function photoNode(pos, name) {
   const src = safePhotoUrl(pos.photo_url)
-  if (!src) return null
+  if (!src || !photoImage(src)) return null
   const img = document.createElement('img')
   img.className = 'tt-photo'
   const quiet = freshnessOf(pos) !== LIVE

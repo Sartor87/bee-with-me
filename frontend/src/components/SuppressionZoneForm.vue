@@ -35,7 +35,7 @@
     <p v-if="errorText" class="md-error" role="alert" data-testid="zone-error">{{ errorText }}</p>
 
     <div class="md-actions">
-      <button type="submit" :disabled="busy" data-testid="zone-submit">
+      <button type="submit" :disabled="busy || locked" data-testid="zone-submit">
         {{ busy ? t('fire.zone.saving') : (mode === 'edit' ? t('fire.zone.save') : t('fire.zone.create')) }}
       </button>
       <button type="button" class="secondary" :disabled="busy" data-testid="zone-cancel" @click="emit('cancel')">
@@ -59,7 +59,8 @@ const props = defineProps({
   latitude:  { type: Number, default: null },
   longitude: { type: Number, default: null },
   inline:    { type: Boolean, default: false },
-  busy:      { type: Boolean, default: false },
+  busy:      { type: Boolean, default: false },   // a real save is in flight: submit says Saving, Cancel waits
+  locked:    { type: Boolean, default: false },   // submit only: the values are out of date (Cancel stays usable)
   errorText: { type: String, default: '' },
 })
 const emit = defineEmits(['submit', 'cancel'])
@@ -96,7 +97,7 @@ const pointText = computed(() => {
 })
 
 function onSubmit() {
-  if (props.busy) return
+  if (props.busy || props.locked) return
   attempted.value = true
   if (errors.value.label || errors.value.radius) return
   emit('submit', { label: label.value.trim(), radius_m: Number(radius.value), notes: notes.value.trim() || null })

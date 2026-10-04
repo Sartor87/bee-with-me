@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { renderTrackerTooltip } from './trackerTooltip'
+import { clearPhotoCache } from './photoMarker'
+
+// A photo shows only when the shared cache has it loaded (B56): an Image stub that loads at once.
+beforeEach(() => {
+  clearPhotoCache()
+  globalThis.Image = class { set src(v) { this._src = v; this.onload?.() } get src() { return this._src } }
+})
 
 const EVIL = '<img src=x onerror=alert(1)>'
 

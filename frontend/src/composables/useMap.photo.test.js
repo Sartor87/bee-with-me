@@ -13,6 +13,9 @@ globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {
 let loads
 let calls
 beforeEach(() => {
+  // restyles wait for an animation frame (B56): a frame that fires on the next microtask here
+  vi.stubGlobal('requestAnimationFrame', (fn) => { queueMicrotask(() => fn(0)); return 1 })
+  vi.stubGlobal('cancelAnimationFrame', () => {})
   clearPhotoCache()
   loads = []
   calls = []
@@ -33,7 +36,7 @@ beforeEach(() => {
     return ctx
   })
 })
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 const settle = (i, ok = true) => { ok ? loads[i].onload() : loads[i].onerror() }
 

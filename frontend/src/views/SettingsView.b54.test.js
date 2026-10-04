@@ -86,3 +86,24 @@ describe('zone edit keeps its opening version [B54]', () => {
     expect(w.get('[data-testid="zone-stale"]').text()).toContain('променена')
   })
 })
+
+describe('stale notice keeps Cancel usable [B56]', () => {
+  beforeEach(() => { vi.clearAllMocks(); i18n.global.locale.value = 'en' })
+
+  it('stale: submit is locked with its normal label, Cancel works [B56]', async () => {
+    const w = await openEdit()
+    getSuppressionZones.mockResolvedValue([{ ...V2 }])
+    await useFireStore().applyFireZonesUpdated()
+    await flushPromises()
+    const submit = w.get('[data-testid="zone-submit"]')
+    expect(submit.attributes('disabled')).toBeDefined()
+    expect(submit.text()).not.toContain('Saving')
+    expect(w.get('[data-testid="zone-cancel"]').attributes('disabled')).toBeUndefined()
+    await w.get('[data-testid="zone-form"]').trigger('submit')
+    await flushPromises()
+    expect(updateSuppressionZone).not.toHaveBeenCalled()   // the stale-save guard still holds
+    await w.get('[data-testid="zone-cancel"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="zone-form"]').exists()).toBe(false)
+  })
+})
