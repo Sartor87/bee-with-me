@@ -240,5 +240,31 @@ def main() -> None:
         print('\nStopped.')
 
 
+def _pause_before_close() -> None:
+    """Keep a double-clicked console window open so the output can be read."""
+    if sys.stdin and sys.stdin.isatty():
+        try:
+            input('\nPress Enter to close...')
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+
 if __name__ == '__main__':
-    main()
+    code = 0
+    try:
+        main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+    except httpx.HTTPStatusError as e:
+        code = 1
+        print(f'\nHTTP {e.response.status_code} from {e.request.method} {e.request.url}\n{e.response.text}',
+              file=sys.stderr)
+    except httpx.HTTPError as e:
+        code = 1
+        print(f'\nCannot reach the backend at {BASE}: {e}\nIs it running (uvicorn on port 8000)?', file=sys.stderr)
+    except Exception:
+        import traceback
+        code = 1
+        traceback.print_exc()
+    _pause_before_close()
+    sys.exit(code)
