@@ -23,7 +23,7 @@ HEALTHCHECK_INTERVAL = 30   # seconds between liveness pings — catches a conne
 
 FORWARDED_CHANNELS = (
     'location_update', 'sos_alert',
-    'fire_data_updated', 'fire_alert', 'fire_alert_repeat', 'fire_alert_updated',
+    'fire_data_updated', 'fire_alert', 'fire_alert_repeat', 'fire_alert_updated', 'fire_zones_updated',
 )
 
 

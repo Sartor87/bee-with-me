@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 
 import asyncpg
@@ -11,6 +12,8 @@ from .h3index import h3_r8
 from .models import ALERT_OUT_SELECT, FireAlertOut
 from .parse import BurntAreaRow, HotspotRow
 from .proximity import AlarmSettings, Hotspot, NewAlert, OpenAlert, Target, Zone
+
+logger = logging.getLogger(__name__)
 
 _UPSERT_HOTSPOT = """
     INSERT INTO fire_hotspots (source, effis_id, acquired_at, latitude, longitude, h3_r8, effis_class)
@@ -93,16 +96,44 @@ async def prune_fire_data(conn: asyncpg.Connection) -> dict[str, int]:
 
 
 async def anonymise_resolved_alerts(conn: asyncpg.Connection, retention_days: int) -> int:
-    """DP-03: drop the named trace (user, device, ack/resolve actors) from RESOLVED alerts once they are older than
-    the location retention, so alerts never outlive the positions they were derived from. Open alerts are never
-    touched; the rest of the row stays for after-action review. Keyed on the server clock (resolved_at)."""
-    return await conn.fetchval(
+    """DP-03: drop the named trace (user, device, ack/resolve actors, notes) from RESOLVED alerts once they are older
+    than the location retention, so alerts never outlive the positions they were derived from. Open alerts are never
+    touched; the rest of the row stays for after-action review. Keyed on the server clock (resolved_at).
+
+    Hotspots follow in the same step (B51): personal fields of a hotspot whose alerts are all long resolved and whose
+    own last activity is past the retention are cleared too. Returns the number of anonymised alerts; the hotspot
+    count is logged (a count only, never a value)."""
+    alerts = await conn.fetchval(
         "WITH u AS (UPDATE fire_alerts SET user_id = NULL, device_id = NULL, acknowledged_by = NULL,"
-        " resolved_by = NULL"
+        " resolved_by = NULL, notes = NULL"
         " WHERE resolved_at IS NOT NULL AND resolved_at < NOW() - make_interval(days => $1::int)"
         " AND (user_id IS NOT NULL OR device_id IS NOT NULL OR acknowledged_by IS NOT NULL"
-        "      OR resolved_by IS NOT NULL)"
+        "      OR resolved_by IS NOT NULL OR notes IS NOT NULL)"
         " RETURNING 1) SELECT COUNT(*) FROM u", retention_days)
+    hotspots = await conn.fetchval(_ANONYMISE_HOTSPOTS, retention_days)
+    logger.info('Fire hotspot anonymisation: anonymised %s hotspots', hotspots or 0)
+    return alerts
+
+
+# Last activity = newest of the feed sighting, the dismissal and the extinction (all server clock). A hotspot an open
+# or recently resolved alert still points at keeps its fields: the operation record is still in use.
+_ANONYMISE_HOTSPOTS = """
+    WITH u AS (
+        UPDATE fire_hotspots h
+        SET dismissed_by = NULL, dismiss_notes = NULL, extinguished_by = NULL,
+            reported_by = NULL, reported_device_id = NULL, notes = NULL
+        WHERE GREATEST(h.last_seen_at, COALESCE(h.dismissed_at, '-infinity'::timestamptz),
+                       COALESCE(h.extinguished_at, '-infinity'::timestamptz))
+              < NOW() - make_interval(days => $1::int)
+          AND NOT EXISTS (SELECT 1 FROM fire_alerts a
+                          WHERE a.hotspot_id = h.id
+                            AND (a.resolved_at IS NULL
+                                 OR a.resolved_at >= NOW() - make_interval(days => $1::int)))
+          AND (h.dismissed_by IS NOT NULL OR h.dismiss_notes IS NOT NULL OR h.extinguished_by IS NOT NULL
+               OR h.reported_by IS NOT NULL OR h.reported_device_id IS NOT NULL OR h.notes IS NOT NULL)
+        RETURNING 1)
+    SELECT COUNT(*) FROM u
+"""
 
 
 async def list_hotspots(conn: asyncpg.Connection) -> list[asyncpg.Record]:
@@ -302,12 +333,13 @@ async def count_targets(conn: asyncpg.Connection) -> dict:
 # -- operator writes (T18) ----------------------------------------------------------------------------------------
 
 async def dismiss_hotspot(conn: asyncpg.Connection, hotspot_id: str, user_id, notes: str | None):
-    """Idempotent: the first dismisser and time stay; new notes replace old ones, no notes keeps them."""
+    """Idempotent: the first dismisser and time stay; a re-dismiss without notes changes nothing. New notes replace the
+    old ones and their author and time are recorded (B51): the person named is the one who wrote the text."""
     return await conn.fetchrow("""
         UPDATE fire_hotspots
-        SET dismissed_at = COALESCE(dismissed_at, NOW()),
-            dismissed_by = COALESCE(dismissed_by, $2::uuid),
-            dismiss_notes = COALESCE($3, dismiss_notes)
+        SET dismissed_at = CASE WHEN $3::text IS NOT NULL THEN NOW() ELSE COALESCE(dismissed_at, NOW()) END,
+            dismissed_by = CASE WHEN $3::text IS NOT NULL THEN $2::uuid ELSE COALESCE(dismissed_by, $2::uuid) END,
+            dismiss_notes = COALESCE($3::text, dismiss_notes)
         WHERE id = $1::uuid
         RETURNING *
     """, hotspot_id, str(user_id), notes)
@@ -316,7 +348,7 @@ async def dismiss_hotspot(conn: asyncpg.Connection, hotspot_id: str, user_id, no
 async def latest_device_position(conn: asyncpg.Connection, device_id: str):
     # received_at is the server clock; recorded_at is the device's and may be wrong (BP-01)
     return await conn.fetchrow("""
-        SELECT latitude, longitude FROM location_events
+        SELECT latitude, longitude, gnss_valid FROM location_events
         WHERE device_id = $1::uuid AND received_at > NOW() - INTERVAL '24 hours'
         ORDER BY received_at DESC LIMIT 1
     """, device_id)
@@ -355,16 +387,42 @@ async def create_zone(conn: asyncpg.Connection, data: dict, user_id):
     """, data['label'], data['latitude'], data['longitude'], data['radius_m'], data['notes'], str(user_id))
 
 
-async def update_zone(conn: asyncpg.Connection, zone_id: str, data: dict, is_active: bool, user_id):
-    return await conn.fetchrow("""
+class ZoneStaleError(Exception):
+    """The zone exists but changed since the client read it (expected_updated_at no longer matches)."""
+
+
+async def _zone_write(conn: asyncpg.Connection, sql: str, zone_id: str, *args):
+    """Run a version-guarded zone UPDATE (`id = $1 AND updated_at = $2` is the guard; $1 and $2 are fixed).
+    None = no such zone; ZoneStaleError = the zone exists but its version moved (BP-02: no lost update)."""
+    row = await conn.fetchrow(sql, zone_id, *args)
+    if row is None:
+        if await conn.fetchval('SELECT 1 FROM fire_suppression_zones WHERE id = $1::uuid', zone_id):
+            raise ZoneStaleError(zone_id)
+    return row
+
+
+async def update_zone(conn: asyncpg.Connection, zone_id: str, data: dict, expected_updated_at: datetime, user_id):
+    """Edit label/position/radius/notes. Activation is not touched here (set_zone_active), so an edit can never
+    silently re-enable a zone someone disabled. `user_id` is kept for the call-site contract (audit is logged)."""
+    return await _zone_write(conn, """
         UPDATE fire_suppression_zones
-        SET label = $2, latitude = $3, longitude = $4, radius_m = $5, notes = $6, is_active = $7,
-            disabled_at = CASE WHEN $7 THEN NULL ELSE COALESCE(disabled_at, NOW()) END,
-            disabled_by = CASE WHEN $7 THEN NULL ELSE COALESCE(disabled_by, $8::uuid) END
-        WHERE id = $1::uuid
+        SET label = $3, latitude = $4, longitude = $5, radius_m = $6, notes = $7
+        WHERE id = $1::uuid AND updated_at = $2
         RETURNING *
-    """, zone_id, data['label'], data['latitude'], data['longitude'], data['radius_m'], data['notes'],
-        is_active, str(user_id))
+    """, zone_id, expected_updated_at, data['label'], data['latitude'], data['longitude'], data['radius_m'],
+        data['notes'])
+
+
+async def set_zone_active(conn: asyncpg.Connection, zone_id: str, is_active: bool, expected_updated_at: datetime,
+                          user_id):
+    return await _zone_write(conn, """
+        UPDATE fire_suppression_zones
+        SET is_active = $3,
+            disabled_at = CASE WHEN $3 THEN NULL ELSE COALESCE(disabled_at, NOW()) END,
+            disabled_by = CASE WHEN $3 THEN NULL ELSE COALESCE(disabled_by, $4::uuid) END
+        WHERE id = $1::uuid AND updated_at = $2
+        RETURNING *
+    """, zone_id, expected_updated_at, is_active, str(user_id))
 
 
 async def disable_zone(conn: asyncpg.Connection, zone_id: str, user_id):

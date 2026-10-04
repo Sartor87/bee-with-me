@@ -136,4 +136,5 @@ def zone_out(row) -> dict:
         'disabled_at': iso(row.get('disabled_at')),
         'notes': row.get('notes'),
         'created_at': iso(row.get('created_at')),
+        'updated_at': iso(row.get('updated_at')),
     }

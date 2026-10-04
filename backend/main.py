@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -194,10 +195,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title='Bee With Me API', version=APP_VERSION, lifespan=lifespan)
 
 def _json_safe(value):
-    """Make every string UTF-8 encodable: a lone surrogate becomes escaped text instead of crashing the response."""
+    """Make a validation-error payload JSON encodable: a lone surrogate becomes escaped text, bytes are decoded the
+    same way, and a non-finite float (NaN, Infinity) becomes None. None of them may turn the 422 into a 500."""
     if isinstance(value, str):
         return value.encode('utf-8', 'backslashreplace').decode('utf-8')
-    if isinstance(value, list):
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode('utf-8', 'backslashreplace')
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     if isinstance(value, dict):
         return {_json_safe(k): _json_safe(v) for k, v in value.items()}
@@ -206,8 +212,9 @@ def _json_safe(value):
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
-    """FastAPI's default 422, but safe for input that cannot be encoded (BP-03). Never logs the body (DP-02)."""
-    return JSONResponse(status_code=422, content={'detail': _json_safe(jsonable_encoder(exc.errors()))})
+    """FastAPI's default 422, but safe for input that cannot be encoded (BP-03). Never logs the body (DP-02).
+    Sanitised before and after jsonable_encoder: it decodes bytes strictly and passes NaN through."""
+    return JSONResponse(status_code=422, content={'detail': _json_safe(jsonable_encoder(_json_safe(exc.errors())))})
 
 
 app.add_middleware(

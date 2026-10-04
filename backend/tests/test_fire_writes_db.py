@@ -16,7 +16,8 @@ async def test_dismiss_keeps_the_first_dismisser(migrated_conn):
         "VALUES ('viirs', 'h1', NOW(), 42.5, 24.5) RETURNING id::text")
     await repository.dismiss_hotspot(migrated_conn, h, a, 'solar')
     row = await repository.dismiss_hotspot(migrated_conn, h, b, 'solar park east')
-    assert str(row['dismissed_by']) == a and row['dismiss_notes'] == 'solar park east'
+    # B51: new notes record their author, so the notes' writer is the one named
+    assert str(row['dismissed_by']) == b and row['dismiss_notes'] == 'solar park east'
 
 
 async def test_field_report_insert_and_extinguish(migrated_conn):
@@ -48,9 +49,12 @@ async def test_zone_disable_reenable_and_purge_after_48h(migrated_conn):
     disabled = await repository.disable_zone(migrated_conn, zid, user)
     assert disabled['is_active'] is False and disabled['disabled_at'] is not None
     assert [z['id'] for z in await repository.list_zones(migrated_conn, False)] == []
-    again = await repository.update_zone(
+    # B51: an edit never changes activation; enabling is its own versioned call
+    edited = await repository.update_zone(
         migrated_conn, zid, {'label': 'Solar', 'latitude': 42.5, 'longitude': 24.5, 'radius_m': 900, 'notes': None},
-        True, user)
+        disabled['updated_at'], user)
+    assert edited['is_active'] is False
+    again = await repository.set_zone_active(migrated_conn, zid, True, edited['updated_at'], user)
     assert again['is_active'] is True and again['disabled_at'] is None and again['radius_m'] == 900
     await repository.disable_zone(migrated_conn, zid, user)
     await migrated_conn.execute("UPDATE fire_suppression_zones SET disabled_at = NOW() - INTERVAL '49 hours'")

@@ -26,7 +26,7 @@ def _hotspot(**over):
 
 def _zone(**over):
     row = {'id': uuid.uuid4(), 'label': 'Solar park', 'latitude': 42.5, 'longitude': 24.5, 'radius_m': 1000,
-           'is_active': True, 'disabled_at': None, 'notes': None, 'created_at': T}
+           'is_active': True, 'disabled_at': None, 'notes': None, 'created_at': T, 'updated_at': T}
     row.update(over)
     return row
 
@@ -127,7 +127,7 @@ def test_zone_create_list_update_disable(client, monkeypatch, calls):
     _stub(monkeypatch, 'update_zone', _zone(radius_m=800))
     assert client.put(f'/api/fire/suppression-zones/{uuid.uuid4()}',
                       json={'label': 'Solar park', 'latitude': 42.5, 'longitude': 24.5, 'radius_m': 800,
-                            'is_active': True}).json()['radius_m'] == 800
+                            'expected_updated_at': T.isoformat()}).json()['radius_m'] == 800
     _stub(monkeypatch, 'disable_zone', _zone(is_active=False, disabled_at=T))
     assert client.delete(f'/api/fire/suppression-zones/{uuid.uuid4()}').json()['is_active'] is False
     assert calls['evaluate'] == 3
@@ -180,7 +180,7 @@ def test_extinguish_triggers_evaluation_and_refetch(client, monkeypatch, calls):
 def test_unknown_zone_is_404_on_update_and_delete(client, monkeypatch, calls):
     _stub(monkeypatch, 'update_zone', None)
     _stub(monkeypatch, 'disable_zone', None)
-    body = {'label': 'x', 'latitude': 42.5, 'longitude': 24.5}
+    body = {'label': 'x', 'latitude': 42.5, 'longitude': 24.5, 'expected_updated_at': T.isoformat()}
     assert client.put(f'/api/fire/suppression-zones/{uuid.uuid4()}', json=body).status_code == 404
     assert client.delete(f'/api/fire/suppression-zones/{uuid.uuid4()}').status_code == 404
     assert calls['evaluate'] == 0

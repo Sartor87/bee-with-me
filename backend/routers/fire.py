@@ -4,7 +4,7 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 from ..auth import get_current_user, require_role
 from ..database import get_conn
@@ -171,7 +171,20 @@ class ZoneIn(BaseModel):
 
 
 class ZoneUpdate(ZoneIn):
-    is_active: bool = True
+    """Edit body. `expected_updated_at` is the version the client read: a mismatch is a 409, never a silent overwrite.
+    Activation is explicit (enable/disable), so `is_active` is refused rather than ignored."""
+    expected_updated_at: AwareDatetime
+
+    @model_validator(mode='before')
+    @classmethod
+    def _no_activation_in_an_edit(cls, data):
+        if isinstance(data, dict) and 'is_active' in data:
+            raise ValueError('is_active cannot be set by an edit: use the enable or disable endpoint')
+        return data
+
+
+class ZoneVersion(BaseModel):
+    expected_updated_at: AwareDatetime
 
 
 def _zone_data(body: ZoneIn) -> dict:
@@ -218,27 +231,64 @@ async def list_zones(conn: Conn, _: User, include_disabled: bool = False):
     return [zone_out(r) for r in await repository.list_zones(conn, include_disabled)]
 
 
+async def _zone_changed(conn, action: str, zone_id, user, is_active: bool) -> None:
+    """Every zone write: one audit line (ids and state only, no label or notes), re-evaluate the alarm, tell the
+    other browsers to refetch zones. Best effort for the broadcast: the write is already committed."""
+    logger.info('fire zone %s: actor=%s zone=%s is_active=%s', action, user['id'], zone_id, is_active)
+    fire_alarm.request_evaluation()
+    try:
+        await notify(conn, 'fire_zones_updated', {})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('fire zone broadcast failed: %s', exc)
+
+
+async def _guarded_zone_write(write, zone_id: UUID):
+    """Map the repository outcome to the contract: None = 404 zone not found, ZoneStaleError = 409 zone_stale."""
+    try:
+        row = await write
+    except repository.ZoneStaleError:
+        raise HTTPException(status_code=409, detail='zone_stale')
+    if row is None:
+        raise HTTPException(status_code=404, detail='Zone not found')
+    return row
+
+
 @router.post('/suppression-zones', status_code=201)
 async def create_zone(body: ZoneIn, conn: Conn, user: Admin):
     row = await repository.create_zone(conn, _zone_data(body), user['id'])
-    fire_alarm.request_evaluation()
+    await _zone_changed(conn, 'created', row['id'], user, row['is_active'])
     return zone_out(row)
 
 
 @router.put('/suppression-zones/{zone_id}')
 async def update_zone(zone_id: UUID, body: ZoneUpdate, conn: Conn, user: Admin):
-    row = await repository.update_zone(conn, str(zone_id), _zone_data(body), body.is_active, user['id'])
-    if row is None:
-        raise HTTPException(status_code=404, detail='Zone not found')
-    fire_alarm.request_evaluation()
+    row = await _guarded_zone_write(
+        repository.update_zone(conn, str(zone_id), _zone_data(body), body.expected_updated_at, user['id']), zone_id)
+    await _zone_changed(conn, 'updated', zone_id, user, row['is_active'])
+    return zone_out(row)
+
+
+@router.post('/suppression-zones/{zone_id}/disable')
+async def disable_zone_versioned(zone_id: UUID, body: ZoneVersion, conn: Conn, user: Admin):
+    row = await _guarded_zone_write(
+        repository.set_zone_active(conn, str(zone_id), False, body.expected_updated_at, user['id']), zone_id)
+    await _zone_changed(conn, 'disabled', zone_id, user, False)
+    return zone_out(row)
+
+
+@router.post('/suppression-zones/{zone_id}/enable')
+async def enable_zone(zone_id: UUID, body: ZoneVersion, conn: Conn, user: Admin):
+    row = await _guarded_zone_write(
+        repository.set_zone_active(conn, str(zone_id), True, body.expected_updated_at, user['id']), zone_id)
+    await _zone_changed(conn, 'enabled', zone_id, user, True)
     return zone_out(row)
 
 
 @router.delete('/suppression-zones/{zone_id}')
 async def disable_zone(zone_id: UUID, conn: Conn, user: Admin):
-    """'Delete' disables the zone; the daily cleanup removes it 48 h later."""
+    """Alias of disable without the concurrency token (compatibility); the daily cleanup removes it 48 h later."""
     row = await repository.disable_zone(conn, str(zone_id), user['id'])
     if row is None:
         raise HTTPException(status_code=404, detail='Zone not found')
-    fire_alarm.request_evaluation()
+    await _zone_changed(conn, 'disabled', zone_id, user, False)
     return zone_out(row)
