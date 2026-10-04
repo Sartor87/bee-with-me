@@ -5,16 +5,24 @@ Demo simulation — creates test users, devices, groups and sends live location 
 Usage:
     python tools/demo.py                   # random walk near Sofia
     python tools/demo.py --lat 42.1 --lon 24.7 --interval 2
+    python tools/demo.py --no-photos       # skip uploading the persona photos
+    python tools/demo.py --replace-photos  # upload photos even if a user already has one
+
+Photos come from tools/demo-user-personas/ (optional; a missing file is skipped). By default a photo is
+uploaded only for users that have none yet, so re-running does not pile up files in uploads/.
 """
 
 import argparse
 import random
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
 BASE = 'http://localhost:8000/api'
+PERSONAS_DIR = Path(__file__).resolve().parent / 'demo-user-personas'
+PHOTO_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
 
 DEMO_USERS = [
     {
@@ -22,28 +30,28 @@ DEMO_USERS = [
         'phone': '+359888000001', 'pin': '1234',
         'username': 'demo_ivan', 'password': 'demo123',
         'rank': 'Sergeant', 'blood_type': 'A+', 'role': 'rescuer',
-        'dev_sn': 9001, 'dev_name': 'Tracker Ivan',
+        'photo': 'ivan-petrov.png', 'dev_sn': 9001, 'dev_name': 'Tracker Ivan',
     },
     {
         'first_name': 'Maria',  'last_name': 'Georgieva',
         'phone': '+359888000002', 'pin': '2345',
         'username': 'demo_maria', 'password': 'demo123',
         'rank': 'Corporal', 'blood_type': 'B+', 'role': 'rescuer',
-        'dev_sn': 9002, 'dev_name': 'Tracker Maria',
+        'photo': 'maria-georgieva.png', 'dev_sn': 9002, 'dev_name': 'Tracker Maria',
     },
     {
         'first_name': 'Georgi', 'last_name': 'Dimitrov',
         'phone': '+359888000003', 'pin': '3456',
         'username': 'demo_georgi', 'password': 'demo123',
         'rank': 'Lieutenant', 'blood_type': 'O+', 'role': 'rescuer',
-        'dev_sn': 9003, 'dev_name': 'Tracker Georgi',
+        'photo': 'georgi-dimitrov.png', 'dev_sn': 9003, 'dev_name': 'Tracker Georgi',
     },
     {
         'first_name': 'Elena',  'last_name': 'Stoyanova',
         'phone': '+359888000004', 'pin': '4567',
         'username': 'demo_elena', 'password': 'demo123',
         'rank': 'Private', 'blood_type': 'AB-', 'role': 'rescuer',
-        'dev_sn': 9004, 'dev_name': 'Tracker Elena',
+        'photo': 'elena-stoyanova.png', 'dev_sn': 9004, 'dev_name': 'Tracker Elena',
     },
 ]
 
@@ -113,13 +121,35 @@ def get_or_create_users(headers: dict) -> dict:
                 print(f'  Using existing user: {user["full_name"]}')
             result[uname] = user['id']
         else:
-            payload = {k: v for k, v in u.items() if k not in ('dev_sn', 'dev_name')}
+            payload = {k: v for k, v in u.items() if k not in ('dev_sn', 'dev_name', 'photo')}
             resp = httpx.post(f'{BASE}/users/', headers=headers, json=payload)
             resp.raise_for_status()
             uid = resp.json()['id']
             result[uname] = uid
             print(f'  Created user: {u["first_name"]} {u["last_name"]} (id={uid})')
     return result
+
+
+def upload_photos(headers: dict, user_ids: dict, replace: bool = False) -> None:
+    existing = get_existing_users(headers)
+    for u in DEMO_USERS:
+        uname = u['username']
+        path = PERSONAS_DIR / u['photo']
+        user = existing.get(uname, {})
+        if user.get('photo_url') and not replace:
+            print(f'  Photo skipped for {uname}: already has one ({user["photo_url"]})')
+            continue
+        if not path.is_file():
+            print(f'  Photo skipped for {uname}: file not found ({path})')
+            continue
+        ctype = PHOTO_TYPES.get(path.suffix.lower())
+        if ctype is None:
+            print(f'  Photo skipped for {uname}: unsupported type {path.suffix}')
+            continue
+        resp = httpx.post(f'{BASE}/users/{user_ids[uname]}/photo', headers=headers,
+                          files={'file': (path.name, path.read_bytes(), ctype)})
+        resp.raise_for_status()
+        print(f'  Uploaded photo for {uname}: {path.name} -> {resp.json()["photo_url"]}')
 
 
 def get_or_create_devices(headers: dict, user_ids: dict) -> dict:
@@ -217,6 +247,9 @@ def main() -> None:
     parser.add_argument('--interval', type=float, default=3.0,   help='Seconds between updates (default: 3)')
     parser.add_argument('--user',     default='admin')
     parser.add_argument('--password', default='admin')
+    parser.add_argument('--no-photos', action='store_true', help='Do not upload persona photos')
+    parser.add_argument('--replace-photos', action='store_true',
+                        help='Upload photos even for users that already have one')
     args = parser.parse_args()
 
     print('Bee With Me — demo simulator')
@@ -231,6 +264,8 @@ def main() -> None:
 
     check_test_endpoints(headers)
     user_ids = get_or_create_users(headers)
+    if not args.no_photos:
+        upload_photos(headers, user_ids, replace=args.replace_photos)
     devices  = get_or_create_devices(headers, user_ids)
     get_or_create_groups(headers, user_ids)
 
