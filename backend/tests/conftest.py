@@ -6,7 +6,7 @@ A lightweight FastAPI test app is constructed without the full lifespan
 """
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -55,6 +55,11 @@ def mock_conn():
     conn.fetch    = AsyncMock(return_value=[])
     conn.execute  = AsyncMock(return_value=None)
     conn.fetchval = AsyncMock(return_value=0)
+    # `async with conn.transaction():` works on the mock (a plain AsyncMock child returns a coroutine, not a context)
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
     return conn
 
 

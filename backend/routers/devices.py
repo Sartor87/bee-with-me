@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user, require_role
 from ..database import get_conn
 from ..fire import repository as fire_repository
-from ..fire.service import ALARM_LOCK_KEY, notify as fire_notify
+from ..fire.service import ALARM_LOCK_KEY, notify as fire_notify, notify_alerts_updated
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def update_device(
     device_id: UUID,
     body: DeviceUpdate,
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
-    _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
+    user: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
     updates = body.model_dump(exclude_none=True)
     if not updates:
@@ -99,12 +99,17 @@ async def update_device(
         # value is actually changing, so repeat saves with the same user_id are a no-op.
         idx = list(updates.keys()).index('user_id') + 2
         fields += f', assigned_at = CASE WHEN user_id IS DISTINCT FROM ${idx} THEN NOW() ELSE assigned_at END'
-    row = await conn.fetchrow(
-        f'UPDATE devices SET {fields} WHERE id = $1 RETURNING id, dev_sn, name, is_active',
-        device_id, *updates.values(),
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail='Device not found')
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            f'UPDATE devices SET {fields} WHERE id = $1 RETURNING id, dev_sn, name, is_active',
+            device_id, *updates.values(),
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail='Device not found')
+        # Deactivating through this edit ends the device's open rescuer alerts too, like the DELETE below.
+        resolved = (await fire_repository.resolve_disabled_alerts(conn, user['id'], device_id=device_id)
+                    if updates.get('is_active') is False else [])
+    await notify_alerts_updated(conn, resolved)
     return dict(row)
 
 
@@ -134,9 +139,14 @@ async def assign_device(
 async def deactivate_device(
     device_id: UUID,
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
-    _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
+    user: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
-    await conn.execute('UPDATE devices SET is_active = FALSE WHERE id = $1', device_id)
+    async with conn.transaction():
+        await conn.execute('UPDATE devices SET is_active = FALSE WHERE id = $1', device_id)
+        # Open rescuer alerts of a deactivated device end now (not "missing data"), by this admin, in the same
+        # transaction; the broadcast follows the commit.
+        resolved = await fire_repository.resolve_disabled_alerts(conn, user['id'], device_id=device_id)
+    await notify_alerts_updated(conn, resolved)
 
 
 @router.post('/{device_id}/reactivate', status_code=status.HTTP_204_NO_CONTENT)

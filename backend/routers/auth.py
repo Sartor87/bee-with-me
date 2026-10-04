@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from ..auth import create_access_token, create_refresh_token, decode_refresh_token, get_current_user, hash_password, verify_password
+from ..config import settings
 from ..database import get_conn
 
 router = APIRouter(prefix='/api/auth', tags=['auth'])
@@ -30,7 +31,9 @@ async def login(
         'SELECT id, password_hash, role, is_active FROM users WHERE username = $1 AND username IS NOT NULL',
         form.username,
     )
-    if user is None or not user['is_active'] or not verify_password(form.password, user['password_hash'] or ''):
+    # Only the roles in LOGIN_ROLES may log in; the same 401 as a wrong password, so no role is disclosed.
+    if (user is None or not user['is_active'] or user['role'] not in settings.login_role_set
+            or not verify_password(form.password, user['password_hash'] or '')):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid credentials')
     uid, role = str(user['id']), user['role']
     return TokenResponse(
@@ -49,7 +52,8 @@ async def refresh(
         'SELECT id, role, is_active FROM users WHERE id = $1',
         payload['sub'],
     )
-    if user is None or not user['is_active']:
+    # The role is read from the DB, not the token: a role change or a narrowed LOGIN_ROLES ends the session at refresh.
+    if user is None or not user['is_active'] or user['role'] not in settings.login_role_set:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found or inactive')
     uid, role = str(user['id']), user['role']
     return TokenResponse(

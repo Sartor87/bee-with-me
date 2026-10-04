@@ -191,6 +191,28 @@ async def resolve_alert(conn: asyncpg.Connection, alert_id: str, reason: str, re
     """, alert_id, reason, resolved_by))
 
 
+async def resolve_disabled_alerts(conn: asyncpg.Connection, resolved_by=None, device_id=None, user_id=None) -> list[str]:
+    """Resolve open RESCUER alerts whose device is inactive or whose current holder is inactive, as 'disabled'.
+
+    The evaluation tick calls it unscoped with resolved_by None (covers every way of deactivating); the deactivate
+    endpoints scope it to the device / user just deactivated and record the admin in resolved_by. A rescuer that is
+    merely silent (stale or absent position) is not inactive and keeps its alert open (B40). Returns the resolved ids.
+    """
+    rows = await conn.fetch("""
+        UPDATE fire_alerts a
+        SET resolved_at = NOW(), resolve_reason = 'disabled', resolved_by = $1::uuid
+        FROM devices d
+        LEFT JOIN users u ON u.id = d.user_id
+        WHERE d.id = a.device_id AND a.target_type = 'rescuer' AND a.resolved_at IS NULL
+          AND (d.is_active = FALSE OR u.is_active = FALSE)
+          AND ($2::uuid IS NULL OR d.id = $2::uuid)
+          AND ($3::uuid IS NULL OR d.user_id = $3::uuid)
+        RETURNING a.id::text AS id
+    """, None if resolved_by is None else str(resolved_by),
+        None if device_id is None else str(device_id), None if user_id is None else str(user_id))
+    return [r['id'] for r in rows]
+
+
 async def get_alert_out(conn: asyncpg.Connection, alert_id: str) -> FireAlertOut | None:
     row = await conn.fetchrow(ALERT_OUT_SELECT + ' WHERE a.id = $1::uuid', alert_id)
     return FireAlertOut.from_row(row) if row else None

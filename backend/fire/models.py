@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+HQ_DISTANCE_STEP_M = 100
+
 
 def iso(value) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else value
@@ -90,6 +92,8 @@ class FireAlertOut(BaseModel):
     """One shape for REST (GET /api/fire/alerts) and WebSocket (fire_alert, fire_alert_updated).
 
     Carries the rescuer's name and rank (the operator needs them) but never a phone, a photo path or the HQ position.
+    The distance of an HQ alert is rounded to the nearest 100 m on output (the DB keeps the exact value), so that
+    unauthenticated /ws listeners cannot trilaterate the HQ position from several alerts; rescuer alerts keep metres.
     """
     id: UUID
     target_type: str
@@ -107,9 +111,12 @@ class FireAlertOut(BaseModel):
     @classmethod
     def from_row(cls, row) -> 'FireAlertOut':
         r = dict(row)
+        distance_m = r['distance_m']
+        if r['target_type'] == 'hq':
+            distance_m = (distance_m + HQ_DISTANCE_STEP_M // 2) // HQ_DISTANCE_STEP_M * HQ_DISTANCE_STEP_M
         return cls(
             id=r['id'], target_type=r['target_type'], device_id=r['device_id'], user_id=r['user_id'],
-            full_name=r['full_name'], rank=r['rank'], distance_m=r['distance_m'],
+            full_name=r['full_name'], rank=r['rank'], distance_m=distance_m,
             triggered_at=r['triggered_at'], acknowledged_at=r['acknowledged_at'],
             resolved_at=r['resolved_at'], resolve_reason=r['resolve_reason'],
             hotspot=FireAlertHotspotOut(id=r['hotspot_id'], latitude=r['latitude'], longitude=r['longitude'],

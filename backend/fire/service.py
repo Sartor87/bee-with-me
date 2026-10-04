@@ -40,6 +40,18 @@ async def notify(conn: asyncpg.Connection, channel: str, payload: dict) -> None:
     await conn.execute('SELECT pg_notify($1, $2)', channel, json.dumps(payload, default=str))
 
 
+async def notify_alerts_updated(conn: asyncpg.Connection, alert_ids) -> None:
+    """Broadcast fire_alert_updated for already-committed changes. Best effort per alert: the change is durable, a
+    failed broadcast must not turn the caller's successful request into an error."""
+    for alert_id in alert_ids:
+        try:
+            out = await repo.get_alert_out(conn, alert_id)
+            if out is not None:
+                await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
+        except Exception:  # noqa: BLE001
+            logger.warning('fire alert %s resolved but its update was not broadcast', alert_id, exc_info=True)
+
+
 class FireAlarmService:
     def __init__(self, pool_getter: Callable = get_pool, now: Callable[[], datetime] = _utcnow,
                  tick_s: float = TICK_S):
@@ -118,6 +130,12 @@ class FireAlarmService:
                 out = await repo.get_alert_out(conn, alert_id)
                 if out is not None:
                     await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
+        # A deactivated device or user can no longer report: its open rescuer alerts end as 'disabled' (no actor),
+        # whichever way it was deactivated. Missing data of an ACTIVE rescuer is not covered here (B40).
+        for alert_id in await repo.resolve_disabled_alerts(conn):
+            out = await repo.get_alert_out(conn, alert_id)
+            if out is not None:
+                await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
         for new in decisions.to_open:
             alert_id = await repo.insert_alert(conn, new)
             if alert_id:

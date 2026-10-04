@@ -103,3 +103,41 @@ async def test_open_alert_shows_the_current_device_holder(migrated_conn):
     await migrated_conn.execute('UPDATE devices SET user_id = $1 WHERE id = $2', new, device)
     await repository.resolve_alert(migrated_conn, alert, 'aged_out')
     assert (await repository.get_alert_out(migrated_conn, alert)).full_name == 'Old Holder'
+
+
+@pytest.mark.Trait("Bug", "B47")
+async def test_resolve_disabled_alerts_only_for_inactive_device_or_holder(migrated_conn):
+    _, device, alert, admin = await _seed(migrated_conn)
+    # an active, merely silent rescuer keeps its alert (B40)
+    assert await repository.resolve_disabled_alerts(migrated_conn) == []
+    await migrated_conn.execute('UPDATE devices SET is_active = FALSE WHERE id = $1', device)
+    assert await repository.resolve_disabled_alerts(migrated_conn, device_id=None) == [alert]
+    row = await migrated_conn.fetchrow(
+        'SELECT resolve_reason::text, resolved_by FROM fire_alerts WHERE id = $1::uuid', alert)
+    assert row['resolve_reason'] == 'disabled' and row['resolved_by'] is None
+    assert await repository.resolve_disabled_alerts(migrated_conn) == []   # already resolved: idempotent
+
+
+@pytest.mark.Trait("Bug", "B47")
+async def test_resolve_disabled_alerts_scoped_to_a_deactivated_user_records_the_admin(migrated_conn):
+    _, device, alert, admin = await _seed(migrated_conn)
+    holder = await migrated_conn.fetchval("INSERT INTO users (full_name, role) VALUES ('Holder', 'rescuer') RETURNING id")
+    await migrated_conn.execute('UPDATE devices SET user_id = $1 WHERE id = $2', holder, device)
+    other = await migrated_conn.fetchval("INSERT INTO users (full_name, role) VALUES ('Other', 'rescuer') RETURNING id")
+    await migrated_conn.execute('UPDATE users SET is_active = FALSE WHERE id IN ($1, $2)', holder, other)
+    assert await repository.resolve_disabled_alerts(migrated_conn, admin, user_id=other) == []
+    assert await repository.resolve_disabled_alerts(migrated_conn, admin, user_id=holder) == [alert]
+    row = await migrated_conn.fetchrow('SELECT resolved_by FROM fire_alerts WHERE id = $1::uuid', alert)
+    assert row['resolved_by'] == admin
+
+
+@pytest.mark.Trait("Bug", "B46")
+async def test_open_alerts_list_puts_unacknowledged_before_newer_acknowledged(migrated_conn):
+    hotspot, device, older, admin = await _seed(migrated_conn)
+    device2 = await migrated_conn.fetchval('INSERT INTO devices (dev_sn) VALUES (8) RETURNING id')
+    newer = await migrated_conn.fetchval(
+        "INSERT INTO fire_alerts (hotspot_id, target_type, device_id, distance_m, triggered_at) "
+        "VALUES ($1, 'rescuer', $2, 500, NOW() + INTERVAL '1 minute') RETURNING id::text", hotspot, device2)
+    await repository.acknowledge_alert(migrated_conn, newer, admin)
+    assert [str(a.id) for a in await repository.list_alerts(migrated_conn, 'open', 50, 0)] == [older, newer]
+    assert [str(a.id) for a in await repository.list_alerts(migrated_conn, 'all', 50, 0)] == [newer, older]

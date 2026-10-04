@@ -68,6 +68,7 @@ def _patch_loaders(monkeypatch, decisions):
     for name in ('load_rescuer_targets', 'load_evaluation_hotspots', 'load_active_zones', 'load_open_alerts'):
         monkeypatch.setattr(repo, name, AsyncMock(return_value=[]))
     monkeypatch.setattr(repo, 'set_suppression', AsyncMock())
+    monkeypatch.setattr(repo, 'resolve_disabled_alerts', AsyncMock(return_value=[]))   # B47
     monkeypatch.setattr(repo, 'mark_repeats_due', AsyncMock(return_value=[]))
     monkeypatch.setattr(service_module, 'evaluate', lambda *a, **k: decisions())
 

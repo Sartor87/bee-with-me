@@ -4,6 +4,8 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import BaseModel, field_validator
 
+KNOWN_ROLES = ('admin', 'rescuer', 'viewer')
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
@@ -36,6 +38,10 @@ class Settings(BaseSettings):
 
     offline_maps_password: str = 'change_me'
 
+    # Which roles may log in (POST /api/auth/login and /refresh), comma-separated. The owner's rule is
+    # admin-only; widen it with LOGIN_ROLES=admin,rescuer. Other users keep their account and role.
+    login_roles: str = 'admin'
+
     # Pending migrations are applied only after a backup of THIS database in its current state:
     # the backup scripts write this marker next to the dump (start.ps1/start.sh back up into
     # data/backups). Resolved relative to the project folder, like uploads/.
@@ -56,6 +62,18 @@ class Settings(BaseSettings):
         if not 0 < milliseconds <= 3_600_000:
             raise ValueError("migration_lock_timeout must be more than 0 and at most 1h")
         return v
+
+    @field_validator("login_roles")
+    def validate_login_roles(cls, v):
+        roles = [part.strip().lower() for part in v.split(',') if part.strip()]
+        unknown = [r for r in roles if r not in KNOWN_ROLES]
+        if not roles or unknown:
+            raise ValueError("login_roles must be a comma-separated list of: " + ", ".join(KNOWN_ROLES))
+        return ','.join(dict.fromkeys(roles))
+
+    @property
+    def login_role_set(self) -> frozenset[str]:
+        return frozenset(part.strip() for part in self.login_roles.split(',') if part.strip())
 
     @field_validator("backup_marker_path")
     def resolve_marker_path(cls, v):
