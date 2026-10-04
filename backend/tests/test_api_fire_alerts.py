@@ -38,7 +38,10 @@ def test_list_open_alerts(client, monkeypatch):
     async def fake(conn, state, limit, offset):
         seen.update(state=state, limit=limit, offset=offset)
         return [_alert()]
+    async def fake_count(conn, state):
+        return 1
     monkeypatch.setattr(repository, 'list_alerts', fake)
+    monkeypatch.setattr(repository, 'count_alerts', fake_count)
     body = client.get('/api/fire/alerts?state=open').json()
     assert seen == {'state': 'open', 'limit': 50, 'offset': 0}
     assert body[0]['hotspot']['source'] == 'viirs' and body[0]['distance_m'] == 1200
@@ -92,7 +95,7 @@ def test_acknowledge_all(client, monkeypatch):
     ids = [str(uuid.uuid4()), str(uuid.uuid4())]
     sent = []
 
-    async def fake_all(conn, user_id):
+    async def fake_all(conn, user_id, alert_ids=None):
         return ids
 
     async def fake_get(conn, alert_id):
@@ -124,7 +127,7 @@ def test_permanent_device_delete_resolves_alerts_before_delete_and_notifies_afte
         return [{'id': alert_id}]
 
     async def execute(sql, *args):
-        order.append('delete')
+        order.append('lock' if 'pg_advisory_xact_lock' in sql else 'delete')
 
     async def fetchval(sql, *args):
         order.append('delete_device')
@@ -139,7 +142,7 @@ def test_permanent_device_delete_resolves_alerts_before_delete_and_notifies_afte
     monkeypatch.setattr(devices.fire_repository, 'get_alert_out', get_alert)
     monkeypatch.setattr(devices, 'fire_notify', fake_notify)
     assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 204
-    assert order[0] == 'resolve'
+    assert order[:2] == ['lock', 'resolve']
     assert order.index('delete_device') < order.index(('notify', 'fire_alert_updated', 'disabled'))
 
 
@@ -231,7 +234,7 @@ def test_status_survives_a_missing_settings_row(client, monkeypatch, caplog):
 def test_acknowledge_all_skips_an_alert_that_vanished(client, monkeypatch):
     sent = []
 
-    async def fake_all(conn, user_id):
+    async def fake_all(conn, user_id, alert_ids=None):
         return [str(uuid.uuid4())]
 
     async def gone(conn, alert_id):
@@ -244,3 +247,87 @@ def test_acknowledge_all_skips_an_alert_that_vanished(client, monkeypatch):
     monkeypatch.setattr(fire_router, 'notify', fake_notify)
     resp = client.post('/api/fire/alerts/acknowledge-all')
     assert resp.status_code == 200 and sent == []
+
+
+@pytest.mark.Trait("Bug", "B44")
+def test_acknowledge_all_with_ids_passes_only_those(client, monkeypatch):
+    wanted = [uuid.uuid4(), uuid.uuid4()]
+    seen = {}
+
+    async def fake_all(conn, user_id, alert_ids=None):
+        seen['ids'] = alert_ids
+        return [str(wanted[0])]
+
+    async def gone(conn, alert_id):
+        return None
+    monkeypatch.setattr(repository, 'acknowledge_all', fake_all)
+    monkeypatch.setattr(repository, 'get_alert_out', gone)
+    resp = client.post('/api/fire/alerts/acknowledge-all', json={'alert_ids': [str(i) for i in wanted]})
+    assert resp.status_code == 200 and resp.json() == {'acknowledged': 1}
+    assert [str(i) for i in seen['ids']] == [str(i) for i in wanted]
+
+
+@pytest.mark.Trait("Bug", "B44")
+def test_acknowledge_all_without_body_acknowledges_everything(client, monkeypatch):
+    seen = {}
+
+    async def fake_all(conn, user_id, alert_ids=None):
+        seen['ids'] = alert_ids
+        return []
+    monkeypatch.setattr(repository, 'acknowledge_all', fake_all)
+    assert client.post('/api/fire/alerts/acknowledge-all').json() == {'acknowledged': 0}
+    assert seen['ids'] is None
+
+
+@pytest.mark.Trait("Bug", "B44")
+@pytest.mark.parametrize('payload', [{'alert_ids': ['not-a-uuid']}, {'alert_ids': 'x'}])
+def test_acknowledge_all_rejects_malformed_ids(client, payload):
+    assert client.post('/api/fire/alerts/acknowledge-all', json=payload).status_code == 422
+
+
+@pytest.mark.Trait("Bug", "B44")
+def test_list_alerts_sets_total_count_header(client, monkeypatch):
+    seen = {}
+
+    async def fake(conn, state, limit, offset):
+        return [_alert()]
+
+    async def fake_count(conn, state):
+        seen['state'] = state
+        return 731
+    monkeypatch.setattr(repository, 'list_alerts', fake)
+    monkeypatch.setattr(repository, 'count_alerts', fake_count)
+    resp = client.get('/api/fire/alerts?state=all&limit=1&offset=5')
+    assert resp.status_code == 200 and len(resp.json()) == 1
+    assert resp.headers['X-Total-Count'] == '731' and seen['state'] == 'all'
+
+
+@pytest.mark.Trait("Bug", "B44")
+def test_permanent_delete_takes_the_alarm_lock_before_anything_else(client, mock_conn):
+    from backend.fire.service import ALARM_LOCK_KEY
+    calls = []
+
+    async def fetch(sql, *args):
+        calls.append(('fetch', sql, args))
+        return []
+
+    async def execute(sql, *args):
+        calls.append(('execute', sql, args))
+
+    async def fetchval(sql, *args):
+        calls.append(('fetchval', sql, args))
+        return uuid.uuid4()
+    mock_conn.fetch, mock_conn.execute, mock_conn.fetchval = fetch, execute, fetchval
+    assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 204
+    kind, sql, args = calls[0]
+    assert 'pg_advisory_xact_lock' in sql and 'try' not in sql and args == (ALARM_LOCK_KEY,)
+    assert all('pg_advisory_xact_lock' not in c[1] for c in calls[1:])
+
+
+@pytest.mark.Trait("Bug", "B44")
+def test_alert_out_select_prefers_the_current_device_holder_for_open_alerts():
+    from backend.fire.models import ALERT_OUT_SELECT
+    sql = ' '.join(ALERT_OUT_SELECT.split())
+    assert 'LEFT JOIN devices d ON d.id = a.device_id' in sql
+    assert 'a.resolved_at IS NULL' in sql and 'd.user_id' in sql and 'a.user_id' in sql
+    assert 'LEFT JOIN users u ON u.id = CASE' in sql

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user, require_role
 from ..database import get_conn
 from ..fire import repository as fire_repository
-from ..fire.service import notify as fire_notify
+from ..fire.service import ALARM_LOCK_KEY, notify as fire_notify
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,10 @@ async def delete_device_permanent(
     user: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
     async with conn.transaction():
+        # Serialise with the alarm tick (it holds the same lock while evaluating): a tick inserting an alert for this
+        # device must not interleave with the delete, or the FK SET NULL leaves an open alert without a device (BP-02).
+        # Blocking on purpose: the delete waits for the tick (the tick itself only try-locks).
+        await conn.execute('SELECT pg_advisory_xact_lock($1)', ALARM_LOCK_KEY)
         # Open fire alerts for this device end now, with a reason (BP-02); resolved rows keep the history
         # (device_id -> NULL through the FK). Must run before the delete so none is left open and orphaned.
         resolved = await conn.fetch(

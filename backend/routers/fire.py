@@ -3,7 +3,8 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 
 from ..auth import get_current_user
 from ..database import get_conn
@@ -74,18 +75,26 @@ async def status(conn: Conn, _: User):
 
 
 @router.get('/alerts', response_model=list[FireAlertOut])
-async def list_alerts(conn: Conn, _: User,
+async def list_alerts(response: Response, conn: Conn, _: User,
                       state: Literal['open', 'all'] = 'open',
                       limit: int = Query(50, ge=1, le=500),
                       offset: int = Query(0, ge=0)):
-    return await repository.list_alerts(conn, state, limit, offset)
+    rows = await repository.list_alerts(conn, state, limit, offset)
+    # total rows for the filter, ignoring paging: the client shows "N more not shown" past its page
+    response.headers['X-Total-Count'] = str(await repository.count_alerts(conn, state))
+    return rows
+
+
+class AcknowledgeAllBody(BaseModel):
+    alert_ids: list[UUID] = Field(max_length=1000)
 
 
 # Declared before /alerts/{alert_id}/acknowledge so the literal path wins.
 @router.post('/alerts/acknowledge-all')
-async def acknowledge_all(conn: Conn, user: User):
+async def acknowledge_all(conn: Conn, user: User, body: AcknowledgeAllBody | None = None):
+    """With a body only the listed alerts are acknowledged (the ones the operator can see); without one, all open."""
     async with conn.transaction():
-        ids = await repository.acknowledge_all(conn, user['id'])
+        ids = await repository.acknowledge_all(conn, user['id'], body.alert_ids if body else None)
         for alert_id in ids:
             out = await repository.get_alert_out(conn, alert_id)
             if out is not None:

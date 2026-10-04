@@ -214,6 +214,12 @@ async def list_alerts(conn: asyncpg.Connection, state: str, limit: int, offset: 
     return [FireAlertOut.from_row(r) for r in rows]
 
 
+async def count_alerts(conn: asyncpg.Connection, state: str) -> int:
+    """Rows matching the `state` filter of list_alerts, ignoring limit/offset (X-Total-Count)."""
+    where = ' WHERE resolved_at IS NULL' if state == 'open' else ''
+    return int(await conn.fetchval('SELECT count(*) FROM fire_alerts' + where))
+
+
 async def acknowledge_alert(conn: asyncpg.Connection, alert_id: str, user_id) -> tuple[FireAlertOut | None, bool]:
     """Idempotent. Acknowledging stops the repeats but never resolves the alert (BP-02)."""
     changed = await conn.fetchval("""
@@ -224,12 +230,21 @@ async def acknowledge_alert(conn: asyncpg.Connection, alert_id: str, user_id) ->
     return await get_alert_out(conn, alert_id), bool(changed)
 
 
-async def acknowledge_all(conn: asyncpg.Connection, user_id) -> list[str]:
-    rows = await conn.fetch("""
-        UPDATE fire_alerts SET acknowledged_at = NOW(), acknowledged_by = $1::uuid
-        WHERE resolved_at IS NULL AND acknowledged_at IS NULL
-        RETURNING id::text
-    """, str(user_id))
+async def acknowledge_all(conn: asyncpg.Connection, user_id, alert_ids=None) -> list[str]:
+    """Acknowledge open alerts. With `alert_ids` only those (an alert the operator never saw stays unacknowledged);
+    None keeps the old behaviour (every open alert)."""
+    if alert_ids is None:
+        rows = await conn.fetch("""
+            UPDATE fire_alerts SET acknowledged_at = NOW(), acknowledged_by = $1::uuid
+            WHERE resolved_at IS NULL AND acknowledged_at IS NULL
+            RETURNING id::text
+        """, str(user_id))
+    else:
+        rows = await conn.fetch("""
+            UPDATE fire_alerts SET acknowledged_at = NOW(), acknowledged_by = $1::uuid
+            WHERE resolved_at IS NULL AND acknowledged_at IS NULL AND id = ANY($2::uuid[])
+            RETURNING id::text
+        """, str(user_id), [str(i) for i in alert_ids])
     return [r['id'] for r in rows]
 
 

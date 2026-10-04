@@ -62,14 +62,19 @@ def burnt_area_feature(row) -> dict:
     }
 
 
+# Who is named on an alert: while it is open, the device's CURRENT holder (devices.user_id), because the person in
+# danger is whoever carries the device now; a resolved alert, or a device without a holder, keeps the user the alert
+# was raised for (fire_alerts.user_id).
 ALERT_OUT_SELECT = """
-    SELECT a.id, a.target_type::text AS target_type, a.device_id, a.user_id, u.full_name, u.rank,
+    SELECT a.id, a.target_type::text AS target_type, a.device_id, u.id AS user_id, u.full_name, u.rank,
            a.distance_m, a.triggered_at, a.acknowledged_at, a.resolved_at,
            a.resolve_reason::text AS resolve_reason,
            h.id AS hotspot_id, h.latitude, h.longitude, h.acquired_at, h.source::text AS source
     FROM fire_alerts a
     JOIN fire_hotspots h ON h.id = a.hotspot_id
-    LEFT JOIN users u ON u.id = a.user_id
+    LEFT JOIN devices d ON d.id = a.device_id
+    LEFT JOIN users u ON u.id = CASE WHEN a.resolved_at IS NULL AND d.user_id IS NOT NULL
+                                     THEN d.user_id ELSE a.user_id END
 """
 
 
