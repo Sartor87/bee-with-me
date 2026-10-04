@@ -73,10 +73,30 @@ def login(username: str = 'admin', password: str = 'admin') -> dict:
     return {'Authorization': f'Bearer {resp.json()["access_token"]}'}
 
 
-def get_existing_users(headers: dict) -> dict:
-    r = httpx.get(f'{BASE}/users/', headers=headers)
+def check_test_endpoints(headers: dict) -> None:
+    r = httpx.get(f'{BASE}/test/devices', headers=headers)
+    if r.status_code == 404:
+        print('Test endpoints are off: set ENABLE_TEST_ENDPOINTS=true in .env and restart the backend.',
+              file=sys.stderr)
+        sys.exit(1)
     r.raise_for_status()
-    return {u['username']: u for u in r.json()['items'] if u.get('username')}
+
+
+def get_all_pages(path: str, headers: dict) -> list:
+    """Every item of a paginated list endpoint ({items, total, limit, offset})."""
+    items, offset = [], 0
+    while True:
+        r = httpx.get(f'{BASE}{path}', headers=headers, params={'limit': 500, 'offset': offset})
+        r.raise_for_status()
+        page = r.json()
+        items.extend(page['items'])
+        offset += len(page['items'])
+        if not page['items'] or offset >= page['total']:
+            return items
+
+
+def get_existing_users(headers: dict) -> dict:
+    return {u['username']: u for u in get_all_pages('/users/', headers) if u.get('username')}
 
 
 def get_or_create_users(headers: dict) -> dict:
@@ -85,8 +105,13 @@ def get_or_create_users(headers: dict) -> dict:
     for u in DEMO_USERS:
         uname = u['username']
         if uname in existing:
-            print(f'  Using existing user: {existing[uname]["full_name"]}')
-            result[uname] = existing[uname]['id']
+            user = existing[uname]
+            if not user.get('is_active', True):
+                httpx.patch(f'{BASE}/users/{user["id"]}/reactivate', headers=headers).raise_for_status()
+                print(f'  Reactivated user: {user["full_name"]}')
+            else:
+                print(f'  Using existing user: {user["full_name"]}')
+            result[uname] = user['id']
         else:
             payload = {k: v for k, v in u.items() if k not in ('dev_sn', 'dev_name')}
             resp = httpx.post(f'{BASE}/users/', headers=headers, json=payload)
@@ -98,13 +123,27 @@ def get_or_create_users(headers: dict) -> dict:
 
 
 def get_or_create_devices(headers: dict, user_ids: dict) -> dict:
-    existing = {d['dev_sn']: d for d in httpx.get(f'{BASE}/test/devices', headers=headers).json()}
+    # /api/devices/ lists inactive devices too; /api/test/devices only active ones, so a device
+    # deactivated earlier would look missing and its re-create would fail with 409.
+    r = httpx.get(f'{BASE}/devices/', headers=headers)
+    r.raise_for_status()
+    existing = {d['dev_sn']: d for d in r.json()}
     result = {}
     for u in DEMO_USERS:
         sn = u['dev_sn']
         if sn in existing:
-            print(f'  Using existing device: SN={sn}')
-            result[u['username']] = str(existing[sn]['id'])
+            device = existing[sn]
+            did = str(device['id'])
+            if not device['is_active']:
+                httpx.post(f'{BASE}/devices/{did}/reactivate', headers=headers).raise_for_status()
+                print(f'  Reactivated device: SN={sn}')
+            else:
+                print(f'  Using existing device: SN={sn}')
+            if str(device.get('user_id')) != str(user_ids[u['username']]):
+                httpx.put(f'{BASE}/devices/{did}/assign', headers=headers,
+                          json={'user_id': user_ids[u['username']]}).raise_for_status()
+                print(f'    Assigned SN={sn} to {u["username"]}')
+            result[u['username']] = did
         else:
             resp = httpx.post(f'{BASE}/devices/', headers=headers, json={
                 'dev_sn':      sn,
@@ -120,7 +159,7 @@ def get_or_create_devices(headers: dict, user_ids: dict) -> dict:
 
 
 def get_or_create_groups(headers: dict, user_ids: dict) -> None:
-    existing = {g['name'] for g in httpx.get(f'{BASE}/groups/', headers=headers).json()['items']}
+    existing = {g['name'] for g in get_all_pages('/groups/', headers)}
     for g in DEMO_GROUPS:
         if g['name'] in existing:
             print(f'  Using existing group: {g["name"]}')
@@ -190,6 +229,7 @@ def main() -> None:
         print(f'Login failed: {e}', file=sys.stderr)
         sys.exit(1)
 
+    check_test_endpoints(headers)
     user_ids = get_or_create_users(headers)
     devices  = get_or_create_devices(headers, user_ids)
     get_or_create_groups(headers, user_ids)
