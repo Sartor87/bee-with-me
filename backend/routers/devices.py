@@ -154,27 +154,36 @@ async def delete_device_permanent(
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
     user: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
-    async with conn.transaction():
-        # Serialise with the alarm tick (it holds the same lock while evaluating): a tick inserting an alert for this
-        # device must not interleave with the delete, or the FK SET NULL leaves an open alert without a device (BP-02).
-        # Blocking on purpose: the delete waits for the tick (the tick itself only try-locks).
-        await conn.execute('SELECT pg_advisory_xact_lock($1)', ALARM_LOCK_KEY)
-        # Open fire alerts for this device end now, with a reason (BP-02); resolved rows keep the history
-        # (device_id -> NULL through the FK). Must run before the delete so none is left open and orphaned.
-        resolved = await conn.fetch(
-            "UPDATE fire_alerts SET resolved_at = NOW(), resolve_reason = 'disabled', "
-            "resolved_by = $2::uuid WHERE device_id = $1 AND resolved_at IS NULL RETURNING id::text",
-            device_id, user['id'],
-        )
-        await conn.execute('DELETE FROM sos_alerts       WHERE device_id = $1', device_id)
-        await conn.execute('DELETE FROM location_events  WHERE device_id = $1', device_id)
-        await conn.execute('DELETE FROM repeater_events  WHERE device_id = $1', device_id)
-        deleted = await conn.fetchval(
-            'DELETE FROM devices WHERE id = $1 RETURNING id', device_id
-        )
-        if deleted is None:
-            # unknown device: nothing was deleted, so do not resolve anything either
-            raise HTTPException(status_code=404, detail='Device not found')
+    try:
+        async with conn.transaction():
+            # The long deletes run WITHOUT the alarm lock, so alarm ticks are not skipped while they run (BP-02, TP-02).
+            await conn.execute('DELETE FROM sos_alerts       WHERE device_id = $1', device_id)
+            await conn.execute('DELETE FROM location_events  WHERE device_id = $1', device_id)
+            await conn.execute('DELETE FROM repeater_events  WHERE device_id = $1', device_id)
+            # Serialise with the alarm tick (it holds the same lock while evaluating): a tick inserting an alert for
+            # this device must not interleave with the resolve + delete below, or the FK SET NULL leaves an open
+            # alert without a device. Blocking on purpose (the tick itself only try-locks) but bounded: after 10 s
+            # the whole delete rolls back with 503 instead of queueing behind a stuck tick. An xact lock may be
+            # taken mid-transaction; it is held to commit.
+            await conn.execute("SET LOCAL lock_timeout = '10s'")
+            await conn.execute('SELECT pg_advisory_xact_lock($1)', ALARM_LOCK_KEY)
+            # Open fire alerts for this device end now, with a reason (BP-02); resolved rows keep the history
+            # (device_id -> NULL through the FK). Must run before the delete so none is left open and orphaned.
+            resolved = await conn.fetch(
+                "UPDATE fire_alerts SET resolved_at = NOW(), resolve_reason = 'disabled', "
+                "resolved_by = $2::uuid WHERE device_id = $1 AND resolved_at IS NULL RETURNING id::text",
+                device_id, user['id'],
+            )
+            deleted = await conn.fetchval(
+                'DELETE FROM devices WHERE id = $1 RETURNING id', device_id
+            )
+            if deleted is None:
+                # unknown device: nothing was deleted, so do not resolve anything either
+                raise HTTPException(status_code=404, detail='Device not found')
+    except asyncpg.exceptions.LockNotAvailableError:
+        logger.warning('Device delete rolled back: the fire alarm lock was not available in time')
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail='The fire alarm is busy evaluating; nothing was deleted, try again in a moment')
     for row in resolved:
         try:
             out = await fire_repository.get_alert_out(conn, row['id'])

@@ -209,8 +209,10 @@ async def mark_repeats_due(conn: asyncpg.Connection) -> list[str]:
 
 async def list_alerts(conn: asyncpg.Connection, state: str, limit: int, offset: int) -> list[FireAlertOut]:
     where = ' WHERE a.resolved_at IS NULL' if state == 'open' else ''
-    rows = await conn.fetch(ALERT_OUT_SELECT + where + ' ORDER BY a.triggered_at DESC LIMIT $1 OFFSET $2',
-                            limit, offset)
+    # Open alerts: unacknowledged first, so beyond the page cap it is acknowledged ones that fall off, never an
+    # unacknowledged one (BP-02). 'all' stays newest first.
+    order = 'a.acknowledged_at IS NOT NULL, a.triggered_at DESC' if state == 'open' else 'a.triggered_at DESC'
+    rows = await conn.fetch(ALERT_OUT_SELECT + where + f' ORDER BY {order} LIMIT $1 OFFSET $2', limit, offset)
     return [FireAlertOut.from_row(r) for r in rows]
 
 

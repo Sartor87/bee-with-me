@@ -142,7 +142,8 @@ def test_permanent_device_delete_resolves_alerts_before_delete_and_notifies_afte
     monkeypatch.setattr(devices.fire_repository, 'get_alert_out', get_alert)
     monkeypatch.setattr(devices, 'fire_notify', fake_notify)
     assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 204
-    assert order[:2] == ['lock', 'resolve']
+    lock = order.index('lock')   # B46: taken late, right before the resolve (events are deleted before it)
+    assert order[lock:lock + 2] == ['lock', 'resolve']
     assert order.index('delete_device') < order.index(('notify', 'fire_alert_updated', 'disabled'))
 
 
@@ -303,7 +304,7 @@ def test_list_alerts_sets_total_count_header(client, monkeypatch):
 
 
 @pytest.mark.Trait("Bug", "B44")
-def test_permanent_delete_takes_the_alarm_lock_before_anything_else(client, mock_conn):
+def test_permanent_delete_takes_the_blocking_alarm_lock_once_before_the_alert_resolve(client, mock_conn):
     from backend.fire.service import ALARM_LOCK_KEY
     calls = []
 
@@ -319,9 +320,13 @@ def test_permanent_delete_takes_the_alarm_lock_before_anything_else(client, mock
         return uuid.uuid4()
     mock_conn.fetch, mock_conn.execute, mock_conn.fetchval = fetch, execute, fetchval
     assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 204
-    kind, sql, args = calls[0]
-    assert 'pg_advisory_xact_lock' in sql and 'try' not in sql and args == (ALARM_LOCK_KEY,)
-    assert all('pg_advisory_xact_lock' not in c[1] for c in calls[1:])
+    # B46 supersedes "first": the blocking lock is taken late (after the long event deletes, see test_fire_b46.py),
+    # but still exactly once, blocking, and before the fire_alerts resolve and the device delete.
+    locks = [i for i, c in enumerate(calls) if 'pg_advisory_xact_lock' in c[1]]
+    assert len(locks) == 1
+    kind, sql, args = calls[locks[0]]
+    assert 'try' not in sql and args == (ALARM_LOCK_KEY,)
+    assert all('fire_alerts' not in c[1] and 'DELETE FROM devices' not in c[1] for c in calls[:locks[0]])
 
 
 @pytest.mark.Trait("Bug", "B44")
