@@ -21,6 +21,7 @@ build/
 node_modules/
 assets/dist/
 frontend/dist/
+backend/uploads/
 *.bundle.js
 *.module.wasm
 
