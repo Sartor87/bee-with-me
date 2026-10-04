@@ -10,7 +10,7 @@
   - [ ] P5 dismiss, suppression zones, field reports
   - [ ] before the PR: one live GWIS smoke test (real network fetch of both layers); note in the PR that PDF export on Windows needs the GTK runtime
 - [ ] wind-shift alerts for forest-fire ops (draft spec: docs/superpowers/specs/2026-10-02-wind-shift-alerts-design.md in the kit workspace)
-- [ ] move the logout button away from the language so nobody log outs accidentally
+- [x] ~~move the logout button away from the language so nobody log outs accidentally~~ — done: logout is on the Settings page (Account card), not next to the language switch (feature/effis-fire-layers)
 - [ ] think if an account page is needed?
 - [ ] fix the bug where mgrs and lat/lon doesn't show accordingly
 - [ ] fix the roles so the admin account is the only one that can delete
