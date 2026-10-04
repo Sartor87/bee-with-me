@@ -222,6 +222,10 @@ async def test_fire_prune_failure_has_own_message_and_location_prune_ran(monkeyp
         raise RuntimeError('fire prune exploded')
 
     monkeypatch.setattr(main, 'get_pool', lambda: _Pool())
+    async def no_anonymise(_conn, _days):
+        return 0
+
+    monkeypatch.setattr(main, 'anonymise_resolved_alerts', no_anonymise)
     monkeypatch.setattr(main, 'prune_fire_data', boom)
     monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
     with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):

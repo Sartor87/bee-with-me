@@ -85,6 +85,19 @@ async def prune_fire_data(conn: asyncpg.Connection) -> dict[str, int]:
     }
 
 
+async def anonymise_resolved_alerts(conn: asyncpg.Connection, retention_days: int) -> int:
+    """DP-03: drop the named trace (user, device, ack/resolve actors) from RESOLVED alerts once they are older than
+    the location retention, so alerts never outlive the positions they were derived from. Open alerts are never
+    touched; the rest of the row stays for after-action review. Keyed on the server clock (resolved_at)."""
+    return await conn.fetchval(
+        "WITH u AS (UPDATE fire_alerts SET user_id = NULL, device_id = NULL, acknowledged_by = NULL,"
+        " resolved_by = NULL"
+        " WHERE resolved_at IS NOT NULL AND resolved_at < NOW() - make_interval(days => $1::int)"
+        " AND (user_id IS NOT NULL OR device_id IS NOT NULL OR acknowledged_by IS NOT NULL"
+        "      OR resolved_by IS NOT NULL)"
+        " RETURNING 1) SELECT COUNT(*) FROM u", retention_days)
+
+
 async def list_hotspots(conn: asyncpg.Connection) -> list[asyncpg.Record]:
     return await conn.fetch(
         "SELECT * FROM fire_hotspots WHERE acquired_at > NOW() - INTERVAL '7 days' ORDER BY acquired_at DESC")

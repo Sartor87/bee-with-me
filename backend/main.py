@@ -16,7 +16,7 @@ from .routers import auth, devices, export, fire, groups, locations, users, ws, 
 from .routers import settings as settings_router
 from .ws import manager
 from .fire import poller as fire_poller
-from .fire.repository import prune_fire_data
+from .fire.repository import anonymise_resolved_alerts, prune_fire_data
 from .fire.service import service as fire_alarm
 
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +52,12 @@ async def _cleanup_old_locations() -> None:
                             deleted or 0, settings.location_retention_days)
         except Exception as exc:
             logger.warning('Location cleanup failed: %s', exc)
+        try:
+            async with get_pool().acquire() as conn:
+                anonymised = await anonymise_resolved_alerts(conn, settings.location_retention_days)
+                logger.info('Fire alert anonymisation: anonymised %d resolved alerts', anonymised)
+        except Exception as exc:
+            logger.warning('Fire alert anonymisation failed: %s', exc)
         try:
             async with get_pool().acquire() as conn:
                 pruned = await prune_fire_data(conn)
