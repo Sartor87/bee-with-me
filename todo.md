@@ -3,11 +3,12 @@
 - [ ] **in progress** — Copernicus EFFIS burnt areas + active hotspots with proximity alarm (reference: https://github.com/bilawalsidhu/gods-eye-view/pull/852), branch `feature/effis-fire-layers`. Plan: docs/superpowers/plans/2026-10-02-effis-fire-layers.md (kit workspace)
   - [x] P-1 dev tooling + PDF export escaping / no URL fetching
   - [x] P0 migration runner, `0001_baseline`, Podman-first start/backup/restore scripts, backup-before-migrate guard
-  - [ ] P1 fire data: migration `0002`, GWIS fetch, poller, read endpoints
-  - [ ] P2 fire layers on the map
-  - [ ] P3 settings page + HQ location in the database
-  - [ ] P4 fire proximity alarm (HQ / rescuers, repeat until acknowledged)
+  - [x] P1 fire data: migration `0002`, GWIS fetch, poller, read endpoints
+  - [x] P2 fire layers on the map
+  - [x] P3 settings page + HQ location in the database (migration `0003`, admin-only Settings page, optimistic concurrency on settings writes)
+  - [ ] P4 fire proximity alarm (HQ / rescuers, repeat until acknowledged) — in progress: migration `0004` + pure proximity evaluation done; alarm service, alert endpoints and alarm banner next
   - [ ] P5 dismiss, suppression zones, field reports
+  - [ ] before the PR: one live GWIS smoke test (real network fetch of both layers); note in the PR that PDF export on Windows needs the GTK runtime
 - [ ] wind-shift alerts for forest-fire ops (draft spec: docs/superpowers/specs/2026-10-02-wind-shift-alerts-design.md in the kit workspace)
 - [ ] move the logout button away from the language so nobody log outs accidentally
 - [ ] think if an account page is needed?
@@ -16,7 +17,7 @@
 - [ ] CI/CD
 - [ ] build and compile
 - [ ] think about windows support?
-- [ ] **[SECURITY]** WebSocket endpoint (`/ws`) accepts connections from any client on the network with no authentication — anyone who can reach the server can receive all live position and SOS alert data. maybe (re)introduce JWT authentication? Note: the EFFIS fire feature adds `fire_alert` / `fire_data_updated` messages (rescuer names + distances) to this same unauthenticated channel — TODO: authenticate `/ws` before multi-user use.
+- [ ] **[SECURITY]** WebSocket endpoint (`/ws`) accepts connections from any client on the network with no authentication — anyone who can reach the server can receive all live position and SOS alert data. maybe (re)introduce JWT authentication? Note: the EFFIS fire feature adds messages to this same unauthenticated channel: `fire_data_updated` carries only counts, a time and the feed state; the P4 `fire_alert` messages carry rescuer names and distances. HQ coordinates are not sent over `/ws` (clients re-read settings through the authenticated API). TODO: authenticate `/ws` before multi-user use.
 - [ ] **[SECURITY]** stored XSS in the map's tracker tooltip: `frontend/src/composables/useMap.js` (~549-572) builds the tooltip with `innerHTML` from group description, member full name, rank, phone, device name and display label. Anyone who can create or import users/groups can put `<img src=x onerror=...>` in a name; it runs in every operator's browser on hover and can read `token` / `refresh_token` from `localStorage`. Fix in its own PR: build the tooltip as a Vue component (like `FirePopup.vue`) or with DOM nodes + `textContent`, plus a test with an HTML payload in a name. Found by the security review of the EFFIS P2 gate (2026-10-03); pre-existing, not part of the EFFIS PR
 - [ ] map never goes live if the backend is down when the map opens: `frontend/src/views/MapView.vue` `onMounted` (~423-425) awaits `Promise.all([fetchLive, fetchSOS, fetchTrail])` and only then calls `connect()`. If any of the three requests fails, the rejection skips `connect()`, so there is no WebSocket, no reconnect loop, no live positions or SOS until the page is reloaded (life safety). Fix: call `connect()` first (or in a `finally`), and let the reconnect/resync path load the data; add a test. Found by the breaker on the EFFIS P2 gate (2026-10-03); pre-existing
 - [ ] add a Content-Security-Policy to `frontend/index.html` (none today; limits the damage of any XSS)
@@ -28,7 +29,7 @@
 - [ ] access tokens never expire (currently on purpose)
 - [ ] CRC check has no integrity check
 - [ ] endpoints accessible to any user not just admin (are we going to have other users?)
-- [ ] the headquarters location is stored in localstorage (per browser), instead it should be stored in the database — planned in EFFIS P3 (settings)
+- [x] ~~the headquarters location is stored in localstorage (per browser), instead it should be stored in the database~~ — done in EFFIS P3: `settings` table (migration `0003`), `GET/PUT /api/settings`, `PUT /api/settings/hq`; an admin's old browser copy is uploaded once, then removed from every browser (feature/effis-fire-layers)
 - [ ] drop redundant columns: latitude/longitude/mgrs duplicate what's in the geometry. should save a lot of db rows
 - [ ] fetchtrail () should only fetch a device if the row is in view, should make the json smaller
 - [ ] `/api/locations/live` query cost grows with the whole `location_events` table (DISTINCT ON, no skip scan in PG16) — rewrite as a per-device LATERAL probe on `idx_location_events_device_received`. See docs/research/2026-10-02-data-volume-archival.md (kit workspace)
@@ -43,4 +44,8 @@
 - [ ] tests print `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead` (from `fastapi/testclient.py`, with the current FastAPI/Starlette versions). Harmless today; before a future Starlette drops httpx support, follow its migration note (add the replacement test client package with a pinned version in `backend/requirements.txt`) and re-run the backend tests. `httpx` itself stays: the EFFIS poller uses it at runtime
 - [ ] UI for bright daylight: the interface is dark-only; operators also work outdoors in sun — add a daylight / high-contrast mode
 - [ ] keyboard focus is invisible on buttons (no focus ring) — add one
+- [ ] retention for fire data: `fire_alerts` are never deleted, and hotspots referenced by an alert are kept by the 7-day prune, so both grow without limit (small volume, but no defined lifetime: DP-03). Decide how long alerts are kept (after-action review vs personal data: alerts name rescuers) and add a cleanup that removes old resolved alerts, then their hotspots
+- [ ] settings: `PUT /api/settings/hq-initial` accepts a browser's legacy HQ only while `settings.updated_by IS NULL`; deleting the user who last saved settings sets it back to NULL (FK `ON DELETE SET NULL`), so an old browser copy could set HQ again if HQ is also unset. Low risk; fix with a one-time marker column (e.g. `hq_migrated_at`) in a later migration
+- [ ] `groups.color` is a free string with no format check on the server (only admins set it; the map falls back safely on bad values) — validate it as a hex colour in the groups API
+- [ ] i18n: `map.latLon` exists in `en.js` but is missing in `bg.js`
 - [ ] after a restore the previous database is kept as `<db>_before_restore_<time>` (a second copy of all personal data) — remind the operator to drop it, or offer a cleanup command
