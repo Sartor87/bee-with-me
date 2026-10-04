@@ -783,3 +783,79 @@ def test_start_sh_stops_naming_both_attempts_when_nothing_can_make_a_key(project
     assert res.returncode != 0, res.out
     assert not (project / '.env').exists()
     assert 'openssl' in res.out and '/dev/urandom' in res.out, res.out
+
+
+# ── B60: engine-guard steps use the right engine; temp secrets file cleanup ──
+
+def _guard_kinds():
+    """Both start scripts apply the Podman machine override on Windows (start.sh under Git Bash too)."""
+    return [pytest.param('ps', marks=pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')),
+            pytest.param('sh', marks=pytest.mark.skipif(BASH is None or os.name != 'nt', reason='Podman machine override: Windows'))]
+
+
+def _guard_text(kind, project, tmp_path):
+    """The guard message as one line: PowerShell hard-wraps its error text at the console width (and repeats it
+    after 'FullyQualifiedErrorId'), so take the first copy and drop the line breaks before matching."""
+    _pgdata_with_files(project)
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert res.returncode != 0, res.out
+    first = re.split(r'\nAt \S+:\d+ char:', res.out.replace('\\', '/'))[0]
+    return re.sub(r'\x1b\[[0-9;]*m', '', first).replace('\n', '')
+
+
+@pytest.mark.Trait("Bug", "B60")
+@pytest.mark.parametrize('kind', _guard_kinds())
+def test_guard_backup_step_forces_docker_and_stops_the_docker_stack(kind, project, tmp_path):
+    out = _guard_text(kind, project, tmp_path)
+    # the backup scripts pick podman first themselves, so the step must say CONTAINER_ENGINE=docker on that line
+    assert re.search(r"CONTAINER_ENGINE\s*=\s*'?docker'?;?[^\"]*\"[^\"]*scripts/backup\.(ps1|sh)\"", out), out
+    assert re.search(r'docker compose -p bee-with-me -f "?[^"\s]*docker/docker-compose\.yaml"? stop', out), out
+
+
+@pytest.mark.Trait("Bug", "B60")
+@pytest.mark.parametrize('kind', _guard_kinds())
+def test_guard_rename_is_timestamped_and_podman_start_clears_the_engine_override(kind, project, tmp_path):
+    out = _guard_text(kind, project, tmp_path)
+    assert re.search(r'pgdata\.docker-\d{8}-\d{6}', out), out
+    assert re.search(r'(Remove-Item Env:CONTAINER_ENGINE|unset CONTAINER_ENGINE)[^"]*"[^"]*start\.(ps1|sh)"', out), out
+    if kind == 'sh':
+        assert 'mv -n' in out, out
+
+
+@pytest.mark.Trait("Bug", "B60")
+@pytest.mark.parametrize('kind', _guard_kinds())
+def test_guard_restore_step_stops_the_backend_and_names_a_dump_path(kind, project, tmp_path):
+    out = _guard_text(kind, project, tmp_path)
+    assert re.search(r'stop the backend[^"]*"[^"]*scripts/restore\.(ps1|sh)" "[^"]*data/backups/[^"]+"', out), out
+
+
+@pytest.mark.Trait("Bug", "B60")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_acl_is_restricted_while_the_temp_secrets_file_is_still_empty(project, tmp_path):
+    res = _fresh_install('ps', project, tmp_path, EXAMPLE)
+    assert res.returncode == 0, res.out
+    calls = [c for c in res.calls if c.startswith('icacls ')]
+    assert calls == ['icacls size=0'], res.calls   # restricted before the key was written
+    assert (project / '.env').stat().st_size > 0
+
+
+@pytest.mark.Trait("Bug", "B60")
+def test_temp_secrets_files_are_git_ignored():
+    lines = [l.strip() for l in (ROOT / '.gitignore').read_text(encoding='utf-8').splitlines()]
+    assert '.env.new*' in lines, 'temp secrets file names must be ignored'
+    assert 'data/' in lines   # the root data folder stays ignored
+
+
+@pytest.mark.Trait("Bug", "B60")
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
+def test_start_sh_temp_secrets_file_is_made_by_mktemp_and_a_stale_one_is_ignored(project, tmp_path):
+    stale = project / '.env.new'
+    stale.write_text('stale', encoding='utf-8')
+    res = _fresh_install('sh', project, tmp_path, EXAMPLE)
+    assert res.returncode == 0, res.out
+    assert stale.read_text(encoding='utf-8') == 'stale'   # a leftover is neither reused nor overwritten
+    assert len(_secret_lines(project)) == 1
+    names = sorted(p.name for p in project.iterdir() if p.name.startswith('.env.new'))
+    assert names == ['.env.new'], names                    # no temp file of this run left behind
+    text = (ROOT / 'start.sh').read_text(encoding='utf-8')
+    assert 'mktemp' in text and re.search(r'trap .*rm -f', text)

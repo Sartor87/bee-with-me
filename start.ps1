@@ -112,6 +112,7 @@ if (-not (Test-Path "$root\.env")) {
     # then moved into place: the key is never in a world-readable file and a half-written file is never
     # taken for the real one. Any failure removes the temp file and stops.
     $tmpEnv = "$root\.env.new-" + [guid]::NewGuid().ToString('N')
+    $envMoved = $false
     try {
         [IO.File]::WriteAllBytes($tmpEnv, [byte[]]@())
         $mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -121,10 +122,13 @@ if (-not (Test-Path "$root\.env")) {
         }
         [IO.File]::WriteAllText($tmpEnv, $example, (New-Object Text.UTF8Encoding($false)))   # UTF-8 without BOM
         Move-Item -LiteralPath $tmpEnv -Destination "$root\.env" -ErrorAction Stop
+        $envMoved = $true
     } catch {
-        Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue
         Remove-Variable newKey, keyBytes, example -ErrorAction SilentlyContinue
         throw "Could not create .env from .env.example: $($_.Exception.Message). Nothing was started and no .env was left behind."
+    } finally {
+        # Also runs on Ctrl+C or a stop between the write and the move: no temp copy of the key is left.
+        if (-not $envMoved) { Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue }
     }
     Remove-Variable newKey, keyBytes, example
     Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test. SECRET_KEY was generated for you.'
@@ -154,15 +158,22 @@ if (-not $SkipContainers) {
     # The override keeps Postgres in a named volume, so database files already in data\pgdata (bind mount of
     # the base file: Docker) would be left behind and the database would start empty.
     if ($composeFiles -match 'podman-machine' -and (Test-Path -LiteralPath "$root\data\pgdata\PG_VERSION")) {
-        $stamp = Get-Date -Format yyyyMMdd
+        # Invariant culture: Get-Date -Format would use the current calendar (th-TH: Buddhist year).
+        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
         throw ("This folder already has database files in data\pgdata (made with Docker), but Podman here would`n" +
                "start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.`n" +
                "To keep using data\pgdata, choose Docker:`n" +
                "  `$env:CONTAINER_ENGINE = 'docker'; powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
-               "To move to Podman instead: (1) with Docker running, back up (`"$root\scripts\backup.ps1`") and stop it; (2) rename`n" +
-               "data\pgdata out of the way, nothing is deleted (it becomes $root\data\pgdata.docker-$stamp):`n" +
+               "To move to Podman instead (nothing is deleted):`n" +
+               "(1) back up with Docker, not Podman, then stop the Docker stack:`n" +
+               "  `$env:CONTAINER_ENGINE = 'docker'; powershell -ExecutionPolicy Bypass -File `"$root\scripts\backup.ps1`"`n" +
+               "  docker compose -p bee-with-me -f `"$root\docker\docker-compose.yaml`" stop`n" +
+               "(2) rename data\pgdata out of the way (it becomes $root\data\pgdata.docker-$stamp):`n" +
                "  Rename-Item -LiteralPath `"$root\data\pgdata`" -NewName `"pgdata.docker-$stamp`"`n" +
-               "(3) run this script again with Podman and (4) restore the dump: `"$root\scripts\restore.ps1`".")
+               "(3) start again with Podman (the Docker choice is cleared):`n" +
+               "  Remove-Item Env:CONTAINER_ENGINE -ErrorAction SilentlyContinue; powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
+               "(4) stop the backend (Ctrl+C in that window), then restore the dump (the newest file in data\backups):`n" +
+               "  powershell -ExecutionPolicy Bypass -File `"$root\scripts\restore.ps1`" `"$root\data\backups\<the dump>`"")
     }
 
     # data\backups is made now, by this user, before the database container starts (the same order as

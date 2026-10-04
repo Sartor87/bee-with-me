@@ -50,6 +50,8 @@ data/
 
 # Environment — never commit secrets
 .env
+# temp copies written by start.ps1 / start.sh while the file above is created (a stopped run can leave one)
+.env.new*
 
 /.composer
 /.npm

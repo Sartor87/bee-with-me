@@ -118,6 +118,13 @@ if [[ ! -f "$ROOT/.env" ]]; then
         || die "Could not generate a random SECRET_KEY (tried: ${KEY_TRIED:-nothing}; none gave a usable key) - .env was not created. Install openssl (or base64 and a readable /dev/urandom) and run this script again."
     # The example's SECRET_KEY line gets the random value (a line that is not there is added); every other
     # line is copied as it is. The file is private to this user (umask 077). An existing .env is never touched.
+    # The temp file is made by mktemp next to the target (always 0600, a fresh name: a stale file of an earlier
+    # run is never reused, so it cannot lend its old mode); a trap removes it on any exit or signal.
+    ENV_TMP=''
+    trap 'rm -f "$ENV_TMP"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ENV_TMP="$(umask 077; mktemp "$ROOT/.env.new.XXXXXX")" || die 'Could not create a temporary file for .env - nothing was written.'
     ( umask 077
       BWM_NEW_KEY="$NEW_KEY" awk '
           match($0, /^[ \t]*(export[ \t]+)?[sS][eE][cC][rR][eE][tT]_[kK][eE][yY][ \t]*=/) {
@@ -127,9 +134,11 @@ if [[ ! -f "$ROOT/.env" ]]; then
           }
           { print }
           END { if (!found) print "SECRET_KEY=" ENVIRON["BWM_NEW_KEY"] }
-      ' "$ROOT/.env.example" > "$ROOT/.env.new" ) \
-        && mv -f "$ROOT/.env.new" "$ROOT/.env" \
-        || { rm -f "$ROOT/.env.new"; die 'Could not create .env from .env.example.'; }
+      ' "$ROOT/.env.example" > "$ENV_TMP" ) \
+        && mv -f "$ENV_TMP" "$ROOT/.env" \
+        || die 'Could not create .env from .env.example.'   # the EXIT trap removes the temp file
+    trap - EXIT INT TERM
+    ENV_TMP=''
     unset NEW_KEY
     warn 'Edit .env with real values (POSTGRES_PASSWORD, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test. SECRET_KEY was generated for you.'
 fi
@@ -165,15 +174,21 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
     # The override keeps Postgres in a named volume, so database files already in data/pgdata (bind mount of
     # the base file: Docker, or native Podman) would be left behind and the database would start empty.
     if [[ " ${COMPOSE_FILES[*]} " == *podman-machine* && -e "$ROOT/data/pgdata/PG_VERSION" ]]; then
-        STAMP="$(date +%Y%m%d)"
+        STAMP="$(LC_ALL=C date +%Y%m%d-%H%M%S)"
         die "This folder already has database files in data/pgdata (made with Docker, or Podman without a VM), but Podman here would
 start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.
 To keep using data/pgdata, choose Docker:
   CONTAINER_ENGINE=docker \"$ROOT/start.sh\"
-To move to Podman instead: (1) with Docker running, back up (\"$ROOT/scripts/backup.sh\" \"$ROOT/data/backups\") and stop it;
-(2) rename data/pgdata out of the way, nothing is deleted (it becomes $ROOT/data/pgdata.docker-$STAMP):
-  mv \"$ROOT/data/pgdata\" \"$ROOT/data/pgdata.docker-$STAMP\"
-(3) run this script again with Podman and (4) restore the dump: \"$ROOT/scripts/restore.sh\" \"$ROOT/data/backups/<the dump>\""
+To move to Podman instead (nothing is deleted):
+(1) back up with Docker, not Podman, then stop the Docker stack:
+  CONTAINER_ENGINE=docker \"$ROOT/scripts/backup.sh\" \"$ROOT/data/backups\"
+  cd \"$ROOT\" && docker compose -p bee-with-me -f docker/docker-compose.yaml stop
+(2) rename data/pgdata out of the way (it becomes $ROOT/data/pgdata.docker-$STAMP):
+  mv -n \"$ROOT/data/pgdata\" \"$ROOT/data/pgdata.docker-$STAMP\"
+(3) start again with Podman (the Docker choice is cleared):
+  unset CONTAINER_ENGINE; \"$ROOT/start.sh\"
+(4) stop the backend (Ctrl+C in that window), then restore the dump (the newest file in data/backups):
+  \"$ROOT/scripts/restore.sh\" \"$ROOT/data/backups/<the dump>\""
     fi
 
     # data/backups is made now, as this user: rootful Docker would create data/ as root through the bind
