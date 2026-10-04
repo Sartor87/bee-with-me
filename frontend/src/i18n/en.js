@@ -367,6 +367,7 @@ export default {
       position:     'Position',
       positionAt:   'Position at {time}',
       point:        'Point',
+      noFix:        'No GNSS fix: this is the last known position',
       hintDevice:   'Placed at the position shown, taken when you opened this form. Shown on the map; it does not sound the fire alarm.',
       hintPoint:    'Placed at the point you chose. Shown on the map; it does not sound the fire alarm.',
       notes:        'Note (optional)',
@@ -392,6 +393,7 @@ export default {
     },
     errors: {
       noRecentPosition: 'This rescuer has no position in the last 24 h',
+      zoneStale:    'This zone was changed elsewhere. Review and save again.',
       notFound:     'That item no longer exists. Reload the map.',
       forbidden:    'Only an administrator can do this.',
       invalid:      'The server rejected the text. Remove unusual characters and try again.',

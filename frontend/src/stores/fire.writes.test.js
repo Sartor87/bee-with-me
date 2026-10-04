@@ -6,7 +6,7 @@ vi.mock('../api', () => ({
   getFireAlerts: vi.fn(), acknowledgeFireAlert: vi.fn(), acknowledgeAllFireAlerts: vi.fn(),
   dismissFireHotspot: vi.fn(), createFieldReport: vi.fn(), extinguishFieldReport: vi.fn(),
   getSuppressionZones: vi.fn(), createSuppressionZone: vi.fn(), updateSuppressionZone: vi.fn(),
-  disableSuppressionZone: vi.fn(),
+  disableSuppressionZone: vi.fn(), enableSuppressionZone: vi.fn(),
 }))
 
 import * as api from '../api'
@@ -94,5 +94,38 @@ describe('fire write actions', () => {
     api.getSuppressionZones.mockResolvedValue([])
     await store.setLayer('zones', true)
     expect(api.getSuppressionZones).toHaveBeenCalledWith({ include_disabled: false })
+  })
+
+  it('zone activation passes the version and swaps in the server copy [B52]', async () => {
+    const store = useFireStore()
+    const zone = { id: 'z1', label: 'Solar', radius_m: 1000, is_active: true, updated_at: 'u1' }
+    store.zones = [zone]
+    api.disableSuppressionZone.mockResolvedValue({ ...zone, is_active: false, updated_at: 'u2' })
+    await store.disableZone('z1', 'u1')
+    expect(api.disableSuppressionZone).toHaveBeenCalledWith('z1', 'u1')
+    expect(store.zones[0]).toMatchObject({ is_active: false, updated_at: 'u2' })
+    api.enableSuppressionZone.mockResolvedValue({ ...zone, is_active: true, updated_at: 'u3' })
+    await store.enableZone('z1', 'u2')
+    expect(api.enableSuppressionZone).toHaveBeenCalledWith('z1', 'u2')
+    expect(store.zones[0]).toMatchObject({ is_active: true, updated_at: 'u3' })
+  })
+
+  it('fire_zones_updated refetches the zone list the view asked for and the shown hotspots [B52]', async () => {
+    const store = useFireStore()
+    await store.fetchZones(true)
+    store.layers = { burnt: false, hotspots: true, zones: false }
+    api.getSuppressionZones.mockClear()
+    api.getFireHotspots.mockResolvedValue({ type: 'FeatureCollection', features: [] })
+    api.getSuppressionZones.mockResolvedValue([{ id: 'z9' }])
+    await store.applyFireZonesUpdated()
+    expect(api.getSuppressionZones).toHaveBeenCalledWith({ include_disabled: true })
+    expect(api.getFireHotspots).toHaveBeenCalledTimes(1)
+    expect(store.zones).toEqual([{ id: 'z9' }])
+  })
+
+  it('fire_zones_updated before any zone list was loaded fetches no zones [B52]', async () => {
+    const store = useFireStore()
+    await store.applyFireZonesUpdated()
+    expect(api.getSuppressionZones).not.toHaveBeenCalled()
   })
 })

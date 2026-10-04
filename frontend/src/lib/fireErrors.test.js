@@ -15,4 +15,7 @@ describe('fireErrorKey', () => {
     expect(fireErrorKey(new ApiError('boom', 500))).toBe('fire.errors.generic')
     expect(fireErrorKey(new ApiError('conflict', 409))).toBe('fire.errors.generic')
   })
+  it('maps 409 zone_stale to its own message [B52]', () => {
+    expect(fireErrorKey(new ApiError('zone_stale', 409))).toBe('fire.errors.zoneStale')
+  })
 })

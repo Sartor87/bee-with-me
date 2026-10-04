@@ -20,6 +20,7 @@
         <dd><span class="md-mono" data-testid="fr-mgrs">{{ mgrsText }}</span></dd>
       </div>
     </dl>
+    <p v-if="!target.noPosition && target.gnssValid === false" class="md-warn" role="status" data-testid="fr-nofix">{{ t('fire.report.noFix') }}</p>
     <p v-if="!target.noPosition" class="md-hint">{{ target.name ? t('fire.report.hintDevice') : t('fire.report.hintPoint') }}</p>
 
     <div class="md-field">
@@ -48,7 +49,7 @@ import { forward as toMGRS } from 'mgrs'
 
 // Asks only for the optional note; MapView owns the request and passes the outcome back through
 // `busy` and `errorText`. `target` is a point frozen when the form opened: { latitude, longitude }, plus
-// { name, mgrs, receivedAt } for a volunteer, or { name, noPosition: true } when none is usable. Notes are free
+// { name, mgrs, receivedAt, gnssValid } for a volunteer (gnssValid false: the position is the last known one, shown in amber, submit stays allowed), or { name, noPosition: true } when none is usable. Notes are free
 // operator text: rendered by the browser as a textarea value, never as markup, never logged.
 const props = defineProps({
   target:    { type: Object, required: true },

@@ -22,6 +22,8 @@ import { forward as toMGRS } from 'mgrs'
 import { useSettings } from './useSettings'
 import { normaliseGroups } from '../lib/groups'
 import { freshnessOf, LIVE, LOST } from '../lib/freshness'
+import { renderTrackerTooltip } from '../lib/trackerTooltip'
+import { createLongPress } from '../lib/longPress'
 import { hotspotStyleKey } from '../lib/fireStyle'
 import { hexToRgba } from '../lib/color'
 import { PHOTO_SIZE, photoCanvas, photoImage, ringFor, safePhotoUrl } from '../lib/photoMarker'
@@ -322,7 +324,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   let fireClickCb = null
   let trackerClickCb = null
   let contextMenuCb = null
-  let onContextMenuEvent = null, onPressDown = null, onPressMove = null, endPressFn = null
+  let onContextMenuEvent = null, onPressDown = null, onPressMove = null, endPressFn = null, longPress = null
 
   // Measure layer
   const measureSource = new VectorSource()
@@ -622,41 +624,9 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       if (feature) {
         const stored = feature.get('pos')
         const pos    = positionList.value?.find(p => p.device_id === feature.getId()) ?? stored
-        const isTeam = !!pos.displayLabel
-        const sos    = pos.sos_active    ? '<span style="color:#ef4444;font-weight:700"> 🚨 SOS</span>' : ''
-        const bat    = pos.battery_voltage != null ? `<br>🔋 ${pos.battery_voltage.toFixed(1)} V` : ''
-        const time   = pos.recorded_at   ? `<br>🕐 ${new Date(pos.recorded_at).toLocaleTimeString()}` : ''
-
-        if (isTeam) {
-          const leaderGroup = pos.groups?.find(g => g.is_leader)
-          const gDetail     = leaderGroup ? (groupsMap?.value ?? {})[leaderGroup.id] : null
-          const members     = gDetail?.members ?? []
-          const desc        = gDetail?.description
-            ? `<br><span style="font-size:11px;color:#aaa;font-style:italic">${gDetail.description}</span>`
-            : ''
-          const memberList  = members.length
-            ? '<br><span style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.05em">Members</span><br>' +
-              members.map(m =>
-                `<span style="color:${m.is_leader ? '#ffc900' : '#ccc'}">`+
-                `${m.is_leader ? '★ ' : '· '}${m.full_name}${m.rank ? ` (${m.rank})` : ''}</span>`
-              ).join('<br>')
-            : ''
-          tooltipEl.innerHTML =
-            `<strong>${pos.displayLabel}</strong>${sos}` +
-            desc +
-            (pos.full_name ? `<br><span style="font-size:11px;color:#aaa">${pos.full_name}${pos.rank ? ` · ${pos.rank}` : ''}</span>` : '') +
-            `<br><span style="font-family:monospace;font-size:11px">${pos.mgrs ?? ''}</span>` +
-            bat + time + memberList
-        } else {
-          const name  = pos.full_name || pos.device_name || `SN:${pos.dev_sn}`
-          const rep   = pos.repeater_mode ? '<span style="color:#a78bfa"> ↩ Repeater</span>' : ''
-          const phone = pos.phone ? `<br>📞 ${pos.phone}` : ''
-          const alt   = pos.altitude_m != null ? `<br>⛰ ${pos.altitude_m} m` : ''
-          tooltipEl.innerHTML =
-            `<strong>${name}</strong>${sos}${rep}` +
-            `<br><span style="font-family:monospace;font-size:11px">${pos.mgrs ?? ''}</span>` +
-            alt + bat + time + phone
-        }
+        const leaderGroup = pos.displayLabel ? pos.groups?.find(g => g.is_leader) : null
+        const gDetail     = leaderGroup ? (groupsMap?.value ?? {})[leaderGroup.id] : null
+        renderTrackerTooltip(tooltipEl, pos, gDetail)
         tooltipEl.style.display = 'block'
         tooltip.setPosition(evt.coordinate)
         map.getTargetElement().style.cursor = 'pointer'
@@ -692,7 +662,11 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
       }),
     })
 
+    // The release of a long press raises a click: it belongs to the menu, not to the map.
+    const clickSwallowed = () => !!longPress?.shouldSwallowClick()
+
     map.on('click', (evt) => {
+      if (clickSwallowed()) return
       if (hqPlacementMode) {
         const [lon, lat] = toLonLat(evt.coordinate)
         onHQPlaced?.({ lat, lon })
@@ -732,6 +706,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     const trackerHit = (pixel) => map.hasFeatureAtPixel(pixel, { layerFilter: l => l === vectorLayer, hitTolerance: 5 })
 
     map.on('click', (evt) => {
+      if (clickSwallowed()) return
       if (hqPlacementMode || measureMode || !fireClickCb) return
       // A tracker click opens the tracker popup and closes any fire popup.
       if (trackerHit(evt.pixel)) {
@@ -775,24 +750,14 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     onContextMenuEvent = (e) => { e.preventDefault(); reportContext(e.clientX, e.clientY) }
     viewport.addEventListener('contextmenu', onContextMenuEvent)
 
-    let press = null
-    const endPress = () => { if (press) { clearTimeout(press.timer); press = null } }
-    onPressDown = (e) => {
-      if (e.pointerType === 'mouse' || !e.isPrimary) return
-      endPress()
-      press = {
-        x: e.clientX, y: e.clientY,
-        timer: setTimeout(() => { const p = press; press = null; if (p) reportContext(p.x, p.y) }, LONG_PRESS_MS),
-      }
-    }
-    onPressMove = (e) => {
-      if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > LONG_PRESS_SLOP_PX) endPress()
-    }
+    longPress = createLongPress({ onLongPress: reportContext, ms: LONG_PRESS_MS, slopPx: LONG_PRESS_SLOP_PX })
+    onPressDown = longPress.down
+    onPressMove = longPress.move
     viewport.addEventListener('pointerdown', onPressDown)
     viewport.addEventListener('pointermove', onPressMove)
-    viewport.addEventListener('pointerup', endPress)
-    viewport.addEventListener('pointercancel', endPress)
-    endPressFn = endPress
+    viewport.addEventListener('pointerup', longPress.end)
+    viewport.addEventListener('pointercancel', longPress.end)
+    endPressFn = longPress.end
 
     // Hotspots fade with age; repaint each minute so they do so without a refetch.
     fireTimer = setInterval(() => { if (hotspotLayer.getVisible()) hotspotLayer.changed() }, 60_000)

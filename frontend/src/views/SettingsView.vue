@@ -321,9 +321,10 @@ async function loadZones() {
 function startEdit(z) { editingId.value = z.id; zoneError.value = ''; rowError.value = null }
 function stopEdit() { editingId.value = null; zoneError.value = '' }
 
+// An edit carries the version the operator saw; it never carries is_active (activation has its own endpoints).
 const zoneBody = (z, over = {}) => ({
   label: z.label, latitude: z.latitude, longitude: z.longitude, radius_m: z.radius_m, notes: z.notes ?? null,
-  is_active: z.is_active, ...over,
+  expected_updated_at: z.updated_at, ...over,
 })
 
 async function runZoneAction(id, action, onError) {
@@ -333,7 +334,16 @@ async function runZoneAction(id, action, onError) {
     await action()
     return true
   } catch (err) {
-    onError(t(fireErrorKey(err)))
+    const text = t(fireErrorKey(err))
+    if (err?.status === 409 && err?.detail === 'zone_stale') {
+      // Someone changed the zone: pull the current list, close any edit form (its values are out of date)
+      // and say so on the row. The operator reopens Edit on the fresh values.
+      await loadZones()
+      stopEdit()
+      rowError.value = { id, text }
+    } else {
+      onError(text)
+    }
   } finally {
     zoneBusy.value = false
   }
@@ -346,11 +356,11 @@ async function onZoneSave(z, values) {
 }
 async function onZoneDisable(z) {
   rowError.value = null
-  await runZoneAction(z.id, () => fire.disableZone(z.id), (text) => { rowError.value = { id: z.id, text } })
+  await runZoneAction(z.id, () => fire.disableZone(z.id, z.updated_at), (text) => { rowError.value = { id: z.id, text } })
 }
 async function onZoneEnable(z) {
   rowError.value = null
-  await runZoneAction(z.id, () => fire.updateZone(z.id, zoneBody(z, { is_active: true })), (text) => { rowError.value = { id: z.id, text } })
+  await runZoneAction(z.id, () => fire.enableZone(z.id, z.updated_at), (text) => { rowError.value = { id: z.id, text } })
 }
 
 const errors = computed(() => ({

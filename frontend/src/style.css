@@ -117,6 +117,7 @@ tr:hover td { background: var(--bg-card); }
 .md-count-near { color: var(--warning); }
 .md-field-error { min-height: 16px; margin-top: 3px; font-size: 12px; color: var(--warning); }
 .md-field input[aria-invalid="true"] { border-color: var(--warning); }
+.md-warn { font-size: 12px; color: var(--warning); line-height: 1.4; }
 .md-error { font-size: 12px; color: var(--warning); line-height: 1.4; }
 .md-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .map-dialog button:disabled, .zone-inline button:disabled { opacity: .45; cursor: not-allowed; }

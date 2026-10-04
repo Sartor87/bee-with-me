@@ -54,6 +54,7 @@ export function useWebSocket() {
       if (msg.type === 'sos_alert')       store.applySOSAlert(msg)
       if (msg.type === 'serial_status')   store.applySerialStatus(msg)
       if (msg.type === 'fire_data_updated') fireStore.applyFireDataUpdated(msg).catch(() => {})
+      if (msg.type === 'fire_zones_updated') fireStore.applyFireZonesUpdated().catch(() => {})
       if (msg.type === 'fire_alert')         fireStore.applyFireAlert(msg)
       if (msg.type === 'fire_alert_repeat')  fireStore.applyFireAlertRepeat(msg).catch(() => {})
       if (msg.type === 'fire_alert_updated') fireStore.applyFireAlertUpdated(msg)

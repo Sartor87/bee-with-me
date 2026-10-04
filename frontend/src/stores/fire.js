@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   acknowledgeAllFireAlerts, acknowledgeFireAlert, createFieldReport, createSuppressionZone, disableSuppressionZone,
-  dismissFireHotspot, extinguishFieldReport, getFireAlerts, getFireBurntAreas, getFireHotspots, getSuppressionZones,
+  dismissFireHotspot, enableSuppressionZone, extinguishFieldReport, getFireAlerts, getFireBurntAreas, getFireHotspots, getSuppressionZones,
   updateSuppressionZone,
 } from '../api'
 import { oldestFetchedAt, worstUpstreamState } from '../lib/fireStyle'
@@ -187,8 +187,11 @@ export const useFireStore = defineStore('fire', () => {
   // Only the newest request may write the list or the failure flag (a late answer must not
   // replace a newer one, as with the feeds above).
   let zonesSeq = 0
+  // The list the view last asked for (Settings lists disabled zones too): a push refetches that same list.
+  let zonesWanted = null
   async function fetchZones(includeDisabled = false) {
     const seq = ++zonesSeq
+    zonesWanted = includeDisabled
     try {
       const list = await getSuppressionZones({ include_disabled: includeDisabled })
       if (seq !== zonesSeq) return
@@ -202,7 +205,20 @@ export const useFireStore = defineStore('fire', () => {
 
   async function createZone(body)     { upsertZone(await createSuppressionZone(body)) }
   async function updateZone(id, body) { upsertZone(await updateSuppressionZone(id, body)) }
-  async function disableZone(id)      { upsertZone(await disableSuppressionZone(id)) }
+  // Activation sends the version the operator saw (`updated_at`); the server answers 409 zone_stale if it moved on.
+  async function disableZone(id, expectedUpdatedAt) { upsertZone(await disableSuppressionZone(id, expectedUpdatedAt)) }
+  async function enableZone(id, expectedUpdatedAt)  { upsertZone(await enableSuppressionZone(id, expectedUpdatedAt)) }
+
+  // WebSocket `fire_zones_updated`: a zone was written (here or elsewhere). Refetch the zone list the
+  // view holds (only if one was ever loaded) and the shown hotspots, whose suppression state changed (BP-02).
+  function applyFireZonesUpdated() {
+    const jobs = [refreshVisible()]
+    if (zonesWanted !== null) jobs.push(fetchZones(zonesWanted))
+    return Promise.allSettled(jobs).then((results) => {
+      const failed = results.find(r => r.status === 'rejected')
+      if (failed) throw failed.reason
+    })
+  }
 
   // ---- Fire alarms (alerts near HQ or a rescuer) --------------------------------------------
   // Open alerts, acknowledged ones included: an acknowledged alert stays listed (quiet) until
@@ -388,7 +404,7 @@ export const useFireStore = defineStore('fire', () => {
     shownFetchedAt, shownUpstreamState, fetchFailed,
     fetchHotspots, fetchBurntAreas, refreshVisible, retryFailed, markFeedFailed, setLayer, applyFireDataUpdated,
     alerts, ringToken, alertsFailed, alertsHidden, unacknowledged, focusRequest, requestFocus, clearFocusRequest,
-    zones, zonesFailed, upsertHotspotFeature, dismissHotspot, reportFire, extinguish, fetchZones, createZone, updateZone, disableZone,
+    zones, zonesFailed, upsertHotspotFeature, dismissHotspot, reportFire, extinguish, fetchZones, createZone, updateZone, disableZone, enableZone, applyFireZonesUpdated,
     fetchOpenAlerts, applyFireAlert, applyFireAlertRepeat, applyFireAlertUpdated, acknowledge, acknowledgeAll, resetAlerts,
   }
 })

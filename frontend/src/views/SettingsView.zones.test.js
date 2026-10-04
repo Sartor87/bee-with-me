@@ -6,6 +6,7 @@ import { ApiError } from '../api/client'
 vi.mock('../api', () => ({
   getSettings: vi.fn(), putSettings: vi.fn(), putHQ: vi.fn(), putHQInitial: vi.fn(), getMe: vi.fn(),
   getFireStatus: vi.fn(), getSuppressionZones: vi.fn(), updateSuppressionZone: vi.fn(), disableSuppressionZone: vi.fn(),
+  enableSuppressionZone: vi.fn(),
 }))
 
 import * as api from '../api'
@@ -20,8 +21,8 @@ const SETTINGS = {
 }
 const HOSTILE = '<img src=x onerror="window.__pwned = true">'
 const ZONES = [
-  { id: 'z1', label: 'Solar farm', latitude: 42.5, longitude: 24.5, radius_m: 1000, is_active: true, notes: HOSTILE },
-  { id: 'z2', label: 'Old quarry', latitude: 42.6, longitude: 24.6, radius_m: 500, is_active: false, notes: null },
+  { id: 'z1', label: 'Solar farm', latitude: 42.5, longitude: 24.5, radius_m: 1000, is_active: true, notes: HOSTILE, updated_at: 'u1' },
+  { id: 'z2', label: 'Old quarry', latitude: 42.6, longitude: 24.6, radius_m: 500, is_active: false, notes: null, updated_at: 'u2' },
 ]
 
 async function mountView() {
@@ -65,21 +66,20 @@ describe('SettingsView: suppression zones and alarm targets', () => {
     const w = await mountView()
     await w.get('[data-testid="zone-disable"]').trigger('click')
     await flushPromises()
-    expect(api.disableSuppressionZone).toHaveBeenCalledWith('z1')
+    expect(api.disableSuppressionZone).toHaveBeenCalledWith('z1', 'u1')
     expect(w.findAll('[data-testid="zone-enable"]')).toHaveLength(2)
   })
 
-  it('Re-enable sends the whole zone with is_active true [T19]', async () => {
-    api.updateSuppressionZone.mockResolvedValue({ ...ZONES[1], is_active: true })
+  it('Re-enable uses the enable endpoint with the version the operator saw [T19] [B52]', async () => {
+    api.enableSuppressionZone.mockResolvedValue({ ...ZONES[1], is_active: true, updated_at: 'u3' })
     const w = await mountView()
     await w.get('[data-testid="zone-enable"]').trigger('click')
     await flushPromises()
-    expect(api.updateSuppressionZone).toHaveBeenCalledWith('z2', {
-      label: 'Old quarry', latitude: 42.6, longitude: 24.6, radius_m: 500, notes: null, is_active: true,
-    })
+    expect(api.enableSuppressionZone).toHaveBeenCalledWith('z2', 'u2')
+    expect(api.updateSuppressionZone).not.toHaveBeenCalled()
   })
 
-  it('Edit changes label and radius and keeps the centre and state [T19]', async () => {
+  it('Edit changes label and radius, keeps the centre, sends the version and never is_active [T19] [B52]', async () => {
     api.updateSuppressionZone.mockResolvedValue({ ...ZONES[0], label: 'Solar park', radius_m: 800 })
     const w = await mountView()
     await w.get('[data-testid="zone-edit"]').trigger('click')
@@ -88,7 +88,7 @@ describe('SettingsView: suppression zones and alarm targets', () => {
     await w.get('[data-testid="zone-form"]').trigger('submit')
     await flushPromises()
     expect(api.updateSuppressionZone).toHaveBeenCalledWith('z1', {
-      label: 'Solar park', latitude: 42.5, longitude: 24.5, radius_m: 800, notes: HOSTILE, is_active: true,
+      label: 'Solar park', latitude: 42.5, longitude: 24.5, radius_m: 800, notes: HOSTILE, expected_updated_at: 'u1',
     })
     expect(w.find('[data-testid="zone-form"]').exists()).toBe(false)
     expect(w.text()).toContain('Solar park')
@@ -101,6 +101,34 @@ describe('SettingsView: suppression zones and alarm targets', () => {
     await flushPromises()
     expect(w.text()).toContain(en.fire.errors.notFound)
     expect(w.findAll('[data-testid="zone-disable"]')).toHaveLength(1)
+  })
+
+  it('a stale edit refetches the list, closes the form and says the zone changed elsewhere [B52]', async () => {
+    api.updateSuppressionZone.mockRejectedValue(new ApiError('zone_stale', 409))
+    const w = await mountView()
+    api.getSuppressionZones.mockResolvedValue([{ ...ZONES[0], label: 'Solar farm 2', updated_at: 'u9' }, { ...ZONES[1] }])
+    await w.get('[data-testid="zone-edit"]').trigger('click')
+    await w.get('[data-testid="zone-label"]').setValue('Mine')
+    await w.get('[data-testid="zone-form"]').trigger('submit')
+    await flushPromises()
+    expect(api.getSuppressionZones).toHaveBeenCalledTimes(2)
+    expect(w.find('[data-testid="zone-form"]').exists()).toBe(false)
+    expect(w.text()).toContain(en.fire.errors.zoneStale)
+    expect(w.text()).toContain('Solar farm 2')
+    expect(en.fire.errors.zoneStale).toBe('This zone was changed elsewhere. Review and save again.')
+  })
+
+  it('a stale disable refetches the list and shows the same notice, the next try sends the new version [B52]', async () => {
+    api.disableSuppressionZone.mockRejectedValueOnce(new ApiError('zone_stale', 409))
+    const w = await mountView()
+    api.getSuppressionZones.mockResolvedValue([{ ...ZONES[0], updated_at: 'u9' }, { ...ZONES[1] }])
+    await w.get('[data-testid="zone-disable"]').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain(en.fire.errors.zoneStale)
+    api.disableSuppressionZone.mockResolvedValue({ ...ZONES[0], is_active: false, updated_at: 'u10' })
+    await w.get('[data-testid="zone-disable"]').trigger('click')
+    await flushPromises()
+    expect(api.disableSuppressionZone).toHaveBeenLastCalledWith('z1', 'u9')
   })
 
   it('an empty list says so [T19]', async () => {

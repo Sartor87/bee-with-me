@@ -92,5 +92,9 @@ export const extinguishFieldReport  = (id)        => api.post(`/fire/field-repor
 export const getSuppressionZones    = (params)    => api.get('/fire/suppression-zones', { params })
 export const createSuppressionZone  = (body)      => api.post('/fire/suppression-zones', body)
 export const updateSuppressionZone  = (id, body)  => api.put(`/fire/suppression-zones/${id}`, body)
-// "Delete" disables the zone; the server removes it 48 h later.
-export const disableSuppressionZone = (id)        => api.delete(`/fire/suppression-zones/${id}`)
+// Activation is explicit and carries the version the operator saw (B51/B52): a changed zone answers 409 zone_stale.
+// A disabled zone is removed by the server 48 h later.
+export const disableSuppressionZone = (id, expectedUpdatedAt) =>
+  api.post(`/fire/suppression-zones/${id}/disable`, { expected_updated_at: expectedUpdatedAt })
+export const enableSuppressionZone  = (id, expectedUpdatedAt) =>
+  api.post(`/fire/suppression-zones/${id}/enable`, { expected_updated_at: expectedUpdatedAt })

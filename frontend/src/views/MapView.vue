@@ -598,7 +598,7 @@ function reportFromRow(pos) {
   openDialog({
     kind: 'report',
     target: usable
-      ? { name, latitude: lat, longitude: lon, mgrs: live.mgrs ?? '', receivedAt: contactAt(live) }
+      ? { name, latitude: lat, longitude: lon, mgrs: live.mgrs ?? '', receivedAt: contactAt(live), gnssValid: live.gnss_valid }
       : { name, noPosition: true },
   })
 }
