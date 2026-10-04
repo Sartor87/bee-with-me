@@ -120,6 +120,19 @@ async def test_prune_removes_only_rows_unseen_for_7_days(pool, migrated_conn):
     assert [r['effis_id'] for r in await migrated_conn.fetch('SELECT effis_id FROM fire_hotspots')] == ['new']
 
 
+@pytest.mark.Trait("Bug", "B40")
+async def test_prune_skips_alerted_hotspots_and_still_prunes_the_rest(pool, migrated_conn):
+    await repository.upsert_hotspots(migrated_conn, [HotspotRow('viirs', 'alerted', NOW, 42.5, 24.5, None),
+                                                     HotspotRow('viirs', 'plain', NOW, 42.5, 24.5, None)])
+    await migrated_conn.execute("UPDATE fire_hotspots SET last_seen_at = NOW() - INTERVAL '8 days'")
+    await migrated_conn.execute(
+        "INSERT INTO fire_alerts (hotspot_id, target_type, distance_m) "
+        "SELECT id, 'hq', 100 FROM fire_hotspots WHERE effis_id = 'alerted'")
+    deleted = await repository.prune_fire_data(migrated_conn)
+    assert deleted['fire_hotspots'] == 1
+    assert [r['effis_id'] for r in await migrated_conn.fetch('SELECT effis_id FROM fire_hotspots')] == ['alerted']
+
+
 async def test_last_seen_at_survives_restart(pool, migrated_conn):
     await repository.upsert_hotspots(migrated_conn, [HotspotRow('viirs', 'x', NOW, 42.5, 24.5, None)])
     assert await repository.last_seen_at(migrated_conn, 'fire_hotspots') is not None

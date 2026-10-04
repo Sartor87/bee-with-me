@@ -53,6 +53,10 @@ CREATE UNIQUE INDEX idx_fire_alerts_open_hq      ON fire_alerts (hotspot_id)
 CREATE UNIQUE INDEX idx_fire_alerts_open_rescuer ON fire_alerts (hotspot_id, device_id)
     WHERE target_type = 'rescuer' AND resolved_at IS NULL;
 CREATE INDEX idx_fire_alerts_triggered ON fire_alerts (triggered_at DESC);
+-- FK lookups: ON DELETE RESTRICT (hotspot prune, NOT EXISTS) and ON DELETE SET NULL (device delete)
+-- cannot use the partial open-alert indexes above.
+CREATE INDEX idx_fire_alerts_hotspot_id ON fire_alerts (hotspot_id);
+CREATE INDEX idx_fire_alerts_device_id  ON fire_alerts (device_id) WHERE device_id IS NOT NULL;
 
 -- migrate:down
 -- Forward-only. To undo, restore the backup taken before migrating (data/backups/).

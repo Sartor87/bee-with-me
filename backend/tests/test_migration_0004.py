@@ -75,3 +75,12 @@ async def test_zone_active_flag_matches_disabled_at(migrated_conn):
     await migrated_conn.execute('UPDATE fire_hotspots SET suppressed_by_zone_id = $1 WHERE id = $2', zone, h)
     await migrated_conn.execute('DELETE FROM fire_suppression_zones WHERE id = $1', zone)
     assert await migrated_conn.fetchval('SELECT suppressed_by_zone_id FROM fire_hotspots WHERE id = $1', h) is None
+
+
+@pytest.mark.Trait("Bug", "B40")
+async def test_alert_foreign_keys_are_indexed(migrated_conn):
+    rows = await migrated_conn.fetch("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'fire_alerts'")
+    defs = {r['indexname']: r['indexdef'] for r in rows}
+    assert '(hotspot_id)' in defs['idx_fire_alerts_hotspot_id']
+    assert '(device_id)' in defs['idx_fire_alerts_device_id']
+    assert 'device_id IS NOT NULL' in defs['idx_fire_alerts_device_id']

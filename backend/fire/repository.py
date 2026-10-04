@@ -38,8 +38,9 @@ _UPSERT_BURNT_AREA = """
 _PRUNE_HOTSPOTS = """
     WITH d AS (
         DELETE FROM fire_hotspots h
-        WHERE (h.source <> 'field_report' AND h.last_seen_at < NOW() - INTERVAL '7 days')
-           OR (h.source =  'field_report' AND h.acquired_at  < NOW() - INTERVAL '7 days')
+        WHERE ((h.source <> 'field_report' AND h.last_seen_at < NOW() - INTERVAL '7 days')
+            OR (h.source =  'field_report' AND h.acquired_at  < NOW() - INTERVAL '7 days'))
+          AND NOT EXISTS (SELECT 1 FROM fire_alerts a WHERE a.hotspot_id = h.id)
         RETURNING 1)
     SELECT count(*) FROM d
 """
