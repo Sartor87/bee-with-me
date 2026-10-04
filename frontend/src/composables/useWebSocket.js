@@ -19,6 +19,9 @@ let stopped = false
 export function useWebSocket() {
   const store = useLocationsStore()
   const fireStore = useFireStore()
+  // Per instance (one per view): set when this view unmounts. A connect() that arrives later (a mount
+  // fetch that finished after logout) must neither open a socket nor clear the module-level `stopped`.
+  let isUnmounted = false
 
   async function resync() {
     try {
@@ -37,6 +40,7 @@ export function useWebSocket() {
   }
 
   function connect() {
+    if (isUnmounted) return
     stopped = false
     clearTimeout(reconnectTimer)
     // A quick re-login must not leave the previous socket alive next to the new one.
@@ -95,7 +99,10 @@ export function useWebSocket() {
     socket?.close()
   }
 
-  onUnmounted(disconnect)
+  onUnmounted(() => {
+    isUnmounted = true
+    disconnect()
+  })
 
   return { connect, disconnect, resync }
 }

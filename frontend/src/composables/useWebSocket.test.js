@@ -7,6 +7,7 @@ vi.mock('../stores/locations', () => ({ useLocationsStore: () => loc }))
 vi.mock('../stores/fire', () => ({ useFireStore: () => fire }))
 vi.mock('vue', async (orig) => ({ ...(await orig()), onUnmounted: vi.fn() }))
 
+import { onUnmounted } from 'vue'
 import { useWebSocket } from './useWebSocket'
 
 describe('useWebSocket fire refetch', () => {
@@ -76,28 +77,54 @@ describe('useWebSocket fire refetch', () => {
     expect(fire.fetchOpenAlerts).toHaveBeenCalledTimes(loc.fetchLive.mock.calls.length)
     expect(fire.fetchOpenAlerts).toHaveBeenCalled()
   })
-  it('after disconnect() a late onclose schedules no reconnect and no resync [B58]', async () => {
+  it('after disconnect() a late onclose schedules no reconnect and no resync [B58][B60]', async () => {
     const { connect, disconnect } = useWebSocket()
     connect()
     sockets[0].onopen()
+    const originalOnclose = sockets[0].onclose   // what the browser would still call if it were not detached
     disconnect()
     vi.clearAllMocks()                        // drop the catch-up pull a reconnect onopen does
-    sockets[0].onclose?.()                    // the browser fires close after socket.close()
+    originalOnclose()                         // the guard itself must hold, not only the detach
     await vi.advanceTimersByTimeAsync(3_000 + 45_000 * 2)
     expect(sockets).toHaveLength(1)
     expect(loc.fetchLive).not.toHaveBeenCalled()
   })
 
-  it('connect() after disconnect() works again and leaves one live socket [B58]', async () => {
+  it('connect() after disconnect() works again and leaves one live socket [B58][B60]', async () => {
     const { connect, disconnect } = useWebSocket()
     connect()
+    const staleOnclose = sockets[0].onclose
     disconnect()
     connect()
-    sockets[0].onclose?.()                    // stale close from the first socket
+    staleOnclose()                            // stale close from the first socket
     await vi.advanceTimersByTimeAsync(3_000)
     expect(sockets).toHaveLength(2)
     sockets[1].onclose()                      // unexpected drop still reconnects
     await vi.advanceTimersByTimeAsync(3_000)
     expect(sockets).toHaveLength(3)
+  })
+
+  it('a connect() from a view that already unmounted opens no socket and does not clear the stop [B60]', async () => {
+    const { connect, disconnect } = useWebSocket()       // the view that mounted first
+    const unmount = onUnmounted.mock.calls.at(-1)[0]
+    connect()
+    unmount()                                             // logout while its mount fetches are pending
+    expect(sockets).toHaveLength(1)
+    connect()                                             // the late connect() after the awaits
+    expect(sockets).toHaveLength(1)                       // no orphan socket
+    await vi.advanceTimersByTimeAsync(3_000 + 45_000 * 2)
+    expect(loc.fetchLive).not.toHaveBeenCalled()          // no resync loop either
+    disconnect()
+  })
+
+  it('a new view after the old one unmounted can still connect [B60]', () => {
+    const old = useWebSocket()
+    onUnmounted.mock.calls.at(-1)[0]()
+    old.connect()
+    expect(sockets).toHaveLength(0)
+    const fresh = useWebSocket()
+    fresh.connect()
+    expect(sockets).toHaveLength(1)
+    fresh.disconnect()
   })
 })
