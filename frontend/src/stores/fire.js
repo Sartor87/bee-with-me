@@ -182,7 +182,8 @@ export const useFireStore = defineStore('fire', () => {
   const RING_GAP_MS = 1500
   let lastRingAt = -Infinity
   const ring = () => {
-    const at = Date.now()
+    // Monotonic clock: a backwards step of the OS clock must never mute the alarm (BP-02).
+    const at = performance.now()
     if (at - lastRingAt < RING_GAP_MS) return
     lastRingAt = at
     ringToken.value += 1
@@ -241,7 +242,12 @@ export const useFireStore = defineStore('fire', () => {
       }
       alertsLoadedOnce = true
     } catch (err) {
-      if (seq === alertsSeq) alertsFailed.value = true
+      if (seq === alertsSeq) {
+        alertsFailed.value = true
+        // A failed first load told the operator nothing: the next success compares against the
+        // empty baseline and rings for what is unacknowledged (BP-01, BP-02).
+        alertsLoadedOnce = true
+      }
       throw err
     } finally {
       alertsInflight -= 1
@@ -261,8 +267,14 @@ export const useFireStore = defineStore('fire', () => {
   async function applyFireAlertRepeat({ alert_ids: ids = [] }) {
     const known = new Map(alerts.value.map(a => [a.id, a]))
     if (ids.some(id => !known.has(id))) {
-      await fetchOpenAlerts()
-      if (ids.some(id => alerts.value.find(a => a.id === id && !a.acknowledged_at))) ring()
+      // The server repeats only open, unacknowledged alerts. An id we do not list is either hidden
+      // beyond the row limit or lost to a failed load: it rings. Only a successful full reload that
+      // no longer lists it (resolved meanwhile) keeps quiet.
+      let reloaded = false
+      try { await fetchOpenAlerts(); reloaded = true } catch { /* alertsFailed is set; ring anyway */ }
+      const unlisted = ids.some(id => !alerts.value.some(a => a.id === id))
+      const open = ids.some(id => alerts.value.find(a => a.id === id && !a.acknowledged_at))
+      if (open || (unlisted && (!reloaded || alertsHidden.value > 0))) ring()
       return
     }
     if (ids.some(id => !known.get(id).acknowledged_at)) ring()

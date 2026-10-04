@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import axios from 'axios'
 import api, { ApiError, errorText, detailOf } from './client'
+import { getFireAlerts } from './index'
 
 const defaultAdapter = api.defaults.adapter
 
@@ -98,5 +99,75 @@ describe('api client session handling [B43]', () => {
     await api.get('/y')
     expect(seen[2].auth).toBeUndefined()
     post.mockRestore()
+  })
+})
+
+// The real interceptor and the real getFireAlerts: nothing in ../api is mocked here.
+describe('fire alerts through the real client [B45]', () => {
+  const rejectWith = (status) => (config) => {
+    const err = new Error(`status ${status}`)
+    err.config = config
+    err.response = { status, data: { detail: `d${status}` }, headers: {}, config }
+    throw err
+  }
+
+  afterEach(() => { api.defaults.adapter = defaultAdapter; localStorage.clear(); vi.restoreAllMocks() })
+
+  it('getFireAlerts returns the array with the X-Total-Count total [B45]', async () => {
+    api.defaults.adapter = async (config) => ({ status: 200, data: [{ id: 'a' }, { id: 'b' }], headers: { 'x-total-count': '7' }, config })
+    const list = await getFireAlerts({ state: 'open' })
+    expect(Array.isArray(list)).toBe(true)
+    expect(list).toHaveLength(2)
+    expect(list.total).toBe(7)
+    expect(Object.keys(list)).toEqual(['0', '1'])
+  })
+
+  it('without the header the total is the list length [B45]', async () => {
+    api.defaults.adapter = async (config) => ({ status: 200, data: [{ id: 'a' }], headers: {}, config })
+    expect((await getFireAlerts()).total).toBe(1)
+  })
+
+  it('a plain request still resolves with the body only [B45]', async () => {
+    api.defaults.adapter = async (config) => ({ status: 200, data: { ok: true }, headers: { 'x-total-count': '3' }, config })
+    expect(await api.get('/settings')).toEqual({ ok: true })
+  })
+
+  it('getFireAlerts keeps the total across a 401 refresh retry, direct and queued [B45]', async () => {
+    localStorage.setItem('token', 'old')
+    localStorage.setItem('refresh_token', 'r')
+    let release
+    vi.spyOn(axios, 'post').mockImplementation(() => new Promise((resolve) => {
+      release = () => resolve({ data: { access_token: 'new', refresh_token: 'r2' } })
+    }))
+    const seen = []
+    api.defaults.adapter = async (config) => {
+      seen.push(config.headers.Authorization)
+      if (config.headers.Authorization === 'Bearer old') return rejectWith(401)(config)
+      return { status: 200, data: [{ id: 'a' }], headers: { 'x-total-count': '7' }, config }
+    }
+    const first = getFireAlerts({ state: 'open' })
+    const second = getFireAlerts({ state: 'open' })
+    await new Promise((r) => setTimeout(r, 10))
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(a.total).toBe(7)
+    expect(b.total).toBe(7)
+    expect(a).toHaveLength(1)
+    expect(seen.filter(h => h === 'Bearer new')).toHaveLength(2)
+    expect(localStorage.getItem('token')).toBe('new')
+  })
+
+  it('a retry that fails after the refresh rejects with its own status, no token in the error [B45]', async () => {
+    localStorage.setItem('token', 'old')
+    localStorage.setItem('refresh_token', 'r')
+    vi.spyOn(axios, 'post').mockResolvedValue({ data: { access_token: 'new', refresh_token: 'r2' } })
+    api.defaults.adapter = async (config) => {
+      if (config.headers.Authorization === 'Bearer old') return rejectWith(401)(config)
+      return rejectWith(500)(config)
+    }
+    const err = await getFireAlerts().catch(e => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(500)
+    expect(JSON.stringify([err.message, err.detail])).not.toMatch(/new|old/)
   })
 })
