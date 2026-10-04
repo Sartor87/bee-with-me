@@ -25,6 +25,8 @@ export function useWebSocket() {
     // Fire layers are not re-pulled here (the backend polls EFFIS every 30 min), but a shown
     // feed whose last fetch failed is retried on every tick so it recovers by itself.
     fireStore.retryFailed().catch(() => { /* fetchFailed drives the pill */ })
+    // Open fire alarms ARE re-pulled on every tick: a missed push must not hide an alarm (BP-02).
+    fireStore.fetchOpenAlerts().catch(() => { /* alertsFailed drives the banner notice */ })
   }
 
   function connect() {
@@ -37,7 +39,7 @@ export function useWebSocket() {
         // Reconnected after a drop (sleep/wake, network blip, backend restart) — any
         // pushes missed during the gap are gone, so pull a fresh snapshot instead of
         // trusting stale/partial state.
-        resync()
+        resync()   // includes the open fire alarms
         // Fire layers refetch here, on `fire_data_updated` and on layer toggle, but not on the
         // 45 s resync tick: the backend polls EFFIS every 30 min, and the tick would re-pull
         // every hotspot and burnt-area polygon 40 times per poll.
@@ -52,6 +54,9 @@ export function useWebSocket() {
       if (msg.type === 'sos_alert')       store.applySOSAlert(msg)
       if (msg.type === 'serial_status')   store.applySerialStatus(msg)
       if (msg.type === 'fire_data_updated') fireStore.applyFireDataUpdated(msg).catch(() => {})
+      if (msg.type === 'fire_alert')         fireStore.applyFireAlert(msg)
+      if (msg.type === 'fire_alert_repeat')  fireStore.applyFireAlertRepeat(msg).catch(() => {})
+      if (msg.type === 'fire_alert_updated') fireStore.applyFireAlertUpdated(msg)
     }
 
     socket.onclose = () => {

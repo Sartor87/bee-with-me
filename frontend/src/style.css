@@ -21,6 +21,15 @@
   --fire-hotspot:  #ad1e57;
   --fire-burnt:    #a8a29e;
   --fire-inactive: #8892aa;
+  /* Fire ALARM (fire near people), its own family so it is never read as SOS: ember ground,
+     orange edge and flame, warm white text, dark ink on the light acknowledge button. Used only
+     by FireAlarmBanner. Distinct from --danger (SOS), --warning (stale amber) and --fire-hotspot
+     (a detection, not an alarm). Contrast: text on ground 14:1, orange on ground 6:1, ink on
+     warm white 15:1. */
+  --fire-alarm:        #ff6a1f;
+  --fire-alarm-ground: #2b1205;
+  --fire-alarm-text:   #ffe8d6;
+  --fire-alarm-ink:    #1c0b03;
   --sidebar-w: 280px;
 }
 

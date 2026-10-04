@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const loc  = { setConnected: vi.fn(), fetchLive: vi.fn(async () => {}), fetchSOS: vi.fn(async () => {}), fetchTrail: vi.fn(async () => {}) }
-const fire = { retryFailed: vi.fn(async () => {}), refreshVisible: vi.fn(async () => {}), applyFireDataUpdated: vi.fn(async () => {}) }
+const fire = { retryFailed: vi.fn(async () => {}), refreshVisible: vi.fn(async () => {}), applyFireDataUpdated: vi.fn(async () => {}),
+  fetchOpenAlerts: vi.fn(async () => {}), applyFireAlert: vi.fn(), applyFireAlertRepeat: vi.fn(async () => {}), applyFireAlertUpdated: vi.fn() }
 vi.mock('../stores/locations', () => ({ useLocationsStore: () => loc }))
 vi.mock('../stores/fire', () => ({ useFireStore: () => fire }))
 vi.mock('vue', async (orig) => ({ ...(await orig()), onUnmounted: vi.fn() }))
@@ -46,5 +47,26 @@ describe('useWebSocket fire refetch', () => {
     await vi.advanceTimersByTimeAsync(45_000 * 2)
     expect(loc.fetchLive).toHaveBeenCalled()
     expect(fire.retryFailed).toHaveBeenCalledTimes(loc.fetchLive.mock.calls.length)
+  })
+
+  it('fire alarm messages reach the store [T17]', () => {
+    const { connect } = useWebSocket()
+    connect()
+    const send = (m) => sockets[sockets.length - 1].onmessage({ data: JSON.stringify(m) })
+    send({ type: 'fire_alert', id: 'a1' })
+    send({ type: 'fire_alert_repeat', alert_ids: ['a1'] })
+    send({ type: 'fire_alert_updated', id: 'a1', acknowledged_at: 'x' })
+    expect(fire.applyFireAlert).toHaveBeenCalledTimes(1)
+    expect(fire.applyFireAlertRepeat).toHaveBeenCalledTimes(1)
+    expect(fire.applyFireAlertUpdated).toHaveBeenCalledTimes(1)
+  })
+
+  it('every resync tick re-pulls the open fire alarms, a missed push must not hide one [T17]', async () => {
+    const { connect } = useWebSocket()
+    connect()
+    sockets[0].onopen()
+    await vi.advanceTimersByTimeAsync(45_000 * 2)
+    expect(fire.fetchOpenAlerts).toHaveBeenCalledTimes(loc.fetchLive.mock.calls.length)
+    expect(fire.fetchOpenAlerts).toHaveBeenCalled()
   })
 })

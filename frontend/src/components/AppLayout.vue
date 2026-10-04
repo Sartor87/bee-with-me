@@ -25,6 +25,7 @@
 
     <main class="main-content">
       <SOSBanner />
+      <FireAlarmBanner />
       <RouterView v-slot="{ Component }">
         <KeepAlive include="MapView">
           <component :is="Component" />
@@ -35,17 +36,20 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import { LOCALES, setLocale } from '../i18n'
 import SOSBanner from './SOSBanner.vue'
+import FireAlarmBanner from './FireAlarmBanner.vue'
+import { useFireStore } from '../stores/fire'
 import { NAV_ITEMS } from '../nav-config.js'
 import logoUrl from '../assets/asp-logo-1.png'
 
 const { t, locale } = useI18n()
 const auth   = useAuthStore()
+const fire   = useFireStore()
 
 const currentLocale = computed(() => locale.value)
 // Cosmetic only: the router guard is what keeps non-admins off admin routes.
@@ -53,6 +57,10 @@ const visibleNav = computed(() =>
   NAV_ITEMS.filter(item => !item.adminOnly || auth.user?.role === 'admin'))
 
 function switchLocale(code) { setLocale(code) }
+
+// Open fire alarms must be on screen on every page, so they load with the layout (not with the map).
+// A failure shows as a notice in the banner (alertsFailed); the 45 s resync retries it.
+onMounted(() => { fire.fetchOpenAlerts().catch(() => { /* alertsFailed drives the notice */ }) })
 </script>
 
 <style scoped>

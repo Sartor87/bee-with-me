@@ -227,7 +227,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 
 defineOptions({ name: 'MapView' })
 import { useI18n } from 'vue-i18n'
@@ -768,6 +768,22 @@ watch(weatherLayerId, async (id) => {
     fetchWindField()
   }
 })
+// "Show on map" from a fire alarm (FireAlarmBanner). The view is kept alive, so a request can
+// land while it is hidden: it waits until the map is on screen, then centres once and is cleared.
+const mapActive = ref(false)
+function consumeFireFocus() {
+  const req = fireStore.focusRequest
+  const m = map()
+  if (!req || !m || !mapActive.value) return
+  fireStore.clearFocusRequest()
+  const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  m.updateSize()
+  m.getView().animate({ center: fromLonLat([req.longitude, req.latitude]), zoom: 12, duration: reduce ? 0 : 500 })
+}
+watch(() => fireStore.focusRequest, consumeFireFocus)
+onActivated(() => { mapActive.value = true; nextTick(consumeFireFocus) })
+onDeactivated(() => { mapActive.value = false })
+
 function focusDevice(pos) {
   const m = map()
   if (m) m.getView().animate({ center: fromLonLat([pos.longitude, pos.latitude]), zoom: 13, duration: 500 })

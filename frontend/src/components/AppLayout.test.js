@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-vi.mock('../api', () => ({ getMe: vi.fn(), login: vi.fn() }))
+vi.mock('../api', () => ({ getMe: vi.fn(), login: vi.fn(), getFireAlerts: vi.fn().mockResolvedValue([]) }))
 
 import AppLayout from './AppLayout.vue'
 import { useAuthStore } from '../stores/auth'
@@ -20,7 +20,7 @@ async function mountFor(role) {
   router.push('/')
   await router.isReady()
   const w = mount(AppLayout, {
-    global: { plugins: [pinia, i18n, router], stubs: { SOSBanner: true, RouterView: true } },
+    global: { plugins: [pinia, i18n, router], stubs: { SOSBanner: true, FireAlarmBanner: true, RouterView: true } },
   })
   return w
 }

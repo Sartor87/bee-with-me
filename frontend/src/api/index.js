@@ -65,6 +65,10 @@ export const exportPDF     = (params) => api.get('/export/pdf',     { params, re
 export const getFireHotspots   = () => api.get('/fire/hotspots')
 export const getFireBurntAreas = () => api.get('/fire/burnt-areas')
 export const getFireStatus     = () => api.get('/fire/status')
+// The backend defaults to 50 rows; every open alert must reach the banner, so ask for the maximum.
+export const getFireAlerts            = (params) => api.get('/fire/alerts', { params: { limit: 500, ...params } })
+export const acknowledgeFireAlert     = (id)     => api.post(`/fire/alerts/${id}/acknowledge`)
+export const acknowledgeAllFireAlerts = ()       => api.post('/fire/alerts/acknowledge-all')
 
 // Settings (HQ + fire alarm)
 export const getSettings  = ()     => api.get('/settings')
