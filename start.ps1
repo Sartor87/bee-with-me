@@ -108,7 +108,24 @@ if (-not (Test-Path "$root\.env")) {
         if ($example -and -not $example.EndsWith("`n")) { $example += "`r`n" }
         $example += "SECRET_KEY=$newKey`r`n"
     }
-    [IO.File]::WriteAllText("$root\.env", $example, (New-Object Text.UTF8Encoding($false)))   # UTF-8 without BOM
+    # The file is made empty under a temp name in the same folder, restricted to this user, filled and only
+    # then moved into place: the key is never in a world-readable file and a half-written file is never
+    # taken for the real one. Any failure removes the temp file and stops.
+    $tmpEnv = "$root\.env.new-" + [guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllBytes($tmpEnv, [byte[]]@())
+        $mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        icacls "$tmpEnv" /inheritance:r /grant:r "*${mySid}:F" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "icacls could not restrict the new file to this user (exit code $LASTEXITCODE; a drive without ACLs, e.g. FAT/exFAT, cannot hold a private key file). Move the project to an NTFS folder, or create .env yourself from .env.example"
+        }
+        [IO.File]::WriteAllText($tmpEnv, $example, (New-Object Text.UTF8Encoding($false)))   # UTF-8 without BOM
+        Move-Item -LiteralPath $tmpEnv -Destination "$root\.env" -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue
+        Remove-Variable newKey, keyBytes, example -ErrorAction SilentlyContinue
+        throw "Could not create .env from .env.example: $($_.Exception.Message). Nothing was started and no .env was left behind."
+    }
     Remove-Variable newKey, keyBytes, example
     Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test. SECRET_KEY was generated for you.'
 }
@@ -137,12 +154,15 @@ if (-not $SkipContainers) {
     # The override keeps Postgres in a named volume, so database files already in data\pgdata (bind mount of
     # the base file: Docker) would be left behind and the database would start empty.
     if ($composeFiles -match 'podman-machine' -and (Test-Path -LiteralPath "$root\data\pgdata\PG_VERSION")) {
+        $stamp = Get-Date -Format yyyyMMdd
         throw ("This folder already has database files in data\pgdata (made with Docker), but Podman here would`n" +
                "start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.`n" +
                "To keep using data\pgdata, choose Docker:`n" +
                "  `$env:CONTAINER_ENGINE = 'docker'; powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
-               "To move to Podman instead: back up with Docker running (`"$root\scripts\backup.ps1`"), stop it, start with Podman`n" +
-               "and restore the dump with `"$root\scripts\restore.ps1`". The scripts never delete data\pgdata.")
+               "To move to Podman instead: (1) with Docker running, back up (`"$root\scripts\backup.ps1`") and stop it; (2) rename`n" +
+               "data\pgdata out of the way, nothing is deleted (it becomes $root\data\pgdata.docker-$stamp):`n" +
+               "  Rename-Item -LiteralPath `"$root\data\pgdata`" -NewName `"pgdata.docker-$stamp`"`n" +
+               "(3) run this script again with Podman and (4) restore the dump: `"$root\scripts\restore.ps1`".")
     }
 
     # data\backups is made now, by this user, before the database container starts (the same order as

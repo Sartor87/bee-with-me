@@ -95,17 +95,27 @@ port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # -- .env ------------------------------------------------------------------------
 # A random 64-character key (48 random bytes, base64) for a new install; never printed.
+# openssl first; when it is missing or fails, /dev/urandom + base64. Sets NEW_KEY; KEY_TRIED names what was attempted.
 new_secret_key() {
-    if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 2>/dev/null | tr -d '\r\n'
-    else head -c 48 /dev/urandom 2>/dev/null | base64 | tr -d '\r\n'
+    local key=''
+    KEY_TRIED=''
+    NEW_KEY=''
+    if command -v openssl >/dev/null 2>&1; then
+        KEY_TRIED='openssl'
+        key="$(openssl rand -base64 48 2>/dev/null | tr -d '\r\n' || true)"
     fi
+    if [[ ${#key} -lt 48 ]]; then
+        KEY_TRIED="${KEY_TRIED:+$KEY_TRIED, then }/dev/urandom + base64"
+        key="$(head -c 48 /dev/urandom 2>/dev/null | base64 2>/dev/null | tr -d '\r\n' || true)"
+    fi
+    NEW_KEY="$key"
 }
 
 if [[ ! -f "$ROOT/.env" ]]; then
     step 'No .env found - copying .env.example with a new random SECRET_KEY'
-    NEW_KEY="$(new_secret_key || true)"
+    new_secret_key   # sets NEW_KEY and KEY_TRIED (no subshell: both must reach this shell)
     [[ ${#NEW_KEY} -ge 48 ]] \
-        || die 'Could not generate a random SECRET_KEY (neither openssl nor /dev/urandom + base64 worked) - .env was not created. Install openssl and re-run.'
+        || die "Could not generate a random SECRET_KEY (tried: ${KEY_TRIED:-nothing}; none gave a usable key) - .env was not created. Install openssl (or base64 and a readable /dev/urandom) and run this script again."
     # The example's SECRET_KEY line gets the random value (a line that is not there is added); every other
     # line is copied as it is. The file is private to this user (umask 077). An existing .env is never touched.
     ( umask 077
@@ -155,17 +165,26 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
     # The override keeps Postgres in a named volume, so database files already in data/pgdata (bind mount of
     # the base file: Docker, or native Podman) would be left behind and the database would start empty.
     if [[ " ${COMPOSE_FILES[*]} " == *podman-machine* && -e "$ROOT/data/pgdata/PG_VERSION" ]]; then
+        STAMP="$(date +%Y%m%d)"
         die "This folder already has database files in data/pgdata (made with Docker, or Podman without a VM), but Podman here would
 start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.
 To keep using data/pgdata, choose Docker:
   CONTAINER_ENGINE=docker \"$ROOT/start.sh\"
-To move to Podman instead: back up with Docker running (\"$ROOT/scripts/backup.sh\" \"$ROOT/data/backups\"), stop it, start
-with Podman and restore the dump with \"$ROOT/scripts/restore.sh\". The scripts never delete data/pgdata."
+To move to Podman instead: (1) with Docker running, back up (\"$ROOT/scripts/backup.sh\" \"$ROOT/data/backups\") and stop it;
+(2) rename data/pgdata out of the way, nothing is deleted (it becomes $ROOT/data/pgdata.docker-$STAMP):
+  mv \"$ROOT/data/pgdata\" \"$ROOT/data/pgdata.docker-$STAMP\"
+(3) run this script again with Podman and (4) restore the dump: \"$ROOT/scripts/restore.sh\" \"$ROOT/data/backups/<the dump>\""
     fi
 
     # data/backups is made now, as this user: rootful Docker would create data/ as root through the bind
     # mount of data/pgdata, and the backup before a migration could not write there any more.
-    if ! mkdir -p "$ROOT/data/backups" 2>/dev/null || [[ ! -w "$ROOT/data/backups" ]]; then
+    # The dumps hold personal data: the folder is 0700 (a new one is made with umask 077; an existing one of
+    # ours is tightened; one owned by someone else is left as it is, the write check below decides).
+    if mkdir -p "$ROOT/data" 2>/dev/null; then
+        ( umask 077; mkdir -p "$ROOT/data/backups" ) 2>/dev/null || true
+        if [[ -O "$ROOT/data/backups" ]]; then chmod 700 "$ROOT/data/backups" 2>/dev/null || true; fi
+    fi
+    if [[ ! -d "$ROOT/data/backups" || ! -w "$ROOT/data/backups" ]]; then
         die "Cannot write to the backup folder $ROOT/data/backups - not starting, so the database is never migrated without a backup.
 If Docker created data/ as root, make it yours once (data/pgdata stays owned by the container):
   sudo mkdir -p \"$ROOT/data/backups\" && sudo chown \"\$(id -un)\" \"$ROOT/data\" \"$ROOT/data/backups\""

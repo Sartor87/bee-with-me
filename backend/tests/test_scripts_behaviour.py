@@ -90,7 +90,7 @@ def project(tmp_path, _venv, postgres_port):
     return proj
 
 
-def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, args=(), **stub):
+def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, args=(), path_prepend=None, **stub):
     log = tmp_path / 'calls.log'
     log.write_text('', encoding='utf-8')
     if kind == 'sh':
@@ -104,7 +104,7 @@ def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, ar
         stub_dir = STUBS / 'win'
     env = {k: v for k, v in script_env().items() if not k.startswith('BWM_')}
     env.update({
-        'PATH': str(stub_dir) + os.pathsep + os.environ.get('PATH', ''),
+        'PATH': os.pathsep.join([*(str(d) for d in (path_prepend or [])), str(stub_dir), os.environ.get('PATH', '')]),
         'CONTAINER_ENGINE': engine,
         'BWM_START_DRY_RUN': '1',
         'BWM_STUB_LOG': log.as_posix(),
@@ -658,3 +658,128 @@ def test_docker_with_existing_bind_mount_data_starts(kind, project, tmp_path):
     res = _run(kind, project, tmp_path, engine='docker', migrate='0')
     assert res.returncode == 0, res.out
     assert DRY in res.out
+
+
+# ── B59: the engine guard explains the rename; private, atomically written secrets file; private backups folder ──
+
+def _pgdata_with_files(project):
+    pgdata = project / 'data' / 'pgdata'
+    pgdata.mkdir(parents=True)
+    (pgdata / 'PG_VERSION').write_text('16\n', encoding='utf-8')
+    return pgdata
+
+
+@pytest.mark.Trait("Bug", "B59")
+def test_engine_guard_names_the_rename_and_the_restore_step(project, tmp_path):
+    kind = _machine_override_kind()
+    pgdata = _pgdata_with_files(project)
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert res.returncode != 0, res.out
+    assert not any('up -d' in c for c in res.calls), res.calls
+    out = res.out.replace('\\', '/')
+    assert re.search(r'data/pgdata\.docker-\d{8}', out), res.out          # the exact new folder name
+    assert ('Rename-Item' if kind == 'ps' else 'mv ') in res.out, res.out    # ... and the command that does it
+    assert 'restore.' + ('ps1' if kind == 'ps' else 'sh') in res.out, res.out
+    assert 'never delete' not in res.out, res.out    # the old advice that led nowhere
+    assert (pgdata / 'PG_VERSION').is_file()          # the guard itself still changes nothing
+
+
+@pytest.mark.Trait("Bug", "B59")
+def test_after_the_rename_podman_starts(project, tmp_path):
+    kind = _machine_override_kind()
+    pgdata = _pgdata_with_files(project)
+    blocked = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert blocked.returncode != 0, blocked.out
+    pgdata.rename(project / 'data' / 'pgdata.docker-20261004')
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert res.returncode == 0, res.out
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_fresh_secrets_file_is_private_to_this_user_on_windows(project, tmp_path):
+    res = _fresh_install('ps', project, tmp_path, EXAMPLE)
+    assert res.returncode == 0, res.out
+    target = project / '.env'
+    acl = subprocess.run(['icacls', str(target)], capture_output=True, text=True).stdout
+    user = os.environ.get('USERNAME', '')
+    rest = acl.replace(str(target), '')
+    if user:
+        rest = rest.replace(user, '<me>')
+    assert '(F)' in rest, acl
+    for other in ('Everyone', 'Users', 'Authenticated', 'SYSTEM', 'Administrators'):
+        assert other not in rest, acl
+    assert '(I)' not in rest, acl   # nothing inherited from the folder
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_failing_icacls_leaves_no_secrets_file_and_stops_with_a_message(project, tmp_path):
+    (project / '.env.example').write_text(EXAMPLE.format(port=5432), encoding='utf-8', newline='\n')
+    (project / '.env').unlink(missing_ok=True)
+    res = _run('ps', project, tmp_path, args=('-SkipContainers',), icacls_fail='1')
+    assert res.returncode != 0, res.out
+    leftovers = sorted(p.name for p in project.iterdir() if p.name.startswith('.env') and p.name != '.env.example')
+    assert leftovers == [], leftovers    # neither the file nor a temp copy of the key
+    assert 'icacls' in res.out, res.out
+    assert 'change-me-example-key' not in res.out
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_successful_fresh_install_leaves_no_temp_file(project, tmp_path):
+    res = _fresh_install('ps', project, tmp_path, EXAMPLE)
+    assert res.returncode == 0, res.out
+    names = sorted(p.name for p in project.iterdir() if p.name.startswith('.env'))
+    assert names == ['.env', '.env.example'], names
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(os.name == 'nt' or BASH is None, reason='POSIX modes need a POSIX file system')
+def test_start_sh_makes_data_backups_private(project, tmp_path):
+    res = _run('sh', project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert (project / 'data' / 'backups').stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(os.name == 'nt' or BASH is None, reason='POSIX modes need a POSIX file system')
+def test_start_sh_tightens_an_existing_data_backups(project, tmp_path):
+    backups = project / 'data' / 'backups'
+    backups.mkdir(parents=True)
+    backups.chmod(0o755)
+    res = _run('sh', project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert backups.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
+def test_start_sh_falls_back_to_urandom_when_openssl_fails(project, tmp_path):
+    fake = tmp_path / 'fakebin'
+    fake.mkdir()
+    (fake / 'openssl').write_text('#!/usr/bin/env bash\nexit 1\n', encoding='utf-8', newline='\n')
+    (fake / 'openssl').chmod(0o755)
+    (project / '.env.example').write_text(EXAMPLE.format(port=5432), encoding='utf-8', newline='\n')
+    (project / '.env').unlink(missing_ok=True)
+    res = _run('sh', project, tmp_path, args=('--skip-containers',), path_prepend=[fake])
+    assert res.returncode == 0, res.out
+    key = _secret_lines(project)[0].split('=', 1)[1]
+    assert key != 'change-me-example-key' and len(key) >= 48, key
+
+
+@pytest.mark.Trait("Bug", "B59")
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
+def test_start_sh_stops_naming_both_attempts_when_nothing_can_make_a_key(project, tmp_path):
+    fake = tmp_path / 'fakebin'
+    fake.mkdir()
+    for name in ('openssl', 'base64'):
+        (fake / name).write_text('#!/usr/bin/env bash\nexit 1\n', encoding='utf-8', newline='\n')
+        (fake / name).chmod(0o755)
+    (project / '.env.example').write_text(EXAMPLE.format(port=5432), encoding='utf-8', newline='\n')
+    (project / '.env').unlink(missing_ok=True)
+    res = _run('sh', project, tmp_path, args=('--skip-containers',), path_prepend=[fake])
+    assert res.returncode != 0, res.out
+    assert not (project / '.env').exists()
+    assert 'openssl' in res.out and '/dev/urandom' in res.out, res.out
