@@ -123,7 +123,7 @@ function Get-FileMagic([string]$Path) {
 }
 
 $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
-$inContainer = "/tmp/beewithme_restore_$(Get-Date -Format 'yyyyMMddHHmmss')_$suffix.dump"
+$inContainer = "/tmp/beewithme_restore_$((Get-Date).ToString('yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture))_$suffix.dump"
 # The side database exists only between createdb and the swap; any failure in between drops it.
 $restoreCreated = $false
 $keptDb = $null
@@ -160,7 +160,7 @@ try {
     }
 
     # 3. Swap: one transaction renames the current database away and the restored one into its place.
-    $keptDb = "${db}_before_restore_$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))"
+    $keptDb = "${db}_before_restore_$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture))"
     $exists = (Invoke-Native { & $engine exec $container psql -U $user -d postgres -Atc "SELECT count(*) FROM pg_database WHERE datname = '$db'" } | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw "Could not check whether database '$db' exists - database '$db' was not changed." }
     if ($exists -eq '1') {

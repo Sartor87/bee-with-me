@@ -33,6 +33,11 @@ ALTER TYPE ... ADD VALUE when the new value is used in the same file.
 Every file also runs under a lock_timeout (settings.migration_lock_timeout, default 5s): when another
 session holds a lock the file needs, the file fails with a MigrationError instead of waiting forever
 and queueing every later writer behind it. The transaction rolls back and the version is not recorded.
+
+One exception: 0001_baseline.sql hard-codes `SET LOCAL lock_timeout = '5s'` on its own first line, which
+overrides MIGRATION_LOCK_TIMEOUT for that one file. 0001 is already applied on real installs, so it is
+not edited (an applied file must never change); every later file honours the setting. It only matters on
+a fresh install, where nothing else holds locks.
 """
 
 from __future__ import annotations

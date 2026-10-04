@@ -94,10 +94,34 @@ old_container_is_ours() {
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # -- .env ------------------------------------------------------------------------
+# A random 64-character key (48 random bytes, base64) for a new install; never printed.
+new_secret_key() {
+    if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 2>/dev/null | tr -d '\r\n'
+    else head -c 48 /dev/urandom 2>/dev/null | base64 | tr -d '\r\n'
+    fi
+}
+
 if [[ ! -f "$ROOT/.env" ]]; then
-    step 'No .env found - copying .env.example'
-    cp "$ROOT/.env.example" "$ROOT/.env"
-    warn 'Edit .env with real values (POSTGRES_PASSWORD, SECRET_KEY, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test.'
+    step 'No .env found - copying .env.example with a new random SECRET_KEY'
+    NEW_KEY="$(new_secret_key || true)"
+    [[ ${#NEW_KEY} -ge 48 ]] \
+        || die 'Could not generate a random SECRET_KEY (neither openssl nor /dev/urandom + base64 worked) - .env was not created. Install openssl and re-run.'
+    # The example's SECRET_KEY line gets the random value (a line that is not there is added); every other
+    # line is copied as it is. The file is private to this user (umask 077). An existing .env is never touched.
+    ( umask 077
+      BWM_NEW_KEY="$NEW_KEY" awk '
+          match($0, /^[ \t]*(export[ \t]+)?[sS][eE][cC][rR][eE][tT]_[kK][eE][yY][ \t]*=/) {
+              cr = ($0 ~ /\r$/) ? "\r" : ""
+              print substr($0, 1, RLENGTH) ENVIRON["BWM_NEW_KEY"] cr
+              found = 1; next
+          }
+          { print }
+          END { if (!found) print "SECRET_KEY=" ENVIRON["BWM_NEW_KEY"] }
+      ' "$ROOT/.env.example" > "$ROOT/.env.new" ) \
+        && mv -f "$ROOT/.env.new" "$ROOT/.env" \
+        || { rm -f "$ROOT/.env.new"; die 'Could not create .env from .env.example.'; }
+    unset NEW_KEY
+    warn 'Edit .env with real values (POSTGRES_PASSWORD, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test. SECRET_KEY was generated for you.'
 fi
 
 # -- Database container (Podman first, Docker as the alternative) --------------------
@@ -127,6 +151,25 @@ if [[ $SKIP_CONTAINERS -eq 0 ]]; then
         Darwin|MINGW*|MSYS*|CYGWIN*)
             [[ "$ENGINE" == podman ]] && COMPOSE_FILES+=(-f "$ROOT/docker/docker-compose.podman-machine.yaml") ;;
     esac
+
+    # The override keeps Postgres in a named volume, so database files already in data/pgdata (bind mount of
+    # the base file: Docker, or native Podman) would be left behind and the database would start empty.
+    if [[ " ${COMPOSE_FILES[*]} " == *podman-machine* && -e "$ROOT/data/pgdata/PG_VERSION" ]]; then
+        die "This folder already has database files in data/pgdata (made with Docker, or Podman without a VM), but Podman here would
+start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.
+To keep using data/pgdata, choose Docker:
+  CONTAINER_ENGINE=docker \"$ROOT/start.sh\"
+To move to Podman instead: back up with Docker running (\"$ROOT/scripts/backup.sh\" \"$ROOT/data/backups\"), stop it, start
+with Podman and restore the dump with \"$ROOT/scripts/restore.sh\". The scripts never delete data/pgdata."
+    fi
+
+    # data/backups is made now, as this user: rootful Docker would create data/ as root through the bind
+    # mount of data/pgdata, and the backup before a migration could not write there any more.
+    if ! mkdir -p "$ROOT/data/backups" 2>/dev/null || [[ ! -w "$ROOT/data/backups" ]]; then
+        die "Cannot write to the backup folder $ROOT/data/backups - not starting, so the database is never migrated without a backup.
+If Docker created data/ as root, make it yours once (data/pgdata stays owned by the container):
+  sudo mkdir -p \"$ROOT/data/backups\" && sudo chown \"\$(id -un)\" \"$ROOT/data\" \"$ROOT/data/backups\""
+    fi
 
     # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
     # same port and, on the base file, the same data folder. Back that database up, then stop the old
@@ -243,9 +286,11 @@ fi
 if ! grep -rqsi 'hidraw' /etc/udev/rules.d/ 2>/dev/null; then
     warn 'No udev rule for hidraw found - the backend may not be able to open the USB gateway as a normal user.
   Fix once with (VID/PID from .env, without the 0x prefix, lowercase):
-    echo '"'"'KERNEL=="hidraw*", ATTRS{idVendor}=="0acd", ATTRS{idProduct}=="faaf", MODE="0666"'"'"' | sudo tee /etc/udev/rules.d/99-bee-gateway.rules
+    echo '"'"'KERNEL=="hidraw*", ATTRS{idVendor}=="0acd", ATTRS{idProduct}=="faaf", MODE="0660", GROUP="plugdev"'"'"' | sudo tee /etc/udev/rules.d/99-bee-gateway.rules
+    sudo usermod -aG plugdev "$USER"
     sudo udevadm control --reload-rules && sudo udevadm trigger
-  then unplug and replug the gateway.'
+  then unplug and replug the gateway and log out and in again (group change). Not world-writable on purpose.
+  No plugdev group on your distro (Fedora, Arch)? Use TAG+="uaccess" instead of GROUP/MODE (the logged-in user gets access).'
 fi
 
 # -- Backend + frontend (this terminal) ---------------------------------------------

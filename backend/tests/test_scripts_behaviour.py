@@ -391,3 +391,270 @@ def test_project_folder_line_has_no_trailing_separator(kind, project, tmp_path):
     line = re.sub(r'\x1b\[[0-9;]*m', '', line).rstrip()   # start.sh colours its step lines
     assert not line.endswith(('\\', '/')), line
     assert line.lower().endswith(project.name.lower()), line
+
+
+# ── B57: data/backups made by the user before compose up, invariant timestamps, secret key, engine guard ──
+
+def _state(res, name):
+    return [c for c in res.calls if c.startswith(f'state {name} ')]
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_data_backups_folder_exists_before_compose_up(kind, project, tmp_path):
+    # rootful Docker would create data/ as root through the bind mount; the user makes it first
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert _state(res, 'compose-up') == ['state compose-up backups_dir=1'], res.calls
+    assert (project / 'data' / 'backups').is_dir()
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_old_install_backup_finds_the_backups_folder_already_made(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0', old_db='olddb123',
+               old_workdir=str(project / 'docker'))
+    assert res.returncode == 0, res.out
+    assert 'backup-state dir_existed=1' in res.calls, res.calls
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_skip_containers_does_not_need_the_backups_folder_first(kind, project, tmp_path):
+    flag = '-SkipContainers' if kind == 'ps' else '--skip-containers'
+    res = _run(kind, project, tmp_path, args=(flag,))
+    assert res.returncode == 0, res.out
+    assert _state(res, 'compose-up') == []
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_data_backups_that_cannot_be_made_stops_with_a_next_step(kind, project, tmp_path):
+    (project / 'data').write_text('a file where the data folder should be', encoding='utf-8')
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode != 0
+    assert DRY not in res.out and not any('up -d' in c for c in res.calls), res.calls
+    assert 'Cannot write to the backup folder' in res.out, res.out
+
+
+# backup.sh / backup.ps1 themselves (real scripts, a stub database container)
+
+def _backup_project(tmp_path):
+    proj = tmp_path / 'bproj'
+    for rel in ('scripts/backup.sh', 'scripts/backup.ps1'):
+        _copy_text(ROOT / rel, proj / rel, lf=rel.endswith('.sh'))
+    return proj
+
+
+def _run_backup(kind, tmp_path, out_dir, *, culture=None, engine='podman', db='stubdb'):
+    proj = _backup_project(tmp_path)
+    log = tmp_path / 'calls.log'
+    log.write_text('', encoding='utf-8')
+    if kind == 'sh':
+        posix = tmp_path / 'posix-stubs'
+        for name in ('podman', 'docker'):
+            _copy_text(STUBS / 'posix' / name, posix / name, lf=True)
+            os.chmod(posix / name, 0o755)
+        shutil.copy(STUBS / 'engine_stub.py', tmp_path / 'engine_stub.py')
+        stub_dir = posix
+    else:
+        stub_dir = STUBS / 'win'
+    env = script_env()
+    env.update({
+        'PATH': str(stub_dir) + os.pathsep + os.environ.get('PATH', ''),
+        'CONTAINER_ENGINE': engine,
+        'BWM_STUB_LOG': log.as_posix(),
+        'BWM_STUB_PYTHON': Path(sys.executable).as_posix(),
+        'MSYS2_ENV_CONV_EXCL': 'BWM_STUB_',
+    })
+    if db:
+        env['BWM_STUB_DB'] = db
+    if kind == 'ps':
+        script = proj / 'scripts' / 'backup.ps1'
+        arg = f" -OutDir '{out_dir}'" if out_dir is not None else ''
+        prefix = ''
+        if culture:
+            prefix = ("[Threading.Thread]::CurrentThread.CurrentCulture = "
+                      f"[Globalization.CultureInfo]::GetCultureInfo('{culture}'); ")
+        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+               f"{prefix}& '{script}'{arg}"]
+    else:
+        cmd = [BASH, (proj / 'scripts' / 'backup.sh').as_posix()] + ([Path(out_dir).as_posix()] if out_dir is not None else [])
+    res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=300)
+    res.calls = log.read_text(encoding='utf-8').splitlines()
+    res.out = res.stdout + res.stderr
+    res.proj = proj
+    return res
+
+
+def _marker(out_dir):
+    import json
+    return json.loads((Path(out_dir) / 'last-backup.json').read_text(encoding='utf-8'))
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_backup_stub_flow_writes_a_parseable_marker(kind, tmp_path):
+    from datetime import datetime
+    out = tmp_path / 'out'
+    res = _run_backup(kind, tmp_path, out)
+    assert res.returncode == 0, res.out
+    marker = _marker(out)
+    assert datetime.fromisoformat(marker['created_at']).tzinfo is not None, marker
+    assert (out / marker['dump']).is_file()
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+@pytest.mark.parametrize('culture', ['fi-FI', 'th-TH', 'ar-SA'])
+def test_backup_ps1_timestamps_ignore_the_culture(culture, tmp_path):
+    from datetime import datetime, timezone
+    out = tmp_path / 'out'
+    res = _run_backup('ps', tmp_path, out, culture=culture)
+    assert res.returncode == 0, res.out
+    marker = _marker(out)
+    created = datetime.fromisoformat(marker['created_at'])   # fi-FI used to give 10.34.59: a ValueError
+    assert abs((datetime.now(timezone.utc) - created).total_seconds()) < 600, marker
+    assert re.fullmatch(r'beewithme_20\d\d-\d\d-\d\d_\d{6}_[0-9a-f]{6}\.dump', marker['dump']), marker['dump']
+    assert abs(datetime.now().year - int(marker['dump'][10:14])) <= 1   # th-TH/ar-SA would give 2569 / 1448
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.skipif(PS_EXE is None or os.name != 'nt', reason='needs Windows PowerShell')
+def test_backup_ps1_default_out_dir_is_data_backups_of_the_project(tmp_path):
+    res = _run_backup('ps', tmp_path, None)
+    assert res.returncode == 0, res.out
+    assert (res.proj / 'data' / 'backups' / 'last-backup.json').is_file(), res.out
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_backup_into_a_folder_it_cannot_use_stops_before_any_engine_call(kind, tmp_path):
+    out = tmp_path / 'not-a-folder'
+    out.write_text('a file', encoding='utf-8')
+    res = _run_backup(kind, tmp_path, out)
+    assert res.returncode != 0, res.out
+    assert 'Cannot write to the backup folder' in res.out, res.out
+    assert not [c for c in res.calls if c.startswith('engine exec')], res.calls
+    assert out.read_text(encoding='utf-8') == 'a file'
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.skipif(os.name == 'nt' or not hasattr(os, 'geteuid') or os.geteuid() == 0,
+                    reason='needs POSIX permissions as non-root')
+def test_backup_sh_into_a_read_only_folder_names_the_chown_fix(tmp_path):
+    out = tmp_path / 'data' / 'backups'
+    out.mkdir(parents=True)
+    out.chmod(0o555)
+    try:
+        res = _run_backup('sh', tmp_path, out)
+    finally:
+        out.chmod(0o755)
+    assert res.returncode != 0, res.out
+    assert 'Cannot write to the backup folder' in res.out and 'chown' in res.out, res.out
+    assert not [c for c in res.calls if c.startswith('engine exec')], res.calls
+
+
+@pytest.mark.Trait("Bug", "B57")
+def test_start_sh_udev_hint_is_not_world_writable():
+    text = (ROOT / 'start.sh').read_text(encoding='utf-8')
+    assert 'MODE="0666"' not in text
+    assert 'MODE="0660"' in text and 'GROUP="plugdev"' in text and 'usermod -aG plugdev' in text
+
+
+# a fresh install gets its own random secret key
+
+EXAMPLE = 'POSTGRES_PORT={port}\nSECRET_KEY=change-me-example-key\nexport POSTGRES_DB=stub_db\nOTHER_SETTING=1\n'
+
+
+def _fresh_install(kind, project, tmp_path, example):
+    (project / '.env.example').write_text(example.format(port=5432), encoding='utf-8', newline='\n')
+    (project / '.env').unlink(missing_ok=True)
+    flag = '-SkipContainers' if kind == 'ps' else '--skip-containers'
+    return _run(kind, project, tmp_path, args=(flag,))
+
+
+def _secret_lines(project):
+    return [l for l in (project / '.env').read_text(encoding='utf-8').splitlines() if l.upper().startswith('SECRET_KEY=')]
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_fresh_install_replaces_the_example_secret_key_with_a_random_one(kind, project, tmp_path):
+    res = _fresh_install(kind, project, tmp_path, EXAMPLE)
+    assert res.returncode == 0, res.out
+    lines = (project / '.env').read_text(encoding='utf-8').splitlines()
+    secret = [l for l in lines if l.startswith('SECRET_KEY=')]
+    assert len(secret) == 1, lines
+    key = secret[0].split('=', 1)[1]
+    assert key != 'change-me-example-key' and len(key) >= 48 and not re.search(r'\s|["\']', key), key
+    assert [l for l in lines if not l.startswith('SECRET_KEY=')] == \
+        ['POSTGRES_PORT=5432', 'export POSTGRES_DB=stub_db', 'OTHER_SETTING=1']
+    assert key not in res.out   # never printed
+    again = _fresh_install(kind, project, tmp_path, EXAMPLE)
+    assert again.returncode == 0, again.out
+    assert _secret_lines(project)[0].split('=', 1)[1] != key   # random each time
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_fresh_install_adds_a_secret_key_when_the_example_has_none(kind, project, tmp_path):
+    res = _fresh_install(kind, project, tmp_path, 'POSTGRES_PORT={port}\n')
+    assert res.returncode == 0, res.out
+    lines = _secret_lines(project)
+    assert len(lines) == 1 and len(lines[0].split('=', 1)[1]) >= 48, lines
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_existing_secrets_file_is_left_alone(kind, project, tmp_path):
+    (project / '.env.example').write_text(EXAMPLE.format(port=5432), encoding='utf-8')
+    mine = 'POSTGRES_PORT=5432\nSECRET_KEY=mine-do-not-touch\n'
+    (project / '.env').write_text(mine, encoding='utf-8', newline='\n')
+    flag = '-SkipContainers' if kind == 'ps' else '--skip-containers'
+    res = _run(kind, project, tmp_path, args=(flag,))
+    assert res.returncode == 0, res.out
+    assert (project / '.env').read_text(encoding='utf-8') == mine
+
+
+# engine switch guard: data/pgdata (bind mount of the base file) must not be silently replaced by the
+# Podman-machine named volume
+
+def _machine_override_kind():
+    if os.name == 'nt' and PS_EXE:
+        return 'ps'
+    if os.name == 'nt' and BASH:
+        return 'sh'
+    pytest.skip('the Podman machine override only applies on Windows (or macOS)')
+
+
+@pytest.mark.Trait("Bug", "B57")
+def test_existing_bind_mount_data_stops_the_podman_machine_override(project, tmp_path):
+    kind = _machine_override_kind()
+    pgdata = project / 'data' / 'pgdata'
+    pgdata.mkdir(parents=True)
+    (pgdata / 'PG_VERSION').write_text('16\n', encoding='utf-8')
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert res.returncode != 0, res.out
+    assert DRY not in res.out and not any('up -d' in c for c in res.calls), res.calls
+    assert 'CONTAINER_ENGINE' in res.out and 'docker' in res.out and 'data' in res.out, res.out
+    assert (pgdata / 'PG_VERSION').is_file()
+
+
+@pytest.mark.Trait("Bug", "B57")
+def test_podman_machine_override_without_old_data_still_starts(project, tmp_path):
+    kind = _machine_override_kind()
+    res = _run(kind, project, tmp_path, engine='podman', migrate='0')
+    assert res.returncode == 0, res.out
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B57")
+@pytest.mark.parametrize('kind', KINDS)
+def test_docker_with_existing_bind_mount_data_starts(kind, project, tmp_path):
+    pgdata = project / 'data' / 'pgdata'
+    pgdata.mkdir(parents=True)
+    (pgdata / 'PG_VERSION').write_text('16\n', encoding='utf-8')
+    res = _run(kind, project, tmp_path, engine='docker', migrate='0')
+    assert res.returncode == 0, res.out
+    assert DRY in res.out

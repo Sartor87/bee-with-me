@@ -10,8 +10,9 @@
     pg_dump custom format (.dump); restore with scripts\restore.ps1, which runs pg_restore (see the hint printed at the end).
 
 .PARAMETER OutDir
-    Where to write the dump. Point this at a USB stick or a second drive — a backup on
-    the same disk as the database is not a backup.
+    Where to write the dump. Default: data\backups in the project (where the start scripts put
+    theirs and where the backend looks for the marker). Point this at a USB stick or a second
+    drive — a backup on the same disk as the database is not a backup.
 
 .PARAMETER Keep
     How many dumps to retain in OutDir (oldest are pruned). Default 30.
@@ -26,7 +27,7 @@
 #>
 
 param(
-    [string]$OutDir = (Join-Path $env:USERPROFILE 'Desktop\bee-backups'),
+    [string]$OutDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'data\backups'),
     [int]$Keep = 30,
     [string]$Container
 )
@@ -88,8 +89,13 @@ function Set-PrivateAcl([string]$Dir) {
     icacls "$Dir" /inheritance:r /grant:r "*${mySid}:(OI)(CI)F" | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
+function Stop-NotWritable([string]$Dir, [string]$Why) {
+    throw "Cannot write to the backup folder $Dir - nothing was dumped. $Why Make the folder writable for this user (or pass another -OutDir)."
+}
+if (Test-Path -LiteralPath $OutDir -PathType Leaf) { Stop-NotWritable $OutDir 'It is a file, not a folder.' }
 if (-not (Test-Path $OutDir)) {
-    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    try { New-Item -ItemType Directory -Path $OutDir -Force -ErrorAction Stop | Out-Null }
+    catch { Stop-NotWritable $OutDir $_.Exception.Message }
     if (-not (Set-PrivateAcl $OutDir)) { throw "Could not restrict access to $OutDir (icacls failed)" }
 } else {
     # An existing folder that still inherits its permissions is restricted too, but only when it holds
@@ -122,9 +128,16 @@ function Write-ForeignAclWarning([string]$Dir) {
 }
 Write-ForeignAclWarning $OutDir
 $OutDir = (Resolve-Path $OutDir).Path   # .NET file calls below don't follow PowerShell's location
+# A folder that exists but cannot be written to (read-only, owned by another account) is found now,
+# not after the dump was taken.
+$probe = Join-Path $OutDir (".write-test-" + [guid]::NewGuid().ToString('N'))
+try { [IO.File]::WriteAllBytes($probe, [byte[]]@()); Remove-Item -LiteralPath $probe -Force }
+catch { Stop-NotWritable $OutDir $_.Exception.Message }
 
 # Random suffix: two runs in the same second never share a file name (here or in the container).
-$stamp   = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+# InvariantCulture: digits, separators and the Gregorian year whatever the Windows region setting.
+$invariant = [Globalization.CultureInfo]::InvariantCulture
+$stamp   = (Get-Date).ToString('yyyy-MM-dd_HHmmss', $invariant)
 $suffix  = [guid]::NewGuid().ToString('N').Substring(0, 6)
 $target  = Join-Path $OutDir "beewithme_${stamp}_$suffix.dump"
 $partial = "$target.partial"   # becomes $target only after it was validated
@@ -144,7 +157,7 @@ $inContainer = "/tmp/beewithme_${stamp}_$suffix.dump"
 
 # State for the backup marker (last-backup.json, see below), read just before the dump: which server
 # this is and which migrations it has. The backend migrates only after a backup of this exact state.
-$createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+$createdAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $invariant)   # a culture's time separator (fi-FI: 10.34.59) is not ISO 8601
 $systemId = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT system_identifier FROM pg_control_system()' } | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $systemId -notmatch '^\d+\z') { throw "Could not read the database's system_identifier ($systemId)" }
 $database = (Invoke-Native { & $engine exec $container psql -U $user -d $db -Atc 'SELECT current_database()' } | Out-String).Trim()

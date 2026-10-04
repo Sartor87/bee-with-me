@@ -84,9 +84,23 @@ case "$(uname -s)" in
     echo "      inherit the folder's Windows permissions. On Windows use scripts/backup.ps1, which restricts" >&2
     echo "      the dump folder to this user." >&2 ;;
 esac
-mkdir -p "$OUT_DIR"
+# The folder has to be one this user can write to. With rootful Docker the compose bind mount
+# ../data/pgdata makes the daemon create data/ as root:root, so data/backups cannot be made afterwards;
+# the start scripts create it first, and this stops with the fix instead of a bare mkdir error.
+if ! mkdir -p "$OUT_DIR" 2>/dev/null || [ ! -d "$OUT_DIR" ] || [ ! -w "$OUT_DIR" ]; then
+  echo "Cannot write to the backup folder $OUT_DIR - nothing was dumped." >&2
+  case "$OUT_DIR" in
+    "$ROOT"/data|"$ROOT"/data/*)
+      echo "Rootful Docker creates data/ as root. Make it yours once (data/pgdata stays owned by the container):" >&2
+      echo "  sudo mkdir -p \"$ROOT/data/backups\" && sudo chown \"$(id -un)\" \"$ROOT/data\" \"$ROOT/data/backups\"" >&2 ;;
+    *)
+      echo "Make that folder writable for $(id -un), or pass another folder as OUT_DIR." >&2 ;;
+  esac
+  exit 1
+fi
 # Random suffix: two runs in the same second never share a file name (here or in the container).
-STAMP="$(date +%Y-%m-%d_%H%M%S)_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+# LC_ALL=C: the digits and the Gregorian year whatever the locale (th_TH would print the Buddhist year).
+STAMP="$(LC_ALL=C date +%Y-%m-%d_%H%M%S)_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
 FINAL="$OUT_DIR/beewithme_$STAMP.dump"
 # TARGET is the .partial file until the dump has been validated, then it is renamed to FINAL.
 PARTIAL="$FINAL.partial"
@@ -111,7 +125,7 @@ trap '"$ENGINE" exec "$CONTAINER" rm -f "$IN_CONTAINER" >/dev/null 2>&1 || true;
 # State for the backup marker (last-backup.json, see below), read just before the dump: which server
 # this is and which migrations it has. The backend migrates only after a backup of this exact state.
 psql_at() { "$ENGINE" exec "$CONTAINER" psql -U "$USER_NAME" -d "$DB" -Atc "$1" | tr -d '\r'; }
-CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CREATED_AT="$(LC_ALL=C date -u +%Y-%m-%dT%H:%M:%SZ)"
 SYSTEM_ID="$(psql_at 'SELECT system_identifier FROM pg_control_system()')"
 [[ "$SYSTEM_ID" =~ ^[0-9]+$ ]] || { echo "Could not read the database's system_identifier ($SYSTEM_ID)" >&2; exit 1; }
 DATABASE="$(psql_at 'SELECT current_database()')"

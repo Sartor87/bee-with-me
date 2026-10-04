@@ -91,9 +91,26 @@ Write-Step "Using project folder: $root"
 
 # -- .env --------------------------------------------------------------------
 if (-not (Test-Path "$root\.env")) {
-    Write-Step 'No .env found - copying .env.example'
-    Copy-Item "$root\.env.example" "$root\.env"
-    Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, SECRET_KEY, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test.'
+    Write-Step 'No .env found - copying .env.example with a new random SECRET_KEY'
+    # 48 random bytes, base64 (64 characters); never printed. New-Object/Create(): the static GetBytes(int)
+    # needs .NET 6, Windows PowerShell 5.1 has .NET Framework.
+    $keyBytes = New-Object byte[] 48
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($keyBytes) } finally { $rng.Dispose() }
+    $newKey = [Convert]::ToBase64String($keyBytes)
+    # The example's SECRET_KEY line gets the random value (a line that is not there is added); every other
+    # line is copied as it is. An existing .env is never touched.
+    $example = [IO.File]::ReadAllText("$root\.env.example")
+    $keyLine = '(?im)^([ \t]*(?:export[ \t]+)?SECRET_KEY[ \t]*=)[^\r\n]*'
+    if ($example -match $keyLine) {
+        $example = [regex]::Replace($example, $keyLine, { param($m) $m.Groups[1].Value + $newKey })
+    } else {
+        if ($example -and -not $example.EndsWith("`n")) { $example += "`r`n" }
+        $example += "SECRET_KEY=$newKey`r`n"
+    }
+    [IO.File]::WriteAllText("$root\.env", $example, (New-Object Text.UTF8Encoding($false)))   # UTF-8 without BOM
+    Remove-Variable newKey, keyBytes, example
+    Write-Warn 'Edit .env with real values (POSTGRES_PASSWORD, HID_VENDOR_ID/HID_PRODUCT_ID, ...) before relying on this for anything but a quick test. SECRET_KEY was generated for you.'
 }
 
 # -- Database container (Podman first, Docker as the alternative) ----------------
@@ -116,6 +133,29 @@ if (-not $SkipContainers) {
     # (see docker\docker-compose.podman-machine.yaml for why).
     $composeFiles = @('-f', "$root\docker\docker-compose.yaml")
     if ($engine -eq 'podman') { $composeFiles += @('-f', "$root\docker\docker-compose.podman-machine.yaml") }
+
+    # The override keeps Postgres in a named volume, so database files already in data\pgdata (bind mount of
+    # the base file: Docker) would be left behind and the database would start empty.
+    if ($composeFiles -match 'podman-machine' -and (Test-Path -LiteralPath "$root\data\pgdata\PG_VERSION")) {
+        throw ("This folder already has database files in data\pgdata (made with Docker), but Podman here would`n" +
+               "start the database on its own named volume (bee-with-me_pgdata), which is empty: your data would look gone. Nothing was started.`n" +
+               "To keep using data\pgdata, choose Docker:`n" +
+               "  `$env:CONTAINER_ENGINE = 'docker'; powershell -ExecutionPolicy Bypass -File `"$root\start.ps1`"`n" +
+               "To move to Podman instead: back up with Docker running (`"$root\scripts\backup.ps1`"), stop it, start with Podman`n" +
+               "and restore the dump with `"$root\scripts\restore.ps1`". The scripts never delete data\pgdata.")
+    }
+
+    # data\backups is made now, by this user, before the database container starts (the same order as
+    # start.sh, where rootful Docker would otherwise create data/ as root).
+    # (Windows PowerShell 5.1 reports success for New-Item -Force below a plain file, so the folder is checked, not trusted.)
+    $backupDir = "$root\data\backups"
+    try {
+        New-Item -ItemType Directory -Path $backupDir -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $backupDir -PathType Container)) { throw "$backupDir is not a folder." }
+        $probe = Join-Path $backupDir (".write-test-" + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllBytes($probe, [byte[]]@())
+        Remove-Item -LiteralPath $probe -Force
+    } catch { throw "Cannot write to the backup folder $backupDir - not starting, so the database is never migrated without a backup. $($_.Exception.Message)" }
 
     # Upgrade from 1.7.1 or earlier: the stack ran as compose project "docker" (docker-db-1) on the
     # same port and, on the base file, the same data folder. Back that database up, then stop the old

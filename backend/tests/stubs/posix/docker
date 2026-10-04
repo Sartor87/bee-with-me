@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
-# Stub container engine for start.sh tests (see ../engine_stub.py).
-exec "$BWM_STUB_PYTHON" "$(dirname "$0")/../engine_stub.py" "$@"
+# Stub container engine for the start.sh/backup.sh tests (see ../engine_stub.py).
+# pwd -W gives a Windows path: backup.sh turns MSYS path conversion off (MSYS_NO_PATHCONV) and the
+# native python cannot open /tmp/... then.
+HERE="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
+exec "$BWM_STUB_PYTHON" "$HERE/engine_stub.py" "$@"
