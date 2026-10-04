@@ -98,6 +98,17 @@ async def _store_feed(conn, name, fetched: _Fetched, upsert, now) -> None:
     state.upstream_state = upstream_state(rows, now()) if name == 'hotspots' else 'live'
 
 
+async def notify_data_changed(conn) -> None:
+    """Tell every browser to refetch the fire layers (also used after operator writes). No coordinates in it."""
+    fetched = FEEDS['hotspots'].last_success_at
+    await conn.execute("SELECT pg_notify('fire_data_updated', $1)", json.dumps({
+        'fetched_at': fetched.isoformat() if fetched else None,
+        'hotspot_count': FEEDS['hotspots'].count,
+        'burnt_area_count': FEEDS['burnt_areas'].count,
+        'upstream_state': FEEDS['hotspots'].upstream_state,
+    }))
+
+
 _refresh_guard = asyncio.Lock()   # one refresh at a time inside this process (the DB lock covers other processes)
 
 
@@ -119,13 +130,7 @@ async def refresh_once(pool, hotspots: FireFeedSource = HOTSPOTS, burnt_areas: F
                     await _store_feed(conn, 'hotspots', fetched_hotspots, repository.upsert_hotspots, now)
                 if fetched_areas is not None:
                     await _store_feed(conn, 'burnt_areas', fetched_areas, repository.upsert_burnt_areas, now)
-                fetched = FEEDS['hotspots'].last_success_at
-                await conn.execute("SELECT pg_notify('fire_data_updated', $1)", json.dumps({
-                    'fetched_at': fetched.isoformat() if fetched else None,
-                    'hotspot_count': FEEDS['hotspots'].count,
-                    'burnt_area_count': FEEDS['burnt_areas'].count,
-                    'upstream_state': FEEDS['hotspots'].upstream_state,
-                }))
+                await notify_data_changed(conn)
             finally:
                 await conn.execute('SELECT pg_advisory_unlock($1)', REFRESH_LOCK_KEY)
     if after_refresh is not None:

@@ -4,13 +4,16 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..auth import get_current_user
+from ..auth import get_current_user, require_role
 from ..database import get_conn
 from ..fire import poller, repository
-from ..fire.models import FireAlertOut, burnt_area_feature, hotspot_feature, iso
+from ..fire.models import FireAlertOut, burnt_area_feature, hotspot_feature, iso, zone_out
+from ..fire.parse import _storable
+from ..fire.poller import notify_data_changed
 from ..fire.service import notify
+from ..fire.service import service as fire_alarm
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,7 @@ router = APIRouter(prefix='/api/fire', tags=['fire'])
 
 Conn = Annotated[asyncpg.Connection, Depends(get_conn)]
 User = Annotated[asyncpg.Record, Depends(get_current_user)]
+Admin = Annotated[asyncpg.Record, Depends(require_role('admin'))]
 
 FEED_TABLES = {'hotspots': 'fire_hotspots', 'burnt_areas': 'fire_burnt_areas'}
 
@@ -111,3 +115,125 @@ async def acknowledge(alert_id: UUID, conn: Conn, user: User):
         if changed:
             await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
     return out
+
+
+# -- operator writes (T18) ----------------------------------------------------------------------------------------
+
+NOTES_MAX = 1000
+
+
+def _text_ok(value: str | None, max_len: int) -> str | None:
+    """Free text typed by an operator must be storable (no NUL, no lone surrogate): refuse it, never alter it."""
+    if value is not None and not _storable(value, max_len):
+        raise ValueError('text contains characters that cannot be stored')
+    return value
+
+
+class _Texts(BaseModel):
+    @field_validator('notes', 'label', check_fields=False, mode='after')
+    @classmethod
+    def _storable_text(cls, value, info):
+        return _text_ok(value, 255 if info.field_name == 'label' else NOTES_MAX)
+
+
+class DismissIn(_Texts):
+    notes: str | None = Field(default=None, max_length=NOTES_MAX)
+
+
+class FieldReportIn(_Texts):
+    device_id: UUID | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    notes: str | None = Field(default=None, max_length=NOTES_MAX)
+
+    @model_validator(mode='after')
+    def _exactly_one_location(self):
+        coords = (self.latitude, self.longitude)
+        if self.device_id is not None:
+            if any(c is not None for c in coords):
+                raise ValueError('send device_id or coordinates, not both')
+        elif None in coords:
+            raise ValueError('send device_id, or both latitude and longitude')
+        return self
+
+
+class ZoneIn(_Texts):
+    label: str = Field(min_length=1, max_length=255)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    radius_m: int = Field(default=1000, ge=50, le=20_000)
+    notes: str | None = Field(default=None, max_length=NOTES_MAX)
+
+
+class ZoneUpdate(ZoneIn):
+    is_active: bool = True
+
+
+def _zone_data(body: ZoneIn) -> dict:
+    return body.model_dump(include={'label', 'latitude', 'longitude', 'radius_m', 'notes'})
+
+
+@router.post('/hotspots/{hotspot_id}/dismiss')
+async def dismiss_hotspot(hotspot_id: UUID, body: DismissIn, conn: Conn, user: Admin):
+    row = await repository.dismiss_hotspot(conn, str(hotspot_id), user['id'], body.notes)
+    if row is None:
+        raise HTTPException(status_code=404, detail='Hotspot not found')
+    fire_alarm.request_evaluation()
+    await notify_data_changed(conn)
+    return hotspot_feature(row)
+
+
+@router.post('/field-reports', status_code=201)
+async def create_field_report(body: FieldReportIn, conn: Conn, user: User):
+    latitude, longitude, device_id = body.latitude, body.longitude, None
+    if body.device_id is not None:
+        device_id = str(body.device_id)
+        position = await repository.latest_device_position(conn, device_id)
+        if position is None:
+            raise HTTPException(status_code=409, detail='no_recent_position')
+        latitude, longitude = position['latitude'], position['longitude']
+    row = await repository.insert_field_report(conn, latitude, longitude, user['id'], device_id, body.notes)
+    fire_alarm.request_evaluation()
+    await notify_data_changed(conn)
+    return hotspot_feature(row)
+
+
+@router.post('/field-reports/{hotspot_id}/extinguish')
+async def extinguish_field_report(hotspot_id: UUID, conn: Conn, user: User):
+    row = await repository.extinguish_field_report(conn, str(hotspot_id), user['id'])
+    if row is None:
+        raise HTTPException(status_code=404, detail='Field report not found')
+    fire_alarm.request_evaluation()
+    await notify_data_changed(conn)
+    return hotspot_feature(row)
+
+
+@router.get('/suppression-zones')
+async def list_zones(conn: Conn, _: User, include_disabled: bool = False):
+    return [zone_out(r) for r in await repository.list_zones(conn, include_disabled)]
+
+
+@router.post('/suppression-zones', status_code=201)
+async def create_zone(body: ZoneIn, conn: Conn, user: Admin):
+    row = await repository.create_zone(conn, _zone_data(body), user['id'])
+    fire_alarm.request_evaluation()
+    return zone_out(row)
+
+
+@router.put('/suppression-zones/{zone_id}')
+async def update_zone(zone_id: UUID, body: ZoneUpdate, conn: Conn, user: Admin):
+    row = await repository.update_zone(conn, str(zone_id), _zone_data(body), body.is_active, user['id'])
+    if row is None:
+        raise HTTPException(status_code=404, detail='Zone not found')
+    fire_alarm.request_evaluation()
+    return zone_out(row)
+
+
+@router.delete('/suppression-zones/{zone_id}')
+async def disable_zone(zone_id: UUID, conn: Conn, user: Admin):
+    """'Delete' disables the zone; the daily cleanup removes it 48 h later."""
+    row = await repository.disable_zone(conn, str(zone_id), user['id'])
+    if row is None:
+        raise HTTPException(status_code=404, detail='Zone not found')
+    fire_alarm.request_evaluation()
+    return zone_out(row)

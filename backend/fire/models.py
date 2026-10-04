@@ -122,3 +122,18 @@ class FireAlertOut(BaseModel):
             hotspot=FireAlertHotspotOut(id=r['hotspot_id'], latitude=r['latitude'], longitude=r['longitude'],
                                         acquired_at=r['acquired_at'], source=r['source']),
         )
+
+
+def zone_out(row) -> dict:
+    row = dict(row)
+    return {
+        'id': str(row['id']),
+        'label': row['label'],
+        'latitude': row['latitude'],
+        'longitude': row['longitude'],
+        'radius_m': row['radius_m'],
+        'is_active': row['is_active'],
+        'disabled_at': iso(row.get('disabled_at')),
+        'notes': row.get('notes'),
+        'created_at': iso(row.get('created_at')),
+    }

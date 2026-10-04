@@ -78,10 +78,17 @@ async def upsert_burnt_areas(conn: asyncpg.Connection, rows: list[BurntAreaRow])
     ])
 
 
+_PURGE_ZONES = """
+    WITH d AS (DELETE FROM fire_suppression_zones WHERE disabled_at < NOW() - INTERVAL '48 hours' RETURNING 1)
+    SELECT count(*) FROM d
+"""
+
+
 async def prune_fire_data(conn: asyncpg.Connection) -> dict[str, int]:
     return {
         'fire_hotspots': await conn.fetchval(_PRUNE_HOTSPOTS),
         'fire_burnt_areas': await conn.fetchval(_PRUNE_BURNT_AREAS),
+        'fire_suppression_zones': await conn.fetchval(_PURGE_ZONES),
     }
 
 
@@ -290,3 +297,81 @@ async def count_targets(conn: asyncpg.Connection) -> dict:
     _, hq = await load_alarm_settings(conn)
     rescuers = await load_rescuer_targets(conn, TARGET_POSITION_MAX_AGE_MIN)
     return {'hq': hq is not None, 'rescuers': len(rescuers)}
+
+
+# -- operator writes (T18) ----------------------------------------------------------------------------------------
+
+async def dismiss_hotspot(conn: asyncpg.Connection, hotspot_id: str, user_id, notes: str | None):
+    """Idempotent: the first dismisser and time stay; new notes replace old ones, no notes keeps them."""
+    return await conn.fetchrow("""
+        UPDATE fire_hotspots
+        SET dismissed_at = COALESCE(dismissed_at, NOW()),
+            dismissed_by = COALESCE(dismissed_by, $2::uuid),
+            dismiss_notes = COALESCE($3, dismiss_notes)
+        WHERE id = $1::uuid
+        RETURNING *
+    """, hotspot_id, str(user_id), notes)
+
+
+async def latest_device_position(conn: asyncpg.Connection, device_id: str):
+    # received_at is the server clock; recorded_at is the device's and may be wrong (BP-01)
+    return await conn.fetchrow("""
+        SELECT latitude, longitude FROM location_events
+        WHERE device_id = $1::uuid AND received_at > NOW() - INTERVAL '24 hours'
+        ORDER BY received_at DESC LIMIT 1
+    """, device_id)
+
+
+async def insert_field_report(conn: asyncpg.Connection, latitude: float, longitude: float, user_id,
+                              device_id: str | None, notes: str | None):
+    return await conn.fetchrow("""
+        INSERT INTO fire_hotspots (source, acquired_at, latitude, longitude, h3_r8,
+                                   reported_by, reported_device_id, notes)
+        VALUES ('field_report', NOW(), $1, $2, $3, $4::uuid, $5::uuid, $6)
+        RETURNING *
+    """, latitude, longitude, h3_r8(latitude, longitude), str(user_id), device_id, notes)
+
+
+async def extinguish_field_report(conn: asyncpg.Connection, hotspot_id: str, user_id):
+    return await conn.fetchrow("""
+        UPDATE fire_hotspots
+        SET extinguished_at = COALESCE(extinguished_at, NOW()),
+            extinguished_by = COALESCE(extinguished_by, $2::uuid)
+        WHERE id = $1::uuid AND source = 'field_report'
+        RETURNING *
+    """, hotspot_id, str(user_id))
+
+
+async def list_zones(conn: asyncpg.Connection, include_disabled: bool) -> list[asyncpg.Record]:
+    where = '' if include_disabled else ' WHERE is_active = TRUE'
+    return await conn.fetch('SELECT * FROM fire_suppression_zones' + where + ' ORDER BY label')
+
+
+async def create_zone(conn: asyncpg.Connection, data: dict, user_id):
+    return await conn.fetchrow("""
+        INSERT INTO fire_suppression_zones (label, latitude, longitude, radius_m, notes, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6::uuid)
+        RETURNING *
+    """, data['label'], data['latitude'], data['longitude'], data['radius_m'], data['notes'], str(user_id))
+
+
+async def update_zone(conn: asyncpg.Connection, zone_id: str, data: dict, is_active: bool, user_id):
+    return await conn.fetchrow("""
+        UPDATE fire_suppression_zones
+        SET label = $2, latitude = $3, longitude = $4, radius_m = $5, notes = $6, is_active = $7,
+            disabled_at = CASE WHEN $7 THEN NULL ELSE COALESCE(disabled_at, NOW()) END,
+            disabled_by = CASE WHEN $7 THEN NULL ELSE COALESCE(disabled_by, $8::uuid) END
+        WHERE id = $1::uuid
+        RETURNING *
+    """, zone_id, data['label'], data['latitude'], data['longitude'], data['radius_m'], data['notes'],
+        is_active, str(user_id))
+
+
+async def disable_zone(conn: asyncpg.Connection, zone_id: str, user_id):
+    return await conn.fetchrow("""
+        UPDATE fire_suppression_zones
+        SET is_active = FALSE, disabled_at = COALESCE(disabled_at, NOW()),
+            disabled_by = COALESCE(disabled_by, $2::uuid)
+        WHERE id = $1::uuid
+        RETURNING *
+    """, zone_id, str(user_id))

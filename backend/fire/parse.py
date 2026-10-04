@@ -114,9 +114,9 @@ def _features(collection) -> list:
     return collection['features']
 
 
-def _storable(text: str) -> bool:
+def _storable(text: str, max_len: int = MAX_TEXT_LEN) -> bool:
     """True when Postgres TEXT and asyncpg accept the string: no NUL, valid UTF-8 (no lone surrogate), bounded."""
-    if len(text) > MAX_TEXT_LEN or '\x00' in text:
+    if len(text) > max_len or '\x00' in text:
         return False
     try:
         text.encode('utf-8')

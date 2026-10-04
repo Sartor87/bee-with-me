@@ -61,8 +61,8 @@ async def _cleanup_old_locations() -> None:
         try:
             async with get_pool().acquire() as conn:
                 pruned = await prune_fire_data(conn)
-                logger.info('Fire data cleanup: removed %d hotspots, %d burnt areas',
-                            pruned['fire_hotspots'], pruned['fire_burnt_areas'])
+                logger.info('Fire data cleanup: removed %d hotspots, %d burnt areas, %d disabled zones',
+                            pruned['fire_hotspots'], pruned['fire_burnt_areas'], pruned['fire_suppression_zones'])
         except Exception as exc:
             logger.warning('Fire data prune failed: %s', exc)
 
