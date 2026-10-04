@@ -95,6 +95,29 @@ describe('SettingsView against a changing server', () => {
     expect(server.hq_radius_m).toBe(10000)
   })
 
+  it('a failed pre-save refetch says nothing was saved, not save failed [B39]', async () => {
+    const w = mountView()
+    await flushPromises()
+    await w.find('#hq-radius').setValue('5')
+    getSettings.mockRejectedValueOnce(new Error('Network Error'))
+    await w.find('form').trigger('submit')
+    await flushPromises()
+    expect(w.text()).toContain(en.settings.checkFailed)
+    expect(w.text()).not.toContain(en.settings.saveFailed)
+    expect(putSettings).not.toHaveBeenCalled()
+  })
+
+  it('a fresh state that already matches the form says nothing to save [B39]', async () => {
+    const w = mountView()
+    await flushPromises()
+    await w.find('#hq-radius').setValue('5')
+    server = { ...server, hq_radius_m: 5000, updated_at: 't1' }   // another admin saved the same value
+    await w.find('form').trigger('submit')
+    await flushPromises()
+    expect(w.text()).toContain(en.settings.nothingToSave)
+    expect(putSettings).not.toHaveBeenCalled()
+  })
+
   it('a failed save reads "Could not confirm the save" [B38]', async () => {
     const w = mountView()
     await flushPromises()

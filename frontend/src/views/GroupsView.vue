@@ -167,6 +167,7 @@ import {
   deactivateGroup, reactivateGroup,
   addMember, removeMember, getUsers,
 } from '../api'
+import { errorText } from '../api/client'
 
 const { t } = useI18n()
 
@@ -275,7 +276,7 @@ async function save() {
     showForm.value = false
     await load()
     if (selected.value) selected.value = await getGroup(selected.value.id)
-  } catch (e) { formError.value = e?.response?.data?.detail ?? e?.message ?? String(e) }
+  } catch (e) { formError.value = errorText(e) }
 }
 
 async function deactivate(g) {
@@ -323,7 +324,7 @@ async function saveMember() {
     showAddMember.value = false
     selected.value = await getGroup(selected.value.id)
   } catch (e) {
-    memberError.value = e?.response?.data?.detail ?? e?.message ?? String(e)
+    memberError.value = errorText(e)
   }
 }
 

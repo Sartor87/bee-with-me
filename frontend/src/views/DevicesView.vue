@@ -69,6 +69,7 @@
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getDevices, createDevice, updateDevice, deleteDevice, reactivateDevice, permanentDeleteDevice, getUsers } from '../api'
+import { errorText } from '../api/client'
 import { useLocationsStore } from '../stores/locations'
 
 const { t } = useI18n()
@@ -110,7 +111,7 @@ async function save() {
     }
     showModal.value = false
     await load()
-  } catch (e) { formError.value = e }
+  } catch (e) { formError.value = errorText(e) }
 }
 
 async function deactivate(d) {

@@ -10,7 +10,8 @@ vi.mock('../api', () => ({
 }))
 
 import { getSettings, putSettings, putHQ, putHQInitial, getMe } from '../api'
-import { useSettingsStore } from './settings'
+import { useSettingsStore, isTransientFailure } from './settings'
+import { ApiError } from '../api/client'
 import { useAuthStore } from './auth'
 
 const DEFAULTS = {
@@ -142,7 +143,7 @@ describe('useSettingsStore', () => {
 
   it('migrateLocalHQ drops an invalid legacy value on a 422 and keeps it on a network error [B38]', async () => {
     localStorage.setItem('bwm.hq', JSON.stringify({ lat: 1e9, lon: 25 }))
-    putHQInitial.mockRejectedValue([{ type: 'less_than_equal' }])
+    putHQInitial.mockRejectedValue(new ApiError([{ type: 'less_than_equal', msg: 'too big' }], 422))
     expect(await useSettingsStore().migrateLocalHQ()).toBe('dropped')
     expect(localStorage.getItem('bwm.hq')).toBeNull()
 
@@ -174,6 +175,41 @@ describe('useSettingsStore', () => {
     putHQInitial.mockRejectedValue('Network Error')
     expect(await useSettingsStore().migrateLocalHQ()).toBe('failed')
     expect(localStorage.getItem('bwm.hq')).not.toBeNull()
+  })
+
+  it('isTransientFailure judges by status, not by message text [B39]', () => {
+    expect(isTransientFailure(new ApiError('Network Error', undefined))).toBe(true)   // no response
+    expect(isTransientFailure(new ApiError('canceled', undefined))).toBe(true)        // aborted
+    expect(isTransientFailure(new ApiError('Bad Gateway', 502))).toBe(true)
+    expect(isTransientFailure(new ApiError('settings_missing', 503))).toBe(true)
+    for (const status of [401, 403, 409, 422]) {
+      expect(isTransientFailure(new ApiError('x', status))).toBe(false)
+    }
+    // a message that merely looks transient must not decide
+    expect(isTransientFailure(new ApiError('timeout while parsing', 422))).toBe(false)
+  })
+
+  it('migrateLocalHQ drops the local copy on a 401 (failed refresh), keeps it on a 503 [B39]', async () => {
+    localStorage.setItem('bwm.hq', JSON.stringify({ lat: 42, lon: 25 }))
+    putHQInitial.mockRejectedValue(new ApiError('Not authenticated', 401))
+    expect(await useSettingsStore().migrateLocalHQ()).toBe('dropped')
+    expect(localStorage.getItem('bwm.hq')).toBeNull()
+
+    localStorage.setItem('bwm.hq', JSON.stringify({ lat: 42, lon: 25 }))
+    putHQInitial.mockRejectedValue(new ApiError('settings_missing', 503))
+    expect(await useSettingsStore().migrateLocalHQ()).toBe('failed')
+    expect(localStorage.getItem('bwm.hq')).not.toBeNull()
+  })
+
+  it('a stale save rejects with an ApiError whose detail is settings_stale [B39]', async () => {
+    const store = useSettingsStore()
+    await store.fetchSettings()
+    putSettings.mockRejectedValueOnce(new ApiError('settings_stale', 409))
+    const err = await store.saveSettings({ hq_radius_m: 5000 }).catch(e => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toBe('settings_stale')
+    expect(err.detail).toBe('settings_stale')
+    expect(err.status).toBe(409)
   })
 
   it('migrateLocalHQ ignores missing or malformed local values [T13]', async () => {

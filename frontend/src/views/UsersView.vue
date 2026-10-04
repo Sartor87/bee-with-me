@@ -204,6 +204,7 @@ import { ref, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import api from '../api/client'
 import { getUsers, createUser, updateUser, deleteUser, deactivateUser, reactivateUser, setGroupLeader, removeMember, getDevices, assignDevice, importUsers } from '../api'
+import { errorText } from '../api/client'
 import { useLocationsStore } from '../stores/locations'
 
 const { t } = useI18n()
@@ -259,7 +260,7 @@ async function onImport(e) {
     importResult.value = await importUsers(file)
     await load()
   } catch (err) {
-    pageError.value = typeof err === 'string' ? err : t('users.importError')
+    pageError.value = errorText(err, t('users.importError'))
   }
 }
 

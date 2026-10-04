@@ -2,9 +2,11 @@ import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from backend.auth import get_current_user
+from backend.database import get_conn
 from backend.routers import settings as settings_router
 
 pytestmark = pytest.mark.Trait("Task", "T12")
@@ -184,3 +186,44 @@ def test_audit_log_has_no_coordinates(client, mock_conn, admin_user, caplog):
     assert 'settings updated by user %s' % admin_user['id'] in text
     assert 'HQ set by user %s' % admin_user['id'] in text
     assert '42.1' not in text and '24.6' not in text
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.Trait("Bug", "B39")
+async def test_put_with_the_returned_updated_at_succeeds_once_then_is_stale(
+        migrated_conn, test_app, admin_user, monkeypatch):
+    """Real Postgres: the ISO updated_at from GET round-trips into the WHERE clause (microseconds,
+    timezone), so the first PUT matches and the second, with the same stale value, is a 409."""
+    monkeypatch.setattr(settings_router, 'after_change', None)
+    await migrated_conn.execute(
+        "INSERT INTO users (id, username, full_name, role) VALUES ($1, 'b39admin', 'B39 Admin', 'admin')",
+        admin_user['id'])
+
+    async def _get_conn():
+        yield migrated_conn
+
+    async def _get_current_user():
+        return admin_user
+
+    test_app.dependency_overrides[get_conn] = _get_conn
+    test_app.dependency_overrides[get_current_user] = _get_current_user
+    try:
+        transport = httpx.ASGITransport(app=test_app)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as http:
+            got = (await http.get('/api/settings')).json()
+            body = {k: got[k] for k in BODY if k != 'expected_updated_at'}
+            body['hq_radius_m'] = 5000
+            body['expected_updated_at'] = got['updated_at']
+
+            first = await http.put('/api/settings', json=body)
+            assert first.status_code == 200, first.text
+            assert first.json()['hq_radius_m'] == 5000
+            assert first.json()['updated_at'] != got['updated_at']   # the trigger moved the version
+
+            second = await http.put('/api/settings', json={**body, 'hq_radius_m': 7000})
+            assert second.status_code == 409
+            assert second.json() == {'detail': 'settings_stale'}
+            assert await migrated_conn.fetchval('SELECT hq_radius_m FROM settings WHERE id = 1') == 5000
+    finally:
+        test_app.dependency_overrides.clear()

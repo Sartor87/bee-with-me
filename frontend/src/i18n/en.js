@@ -237,6 +237,8 @@ export default {
     saveFailed:       'Could not confirm the save. Reload to check.',
     saveStale:        'Settings were changed elsewhere. Review and save again.',
     saveMissing:      'Settings are missing on the server. Contact the administrator.',
+    checkFailed:      'Could not check the current settings. Nothing was saved. Try again.',
+    nothingToSave:    'Nothing to save: settings already match.',
     loading:          'Loading…',
     loadFailed:       'Could not load settings.',
     retry:            'Retry',

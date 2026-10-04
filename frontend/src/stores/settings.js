@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getSettings, putHQ, putHQInitial, putSettings } from '../api'
 import { useAuthStore } from './auth'
+import { ApiError, detailOf } from '../api/client'
 
 const LEGACY_HQ_KEY = 'bwm.hq'   // where MapView kept HQ before it moved to the database
 
@@ -19,12 +20,17 @@ function dropLegacyHQ() {
   try { localStorage.removeItem(LEGACY_HQ_KEY) } catch { /* nothing to drop */ }
 }
 
-// The API client rejects with the response `detail` (string or validation array) or the axios
-// message, so the status code is gone. A legacy copy is worth keeping only when the failure
-// says "try again later": no connection, or a server-side error. Anything else (409, 422, 403)
-// is a verdict, and retrying the same value forever helps nobody.
-function isTransientFailure(err) {
-  return typeof err === 'string' && /network error|timeout|status code 5\d\d|settings_missing/i.test(err)
+// A legacy copy is worth keeping only when the failure says "try again later": no response at
+// all (network, timeout, abort), a server-side error, or a missing settings row. Anything else
+// (401, 403, 409, 422) is a verdict, and retrying the same value forever helps nobody.
+export function isTransientFailure(err) {
+  const status = err?.status
+  return !status || status >= 500 || detailOf(err) === 'settings_missing'
+}
+
+// Store-level rejections that are not HTTP responses use the same shape.
+function storeError(detail) {
+  return new ApiError(detail, undefined)
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -43,12 +49,12 @@ export const useSettingsStore = defineStore('settings', () => {
   // an alarm switch or a radius another admin changed since (BP-02). On a stale write the store
   // reloads the server state and rejects with 'settings_stale' so the page can say so.
   async function saveSettings(patch) {
-    if (!settings.value) throw 'settings_missing'
+    if (!settings.value) throw storeError('settings_missing')
     const { updated_at, ...current } = settings.value
     try {
       settings.value = await putSettings({ ...current, ...patch, expected_updated_at: updated_at })
     } catch (err) {
-      if (err === 'settings_stale') {
+      if (detailOf(err) === 'settings_stale') {
         try { await fetchSettings() } catch { /* the page shows the stale message either way */ }
       }
       throw err
@@ -88,7 +94,7 @@ export const useSettingsStore = defineStore('settings', () => {
       dropLegacyHQ()
       return 'uploaded'
     } catch (err) {
-      if (err === 'hq_already_set') {
+      if (detailOf(err) === 'hq_already_set') {
         dropLegacyHQ()
         return 'exists'
       }

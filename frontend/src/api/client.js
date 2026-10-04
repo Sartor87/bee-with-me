@@ -1,5 +1,35 @@
 import axios from 'axios'
 
+// What every failed request rejects with. `message` and `detail` carry what callers used to get
+// as a bare string (the response `detail`, or the axios message), `status` is the HTTP status
+// (undefined when no response arrived: network error, timeout, abort). Compare with `.detail`.
+export class ApiError extends Error {
+  constructor(detail, status) {
+    const text = Array.isArray(detail)
+      ? detail.map(d => d?.msg ?? String(d)).join('; ')
+      : String(detail ?? '')
+    super(text)
+    this.name = 'ApiError'
+    this.detail = detail
+    this.status = status
+  }
+}
+
+// Text for display from anything a catch block can receive.
+export function errorText(e, fallback = '') {
+  if (typeof e === 'string') return e
+  return e?.message || fallback
+}
+
+// The `detail` of a rejection, whether it is an ApiError or a bare string.
+export function detailOf(e) {
+  return typeof e === 'string' ? e : e?.detail
+}
+
+function toApiError(err) {
+  return new ApiError(err.response?.data?.detail ?? err.message, err.response?.status)
+}
+
 const api = axios.create({ baseURL: '/api' })
 
 api.interceptors.request.use((config) => {
@@ -23,7 +53,7 @@ api.interceptors.response.use(
       if (!refreshToken) {
         localStorage.removeItem('token')
         window.location.href = '/login'
-        return Promise.reject(err.response?.data?.detail ?? err.message)
+        return Promise.reject(toApiError(err))
       }
 
       if (isRefreshing) {
@@ -32,7 +62,7 @@ api.interceptors.response.use(
         }).then((newToken) => {
           original.headers.Authorization = `Bearer ${newToken}`
           return api(original)
-        }).catch(() => Promise.reject(err.response?.data?.detail ?? err.message))
+        }).catch(() => Promise.reject(toApiError(err)))
       }
 
       isRefreshing = true
@@ -52,12 +82,13 @@ api.interceptors.response.use(
         localStorage.removeItem('token')
         localStorage.removeItem('refresh_token')
         window.location.href = '/login'
+        return Promise.reject(toApiError(err))   // 401: the session is gone, not a server fault
       } finally {
         isRefreshing = false
       }
     }
 
-    return Promise.reject(err.response?.data?.detail ?? err.message)
+    return Promise.reject(toApiError(err))
   },
 )
 

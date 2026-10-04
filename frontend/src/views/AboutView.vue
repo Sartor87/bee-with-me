@@ -54,7 +54,7 @@
 
         <div v-if="tileStatus" class="tile-status">
           <div class="tile-progress-bar">
-            <div class="tile-progress-fill" :style="{ width: progressPct + '%' }"></div>
+            <div class="tile-progress-fill" :style="{ transform: 'scaleX(' + progressPct / 100 + ')' }"></div>
           </div>
           <div class="tile-progress-label">
             <span v-if="tileStatus.running">
@@ -105,6 +105,7 @@ import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import { useSettings } from '../composables/useSettings'
 import { startTileDownload, getTileStatus } from '../api'
+import { errorText } from '../api/client'
 
 const { t } = useI18n()
 const authStore = useAuthStore()
@@ -146,10 +147,10 @@ async function submitPassword() {
     passwordPromptOpen.value = false
     pollStatus()
   } catch (e) {
-    if (e.response?.status === 403) {
+    if (e?.status === 403) {
       passwordError.value = t('about.offlineMapsPasswordWrong')
     } else {
-      passwordError.value = e.response?.data?.detail ?? String(e)
+      passwordError.value = errorText(e)
     }
   }
 }
@@ -205,7 +206,8 @@ onUnmounted(() => clearTimeout(pollTimer))
 
 .tile-status { margin-top: 8px; }
 .tile-progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
-.tile-progress-fill { height: 100%; background: #3b82f6; border-radius: 3px; transition: width .4s; }
+.tile-progress-fill { height: 100%; width: 100%; background: var(--accent); border-radius: 3px; transform-origin: left; transition: transform .4s; }
+@media (prefers-reduced-motion: reduce) { .tile-progress-fill { transition: none; } }
 .tile-progress-label { font-size: 13px; color: var(--text-muted); margin-top: 6px; }
 .tile-done  { color: var(--success); }
 .tile-errors { color: var(--danger); }

@@ -359,12 +359,18 @@ async function loadSettings() {
   await settingsStore.migrateLocalHQ()   // handles role and failures itself
 }
 
+// Only the latest call may set or clear the error: a slow failure of an earlier click must not
+// show "Could not save HQ" over a newer click that succeeded (the store already serialises the
+// writes, so the latest call also finishes last).
+let hqCall = 0
 async function saveHQ(action) {
+  const mine = ++hqCall
   hqError.value = false
   try {
     await action()
+    if (mine === hqCall) hqError.value = false
   } catch {
-    hqError.value = true
+    if (mine === hqCall) hqError.value = true
   }
 }
 

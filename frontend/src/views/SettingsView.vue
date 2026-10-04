@@ -120,6 +120,8 @@
         <span v-if="saveState === 'fail'" class="msg-warn" role="alert">{{ t('settings.saveFailed') }}</span>
         <span v-if="saveState === 'stale'" class="msg-warn" role="alert">{{ t('settings.saveStale') }}</span>
         <span v-if="saveState === 'missing'" class="msg-warn" role="alert">{{ t('settings.saveMissing') }}</span>
+        <span v-if="saveState === 'check'" class="msg-warn" role="alert">{{ t('settings.checkFailed') }}</span>
+        <span v-if="saveState === 'clean'" class="msg-note" role="status">{{ t('settings.nothingToSave') }}</span>
       </div>
     </form>
   </div>
@@ -129,6 +131,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
+import { detailOf } from '../api/client'
 import { LIMITS, alarmsTurnedOff, kmError, kmToM, mToKm, wholeError } from '../lib/settingsForm'
 
 const { t } = useI18n()
@@ -223,21 +226,26 @@ async function onSave() {
     await store.fetchSettings()
   } catch {
     busy.value = false
-    saveState.value = 'fail'
+    saveState.value = 'check'   // nothing was sent: say so, do not claim a failed save
     return
   }
   adoptFresh()
   busy.value = false
   await nextTick()
-  if (!valid.value || !dirty.value) return
+  if (!valid.value) return
+  if (!dirty.value) {           // the fresh server state already equals the form
+    await nextTick()            // the draft watcher clears saveState; set it after
+    saveState.value = 'clean'
+    return
+  }
   const off = alarmsTurnedOff(store.settings, patch.value)
   if (off.length) { confirmOff.value = off; return }
   doSave()
 }
 
 function failState(err) {
-  if (err === 'settings_stale') return 'stale'
-  if (err === 'settings_missing') return 'missing'
+  if (detailOf(err) === 'settings_stale') return 'stale'
+  if (detailOf(err) === 'settings_missing') return 'missing'
   return 'fail'
 }
 
@@ -329,6 +337,7 @@ button.warn { background: var(--warning-wash); border: 1px solid var(--warning);
 button:disabled { opacity: .45; cursor: not-allowed; }
 .msg-ok { font-size: 13px; color: var(--success); }
 .msg-warn { font-size: 13px; color: var(--warning); }
+.msg-note { font-size: 13px; color: var(--text-muted); }
 
 @media (max-width: 600px) {
   .timing { grid-template-columns: 1fr; }

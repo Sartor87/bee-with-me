@@ -8,11 +8,15 @@ vi.mock('../api', () => ({
   getLive: vi.fn(), getSOS: vi.fn(), getTrail: vi.fn(),
 }))
 vi.mock('../composables/useWebSocket', () => ({ useWebSocket: () => ({ connect: vi.fn() }) }))
+const mapArgs = vi.hoisted(() => ({ onHQPlace: null }))
 vi.mock('../composables/useMap', () => ({
   BASEMAPS: [],
-  useMap: () => new Proxy({ map: () => null }, {
-    get: (t, k) => (k in t ? t[k] : vi.fn()),
-  }),
+  useMap: (...args) => {
+    mapArgs.onHQPlace = args[6]
+    return new Proxy({ map: () => null }, {
+      get: (t, k) => (k in t ? t[k] : vi.fn()),
+    })
+  },
 }))
 vi.mock('ol/Overlay', () => ({ default: class {} }))
 vi.mock('ol/proj', () => ({ fromLonLat: (c) => c, toLonLat: (c) => c }))
@@ -73,6 +77,28 @@ describe('MapView HQ controls', () => {
     await flushPromises()
     expect(putHQ).toHaveBeenCalledWith({ hq_latitude: null, hq_longitude: null })
     expect(useSettingsStore().hq).toBeNull()
+  })
+
+  it('a slow failing HQ click followed by a successful one leaves no error [B39]', async () => {
+    const w = await mountMap('admin')
+    let failFirst
+    putHQ.mockImplementationOnce(() => new Promise((_, reject) => { failFirst = () => reject(new Error('Network Error')) }))
+    mapArgs.onHQPlace({ lat: 1, lon: 1 })     // slow, will fail
+    mapArgs.onHQPlace({ lat: 2, lon: 2 })     // queued behind it, will succeed
+    await flushPromises()
+    failFirst()
+    await flushPromises()
+    expect(putHQ).toHaveBeenCalledTimes(2)
+    expect(w.text()).not.toContain(en.map.hqSaveFailed)
+    expect(useSettingsStore().hq).toEqual({ lat: 2, lon: 2 })
+  })
+
+  it('the latest HQ click failing still shows the error [B39]', async () => {
+    const w = await mountMap('admin')
+    putHQ.mockRejectedValueOnce(new Error('Network Error'))
+    mapArgs.onHQPlace({ lat: 3, lon: 3 })
+    await flushPromises()
+    expect(w.text()).toContain(en.map.hqSaveFailed)
   })
 
   it('a failed settings load shows an amber note, disables Set HQ, and Retry recovers [B38]', async () => {
