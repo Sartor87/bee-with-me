@@ -53,6 +53,20 @@ DEMO_USERS = [
         'rank': 'Private', 'blood_type': 'AB-', 'role': 'rescuer',
         'photo': 'elena-stoyanova.png', 'dev_sn': 9004, 'dev_name': 'Tracker Elena',
     },
+    {
+        'first_name': 'Bai',    'last_name': 'Ivan',
+        'phone': '+359888000005', 'pin': '5678',
+        'username': 'demo_bai_ivan', 'password': 'demo123',
+        'role': 'rescuer',
+        'photo': 'bai-ivan.png', 'dev_sn': 9005, 'dev_name': 'Tracker Bai Ivan',
+    },
+    {
+        'first_name': 'Kiril',  'last_name': 'Iliev',
+        'phone': '+359888000006', 'pin': '6789',
+        'username': 'demo_kiril', 'password': 'demo123',
+        'role': 'rescuer',
+        'photo': 'kiril-iliev.jpg', 'dev_sn': 9006, 'dev_name': 'Tracker Kiril',
+    },
 ]
 
 SOS_DEVICE = 'demo_elena'   # this device will always transmit with SOS active
