@@ -626,7 +626,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
         const pos    = positionList.value?.find(p => p.device_id === feature.getId()) ?? stored
         const leaderGroup = pos.displayLabel ? pos.groups?.find(g => g.is_leader) : null
         const gDetail     = leaderGroup ? (groupsMap?.value ?? {})[leaderGroup.id] : null
-        renderTrackerTooltip(tooltipEl, pos, gDetail)
+        renderTrackerTooltip(tooltipEl, pos, gDetail, { showPhotos: showPhotos.value !== false })
         tooltipEl.style.display = 'block'
         tooltip.setPosition(evt.coordinate)
         map.getTargetElement().style.cursor = 'pointer'

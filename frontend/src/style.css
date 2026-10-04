@@ -122,3 +122,18 @@ tr:hover td { background: var(--bg-card); }
 .md-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .map-dialog button:disabled, .zone-inline button:disabled { opacity: .45; cursor: not-allowed; }
 .map-dialog button:focus-visible, .zone-inline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Volunteer photo in the map hover tooltip (built in lib/trackerTooltip.js). Red ring is SOS only;
+   stale or lost is dimmed like the marker. No glow. */
+.tt-row { display: flex; align-items: flex-start; gap: 10px; }
+.tt-photo {
+  flex: none;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  background: var(--bg-card);
+}
+.tt-photo--sos   { border: 4px solid var(--danger); }
+.tt-photo--stale { filter: grayscale(1); opacity: .55; }

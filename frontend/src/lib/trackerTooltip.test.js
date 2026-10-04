@@ -43,4 +43,57 @@ describe('tracker tooltip', () => {
     expect(el.textContent).not.toContain('A')
     expect(el.textContent).toContain('B')
   })
+
+  describe('photo [PHOTO-TIP]', () => {
+    const base = { full_name: 'Ivan', dev_sn: 1, mgrs: '35TLG1', photo_url: '/uploads/a.jpg', received_at: new Date().toISOString() }
+    const render = (pos, opts, gd = null) => {
+      const el = document.createElement('div')
+      renderTrackerTooltip(el, pos, gd, opts)
+      return el
+    }
+
+    it('shows the photo with the flag on and a same-origin URL, alt from the name [PHOTO-TIP]', () => {
+      const img = render(base).querySelector('img.tt-photo')
+      expect(img).not.toBeNull()
+      expect(img.getAttribute('src')).toBe('/uploads/a.jpg')
+      expect(img.alt).toBe('Ivan')
+      expect(img.classList.contains('tt-photo--sos')).toBe(false)
+    })
+
+    it('is hidden with the flag off, no URL, a cross-origin or a javascript: URL [PHOTO-TIP]', () => {
+      expect(render(base, { showPhotos: false }).querySelector('img')).toBeNull()
+      expect(render({ ...base, photo_url: null }).querySelector('img')).toBeNull()
+      for (const u of ['https://cdn.example/a.jpg', '//cdn.example/a.jpg', 'javascript:alert(1)', 'data:image/png;base64,AAAA']) {
+        expect(render({ ...base, photo_url: u }).querySelector('img')).toBeNull()
+      }
+      expect(render({ ...base, photo_url: null }).textContent).toContain('Ivan')
+    })
+
+    it('a hostile name stays text and becomes the alt value [PHOTO-TIP]', () => {
+      const el = render({ ...base, full_name: EVIL })
+      expect(el.querySelectorAll('img')).toHaveLength(1)
+      expect(el.querySelector('strong').textContent).toBe(EVIL)
+      expect(el.querySelector('img').alt).toBe(EVIL)
+    })
+
+    it('SOS adds the red ring class, stale dims [PHOTO-TIP]', () => {
+      expect(render({ ...base, sos_active: true }).querySelector('img').classList.contains('tt-photo--sos')).toBe(true)
+      const old = new Date(Date.now() - 20 * 60 * 1000).toISOString()
+      expect(render({ ...base, received_at: old }).querySelector('img').classList.contains('tt-photo--stale')).toBe(true)
+    })
+
+    it('a load error removes the image silently [PHOTO-TIP]', () => {
+      const el = render(base)
+      el.querySelector('img').onerror()
+      expect(el.querySelector('img')).toBeNull()
+      expect(el.textContent).toContain('Ivan')
+    })
+
+    it('team tooltip: one photo for the hovered person, none for members [PHOTO-TIP]', () => {
+      const el = render({ ...base, displayLabel: 'Alpha' }, undefined, {
+        members: [{ full_name: 'A', photo_url: '/uploads/b.jpg' }, { full_name: 'B', photo_url: '/uploads/c.jpg' }],
+      })
+      expect(el.querySelectorAll('img')).toHaveLength(1)
+    })
+  })
 })

@@ -1,6 +1,9 @@
 // Builds the hover tooltip of a tracker marker out of DOM nodes. Every value (names, ranks, phone,
 // group description, device name) is operator or device data, so it is only ever set with
 // `textContent`: never markup, never innerHTML (B52, security F4).
+import { safePhotoUrl } from './photoMarker'
+import { freshnessOf, LIVE } from './freshness'
+
 function el(tag, { text, style } = {}) {
   const node = document.createElement(tag)
   if (text != null) node.textContent = text
@@ -12,7 +15,26 @@ function add(parent, ...children) {
 }
 const br = () => document.createElement('br')
 
-export function renderTrackerTooltip(target, pos, groupDetail) {
+// The photo: same-origin only (the marker's rule, TP-01), set through properties, never markup.
+// A failed load removes the image and nothing is logged (DP-02). The space is reserved up front
+// by the fixed 96 px box, so a failure is the only layout change.
+function photoNode(pos, name) {
+  const src = safePhotoUrl(pos.photo_url)
+  if (!src) return null
+  const img = document.createElement('img')
+  img.className = 'tt-photo'
+  if (pos.sos_active) img.classList.add('tt-photo--sos')   // red ring: SOS only
+  else if (freshnessOf(pos) !== LIVE) img.classList.add('tt-photo--stale')
+  img.alt = name
+  img.width = 96
+  img.height = 96
+  img.decoding = 'async'
+  img.onerror = () => img.remove()
+  img.src = src
+  return img
+}
+
+export function renderTrackerTooltip(target, pos, groupDetail, { showPhotos = true } = {}) {
   const nodes = []
   const sos = pos.sos_active ? el('span', { text: ' 🚨 SOS', style: 'color:#ef4444;font-weight:700' }) : null
   const bat = pos.battery_voltage != null ? [br(), document.createTextNode(`🔋 ${pos.battery_voltage.toFixed(1)} V`)] : []
@@ -49,5 +71,17 @@ export function renderTrackerTooltip(target, pos, groupDetail) {
     nodes.push(...bat, ...time)
     if (pos.phone) nodes.push(br(), document.createTextNode(`📞 ${pos.phone}`))
   }
-  target.replaceChildren(...nodes.filter(Boolean))
+  const body = nodes.filter(Boolean)
+  const name = pos.displayLabel ? (pos.full_name || pos.displayLabel) : (pos.full_name || pos.device_name || `SN:${pos.dev_sn}`)
+  const photo = showPhotos ? photoNode(pos, name) : null
+  if (!photo) {
+    target.replaceChildren(...body)
+    return
+  }
+  const text = el('div', { style: 'min-width:0' })
+  text.append(...body)
+  const row = el('div')
+  row.className = 'tt-row'
+  row.append(photo, text)
+  target.replaceChildren(row)
 }
