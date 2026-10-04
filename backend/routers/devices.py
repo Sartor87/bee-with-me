@@ -152,15 +152,15 @@ async def reactivate_device(
 async def delete_device_permanent(
     device_id: UUID,
     conn: Annotated[asyncpg.Connection, Depends(get_conn)],
-    _: Annotated[asyncpg.Record, Depends(require_role('admin'))],
+    user: Annotated[asyncpg.Record, Depends(require_role('admin'))],
 ):
     async with conn.transaction():
         # Open fire alerts for this device end now, with a reason (BP-02); resolved rows keep the history
         # (device_id -> NULL through the FK). Must run before the delete so none is left open and orphaned.
         resolved = await conn.fetch(
-            "UPDATE fire_alerts SET resolved_at = NOW(), resolve_reason = 'disabled' "
-            "WHERE device_id = $1 AND resolved_at IS NULL RETURNING id::text",
-            device_id,
+            "UPDATE fire_alerts SET resolved_at = NOW(), resolve_reason = 'disabled', "
+            "resolved_by = $2::uuid WHERE device_id = $1 AND resolved_at IS NULL RETURNING id::text",
+            device_id, user['id'],
         )
         await conn.execute('DELETE FROM sos_alerts       WHERE device_id = $1', device_id)
         await conn.execute('DELETE FROM location_events  WHERE device_id = $1', device_id)

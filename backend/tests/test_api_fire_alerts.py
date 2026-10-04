@@ -160,3 +160,87 @@ def test_alert_endpoints_require_login(mock_conn, method, path):
         assert getattr(TestClient(app), method)(path).status_code in (401, 403)
     finally:
         app.dependency_overrides.clear()
+
+
+def _delete_mocks(mock_conn, *, deleted, sql_log, alert_id=None):
+    async def fetch(sql, *args):
+        sql_log.append((sql, args))
+        return [{'id': alert_id}] if alert_id else []
+
+    async def execute(sql, *args):
+        return None
+
+    async def fetchval(sql, *args):
+        return deleted
+    mock_conn.fetch, mock_conn.execute, mock_conn.fetchval = fetch, execute, fetchval
+
+
+@pytest.mark.Trait("Bug", "B42")
+def test_permanent_device_delete_records_the_admin_who_resolved(client, mock_conn, admin_user):
+    sql_log = []
+    _delete_mocks(mock_conn, deleted=uuid.uuid4(), sql_log=sql_log)
+    device_id = uuid.uuid4()
+    assert client.delete(f'/api/devices/{device_id}/permanent').status_code == 204
+    [(sql, args)] = [e for e in sql_log if 'UPDATE fire_alerts' in e[0]]
+    assert 'resolved_by = $2::uuid' in sql
+    assert args == (device_id, admin_user['id'])
+
+
+@pytest.mark.Trait("Bug", "B42")
+def test_permanent_device_delete_unknown_device_is_404_without_notify(client, mock_conn, monkeypatch):
+    from backend.routers import devices
+    sent = []
+
+    async def fake_notify(conn, channel, payload):
+        sent.append(channel)
+    _delete_mocks(mock_conn, deleted=None, sql_log=[], alert_id=str(uuid.uuid4()))
+    monkeypatch.setattr(devices, 'fire_notify', fake_notify)
+    assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 404
+    assert sent == []
+
+
+@pytest.mark.Trait("Bug", "B42")
+def test_permanent_device_delete_survives_a_notify_failure(client, mock_conn, monkeypatch):
+    from backend.routers import devices
+
+    async def get_alert(conn, aid):
+        return _alert(id=uuid.UUID(aid), resolved_at=T, resolve_reason='disabled')
+
+    async def boom(conn, channel, payload):
+        raise RuntimeError('notify down')
+    _delete_mocks(mock_conn, deleted=uuid.uuid4(), sql_log=[], alert_id=str(uuid.uuid4()))
+    monkeypatch.setattr(devices.fire_repository, 'get_alert_out', get_alert)
+    monkeypatch.setattr(devices, 'fire_notify', boom)
+    assert client.delete(f'/api/devices/{uuid.uuid4()}/permanent').status_code == 204
+
+
+@pytest.mark.Trait("Bug", "B42")
+def test_status_survives_a_missing_settings_row(client, monkeypatch, caplog):
+    async def missing(conn):
+        raise repository.SettingsMissingError('settings row (id=1) is missing')
+    monkeypatch.setattr(repository, 'count_targets', missing)
+    with caplog.at_level('ERROR'):
+        resp = client.get('/api/fire/status')
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body['targets'] is None and set(body['feeds']) == {'hotspots', 'burnt_areas'}
+    assert len([r for r in caplog.records if r.levelname == 'ERROR']) == 1
+
+
+@pytest.mark.Trait("Bug", "B42")
+def test_acknowledge_all_skips_an_alert_that_vanished(client, monkeypatch):
+    sent = []
+
+    async def fake_all(conn, user_id):
+        return [str(uuid.uuid4())]
+
+    async def gone(conn, alert_id):
+        return None
+
+    async def fake_notify(conn, channel, payload):
+        sent.append(channel)
+    monkeypatch.setattr(repository, 'acknowledge_all', fake_all)
+    monkeypatch.setattr(repository, 'get_alert_out', gone)
+    monkeypatch.setattr(fire_router, 'notify', fake_notify)
+    resp = client.post('/api/fire/alerts/acknowledge-all')
+    assert resp.status_code == 200 and sent == []

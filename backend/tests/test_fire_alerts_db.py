@@ -51,3 +51,13 @@ async def test_permanent_device_delete_resolves_open_alerts(migrated_conn, admin
     row = await migrated_conn.fetchrow(
         'SELECT resolve_reason::text, device_id FROM fire_alerts WHERE id = $1::uuid', alert)
     assert row['resolve_reason'] == 'disabled' and row['device_id'] is None
+
+
+@pytest.mark.Trait("Bug", "B42")
+async def test_permanent_device_delete_records_who_resolved(migrated_conn):
+    from backend.routers import devices
+    _, device, alert, admin = await _seed(migrated_conn)
+    await devices.delete_device_permanent(device, migrated_conn, {'id': admin})
+    row = await migrated_conn.fetchrow(
+        'SELECT resolve_reason::text, resolved_by FROM fire_alerts WHERE id = $1::uuid', alert)
+    assert row['resolve_reason'] == 'disabled' and row['resolved_by'] == admin

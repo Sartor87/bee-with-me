@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -9,6 +10,8 @@ from ..database import get_conn
 from ..fire import poller, repository
 from ..fire.models import FireAlertOut, burnt_area_feature, hotspot_feature, iso
 from ..fire.service import notify
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/api/fire', tags=['fire'])
 
@@ -56,11 +59,17 @@ async def status(conn: Conn, _: User):
             # null until this process has fetched the feed: after a restart 0 would contradict the DB
             'count': state.count if state.last_success_at is not None else None,
         }
+    try:
+        targets = await repository.count_targets(conn)
+    except repository.SettingsMissingError:
+        # feed health must still render; alarm targets are unknown without the settings row (BP-03)
+        logger.error('fire status: settings row is missing, alarm targets unavailable')
+        targets = None
     return {
         'feeds': feeds,
         'last_success_at': feeds['hotspots']['last_success_at'],
         'upstream_state': poller.FEEDS['hotspots'].upstream_state,
-        'targets': await repository.count_targets(conn),
+        'targets': targets,
     }
 
 
@@ -79,7 +88,8 @@ async def acknowledge_all(conn: Conn, user: User):
         ids = await repository.acknowledge_all(conn, user['id'])
         for alert_id in ids:
             out = await repository.get_alert_out(conn, alert_id)
-            await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
+            if out is not None:
+                await notify(conn, 'fire_alert_updated', out.model_dump(mode='json'))
     return {'acknowledged': len(ids)}
 
 
