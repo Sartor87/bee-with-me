@@ -95,23 +95,31 @@ async def prune_fire_data(conn: asyncpg.Connection) -> dict[str, int]:
     }
 
 
-async def anonymise_resolved_alerts(conn: asyncpg.Connection, retention_days: int) -> int:
+async def anonymise_alerts(conn: asyncpg.Connection, retention_days: int) -> int:
     """DP-03: drop the named trace (user, device, ack/resolve actors, notes) from RESOLVED alerts once they are older
     than the location retention, so alerts never outlive the positions they were derived from. Open alerts are never
     touched; the rest of the row stays for after-action review. Keyed on the server clock (resolved_at).
-
-    Hotspots follow in the same step (B51): personal fields of a hotspot whose alerts are all long resolved and whose
-    own last activity is past the retention are cleared too. Returns the number of anonymised alerts; the hotspot
-    count is logged (a count only, never a value)."""
-    alerts = await conn.fetchval(
+    Returns the number of anonymised alerts."""
+    return await conn.fetchval(
         "WITH u AS (UPDATE fire_alerts SET user_id = NULL, device_id = NULL, acknowledged_by = NULL,"
         " resolved_by = NULL, notes = NULL"
         " WHERE resolved_at IS NOT NULL AND resolved_at < NOW() - make_interval(days => $1::int)"
         " AND (user_id IS NOT NULL OR device_id IS NOT NULL OR acknowledged_by IS NOT NULL"
         "      OR resolved_by IS NOT NULL OR notes IS NOT NULL)"
         " RETURNING 1) SELECT COUNT(*) FROM u", retention_days)
-    hotspots = await conn.fetchval(_ANONYMISE_HOTSPOTS, retention_days)
-    logger.info('Fire hotspot anonymisation: anonymised %s hotspots', hotspots or 0)
+
+
+async def anonymise_hotspots(conn: asyncpg.Connection, retention_days: int) -> int:
+    """B51: personal fields of a hotspot whose alerts are all long resolved and whose own last activity is past the
+    retention are cleared. Returns the number of anonymised hotspots (a count only, never a value)."""
+    return await conn.fetchval(_ANONYMISE_HOTSPOTS, retention_days)
+
+
+async def anonymise_resolved_alerts(conn: asyncpg.Connection, retention_days: int) -> int:
+    """Both steps in order (alerts, then hotspots) for callers that want one call; returns the alert count. The
+    start-up cleanup runs the steps separately so a failure in one is reported as that step (B55)."""
+    alerts = await anonymise_alerts(conn, retention_days)
+    await anonymise_hotspots(conn, retention_days)
     return alerts
 
 

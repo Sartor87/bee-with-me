@@ -17,6 +17,10 @@ pytestmark = [pytest.mark.Trait("Task", "T9"), pytest.mark.db, pytest.mark.async
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
 
 
+async def _no_hotspots(_conn, _days):
+    return 0
+
+
 def _hotspots(*items):
     return {'type': 'FeatureCollection', 'features': [
         {'type': 'Feature', 'properties': {'id': i, 'acq_at': acq, 'CLASS': '1DAY_N'},
@@ -225,7 +229,8 @@ async def test_fire_prune_failure_has_own_message_and_location_prune_ran(monkeyp
     async def no_anonymise(_conn, _days):
         return 0
 
-    monkeypatch.setattr(main, 'anonymise_resolved_alerts', no_anonymise)
+    monkeypatch.setattr(main, 'anonymise_alerts', no_anonymise)
+    monkeypatch.setattr(main, 'anonymise_hotspots', _no_hotspots)
     monkeypatch.setattr(main, 'prune_fire_data', boom)
     monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
     with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):

@@ -9,6 +9,10 @@ from backend.fire import repository
 DAYS = 90
 
 
+async def _no_hotspots(_conn, _days):
+    return 0
+
+
 async def _seed_alert(conn, hotspot, device, user, *, resolved_days_ago):
     """One rescuer alert naming user/device/ack/resolve; resolved_days_ago=None leaves it open."""
     return await conn.fetchval(
@@ -97,7 +101,8 @@ async def test_cleanup_logs_count_only_and_anonymise_error_does_not_skip_locatio
         return {'fire_hotspots': 0, 'fire_burnt_areas': 0}
 
     monkeypatch.setattr(main, 'get_pool', lambda: _Pool())
-    monkeypatch.setattr(main, 'anonymise_resolved_alerts', boom)
+    monkeypatch.setattr(main, 'anonymise_alerts', boom)
+    monkeypatch.setattr(main, 'anonymise_hotspots', _no_hotspots)
     monkeypatch.setattr(main, 'prune_fire_data', fire_prune)
     monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
     with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):
@@ -145,10 +150,93 @@ async def test_cleanup_logs_the_anonymised_count(monkeypatch, caplog):
             raise asyncio.CancelledError
 
     monkeypatch.setattr(main, 'get_pool', lambda: _Pool())
-    monkeypatch.setattr(main, 'anonymise_resolved_alerts', fake_anon)
+    monkeypatch.setattr(main, 'anonymise_alerts', fake_anon)
+    monkeypatch.setattr(main, 'anonymise_hotspots', _no_hotspots)
     monkeypatch.setattr(main, 'prune_fire_data', fire_prune)
     monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
     with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):
         await main._cleanup_old_locations()
     assert seen == [main.settings.location_retention_days]
     assert any(r.getMessage() == 'Fire alert anonymisation: anonymised 4 resolved alerts' for r in caplog.records)
+
+
+def _b55_run(monkeypatch, caplog, *, alerts, hotspots):
+    """Run one cleanup pass with the two anonymisation steps replaced; returns (log messages, calls)."""
+    from backend import main
+
+    calls = []
+
+    class _Conn:
+        async def fetchval(self, *a, **k):
+            calls.append('location')
+            return 3
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+
+    async def fire_prune(_conn):
+        calls.append('fire')
+        return {'fire_hotspots': 0, 'fire_burnt_areas': 0, 'fire_suppression_zones': 0}
+
+    monkeypatch.setattr(main, 'get_pool', lambda: _Pool())
+    monkeypatch.setattr(main, 'anonymise_alerts', alerts)
+    monkeypatch.setattr(main, 'anonymise_hotspots', hotspots)
+    monkeypatch.setattr(main, 'prune_fire_data', fire_prune)
+    monkeypatch.setattr(main.asyncio, 'sleep', fake_sleep)
+
+    async def go():
+        with caplog.at_level('INFO'), pytest.raises(asyncio.CancelledError):
+            await main._cleanup_old_locations()
+
+    return go, calls
+
+
+@pytest.mark.Trait("Bug", "B55")
+@pytest.mark.asyncio
+async def test_hotspot_step_failure_has_its_own_message_and_alert_count_is_logged(monkeypatch, caplog):
+    async def alerts(_conn, _days):
+        return 4
+
+    async def hotspots(_conn, _days):
+        raise RuntimeError('hotspot exploded')
+
+    go, calls = _b55_run(monkeypatch, caplog, alerts=alerts, hotspots=hotspots)
+    await go()
+    messages = [r.getMessage() for r in caplog.records]
+    assert 'Fire alert anonymisation: anonymised 4 resolved alerts' in messages
+    assert 'Fire hotspot anonymisation failed: hotspot exploded' in messages
+    assert not any(m.startswith('Fire alert anonymisation failed') for m in messages)
+    assert calls == ['location', 'fire']
+
+
+@pytest.mark.Trait("Bug", "B55")
+@pytest.mark.asyncio
+async def test_alert_step_failure_does_not_skip_hotspots_location_or_fire_prune(monkeypatch, caplog):
+    async def alerts(_conn, _days):
+        raise RuntimeError('alerts exploded')
+
+    async def hotspots(_conn, _days):
+        return 2
+
+    go, calls = _b55_run(monkeypatch, caplog, alerts=alerts, hotspots=hotspots)
+    await go()
+    messages = [r.getMessage() for r in caplog.records]
+    assert 'Fire alert anonymisation failed: alerts exploded' in messages
+    assert 'Fire hotspot anonymisation: anonymised 2 hotspots' in messages
+    assert any(m.startswith('Location cleanup: removed 3 events') for m in messages)
+    assert calls == ['location', 'fire']
