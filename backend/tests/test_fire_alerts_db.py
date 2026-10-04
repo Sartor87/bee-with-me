@@ -42,12 +42,12 @@ async def test_prune_keeps_hotspots_that_alerts_point_at(migrated_conn):
     assert (await repository.prune_fire_data(migrated_conn))['fire_hotspots'] == 0
 
 
-async def test_permanent_device_delete_resolves_open_alerts(migrated_conn, admin_user):
+async def test_permanent_device_delete_resolves_open_alerts(migrated_conn):
     from backend.routers import devices
-    _, device, alert, _ = await _seed(migrated_conn)
+    _, device, alert, admin = await _seed(migrated_conn)
     # Call the endpoint function directly on the real connection (TestClient runs its own event loop,
-    # which can't share this asyncpg connection).
-    await devices.delete_device_permanent(device, migrated_conn, admin_user)
+    # which can't share this asyncpg connection). The deleting user must exist: B42 records it in resolved_by.
+    await devices.delete_device_permanent(device, migrated_conn, {'id': admin})
     row = await migrated_conn.fetchrow(
         'SELECT resolve_reason::text, device_id FROM fire_alerts WHERE id = $1::uuid', alert)
     assert row['resolve_reason'] == 'disabled' and row['device_id'] is None
