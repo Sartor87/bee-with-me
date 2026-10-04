@@ -278,6 +278,10 @@ export default {
   about: {
     description: 'Описание',
     contact:     'Контакт',
+    phone:       'Телефон',
+    email:       'Имейл',
+    callPerson:  'Обади се на {name}, {phone}',
+    emailPerson: 'Изпрати имейл на {name}, {email}',
     team:        'Екип',
     license:     'Лиценз',
     offlineMaps:          'Офлайн карти',

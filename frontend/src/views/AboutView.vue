@@ -18,8 +18,21 @@
 
       <div class="about-section">
         <h3>{{ t('about.contact') }}</h3>
-        <p>Konstantin Velev<br>Phone: 0877389417<br>Email: konsvelev@gmail.com</p>
-        <p style="margin-top:8px">Kiril Penev<br>Phone: 0883545571<br>Email: k.penev@outlook.com</p>
+        <ul class="contact-list">
+          <li v-for="c in contacts" :key="c.email" class="contact">
+            <span class="contact-name">{{ c.name }}</span>
+            <dl class="contact-rows">
+              <dt>{{ t('about.phone') }}</dt>
+              <dd>
+                <a class="contact-link" :href="'tel:' + c.e164" :aria-label="t('about.callPerson', { name: c.name, phone: c.phone })">{{ c.phone }}</a>
+              </dd>
+              <dt>{{ t('about.email') }}</dt>
+              <dd>
+                <a class="contact-link" :href="'mailto:' + c.email" :aria-label="t('about.emailPerson', { name: c.name, email: c.email })">{{ c.email }}</a>
+              </dd>
+            </dl>
+          </li>
+        </ul>
       </div>
 
       <div class="about-section">
@@ -34,7 +47,7 @@
 
       <div class="about-section" v-if="authStore.user?.role === 'admin'">
         <h3>{{ t('about.offlineMaps') }}</h3>
-        <p style="margin-bottom:12px">{{ t('about.offlineMapsDesc') }}</p>
+        <p class="maps-desc">{{ t('about.offlineMapsDesc') }}</p>
 
         <div class="mode-row">
           <span class="mode-label">{{ t('about.offlineMapsMode') }}</span>
@@ -67,7 +80,7 @@
           </div>
         </div>
 
-        <button :disabled="tileStatus?.running" @click="openPasswordPrompt" style="margin-top:12px">
+        <button class="download-btn" :disabled="tileStatus?.running" @click="openPasswordPrompt">
           {{ tileStatus?.running ? t('about.offlineMapsDownloading') : t('about.offlineMapsDownload') }}
         </button>
       </div>
@@ -114,6 +127,14 @@ const { bgMountainsOffline } = useSettings()
 onMounted(async () => {
   if (!authStore.user) await authStore.fetchMe()
 })
+
+// Contacts as data: the visible number is formatted +359 XXX XXX XXX, tel: gets it without spaces.
+const CONTACTS = [
+  { name: 'Konstantin Velev', phone: '+359 877 389 417', email: 'konsvelev@gmail.com' },
+  { name: 'Kiril Penev',      phone: '+359 883 545 571', email: 'k.penev@outlook.com' },
+  { name: 'Kiril Iliev',      phone: '+359 889 396 793', email: 'office@hemussoftware.com' },
+]
+const contacts = CONTACTS.map(c => ({ ...c, e164: c.phone.replace(/\s/g, '') }))
 
 const tileStatus = ref(null)
 let pollTimer = null
@@ -185,17 +206,43 @@ onUnmounted(() => clearTimeout(pollTimer))
 .app-name   { font-size: 22px; font-weight: 700; margin: 0; }
 .version    { font-size: 12px; color: var(--text-muted); margin-left: auto; }
 
-.about-section {
-  margin-bottom: 24px;
-}
+.about-section { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+.about-section:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
 .about-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+.maps-desc { margin-bottom: 12px; }
+.download-btn { margin-top: 12px; }
+.download-btn:focus-visible, .mode-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.contact-list { list-style: none; display: grid; gap: 16px; }
+.contact { display: grid; gap: 4px; }
+.contact-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.contact-rows {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: 2px 12px;
+  align-items: baseline;
+}
+.contact-rows dt { font-size: 13px; color: var(--text-muted); }
+.contact-rows dd { min-width: 0; }
+.contact-link {
+  font-family: monospace;
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  margin-bottom: 6px;
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+  transition: text-decoration-color .15s;
 }
+@media (hover: hover) and (pointer: fine) { .contact-link:hover { text-decoration-color: currentColor; } }
+.contact-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) { .contact-link { transition: none; } }
 .about-section p {
   font-size: 14px;
   color: var(--text);

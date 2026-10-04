@@ -279,6 +279,10 @@ export default {
   about: {
     description: 'Description',
     contact:     'Contact',
+    phone:       'Phone',
+    email:       'Email',
+    callPerson:  'Call {name}, {phone}',
+    emailPerson: 'Email {name}, {email}',
     team:        'Team',
     license:     'License',
     offlineMaps:          'Offline Maps',
