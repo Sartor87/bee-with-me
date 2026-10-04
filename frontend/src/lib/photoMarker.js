@@ -28,12 +28,22 @@ export function safePhotoUrl(raw, origin = globalThis.location?.origin) {
   }
 }
 
+/** Draw order on the marker layer: SOS above everything, then live, stale, lost (B54). */
+export function markerZIndex(isSOS, freshness) {
+  if (isSOS) return 40
+  return freshness === LOST ? 10 : freshness === LIVE ? 30 : 20
+}
+
 /** Ring and photo opacity for one marker state. */
 export function ringFor({ color, isSOS, freshness, noFix }) {
   const photoAlpha = freshness === LOST ? 0.3 : freshness === LIVE ? 1 : 0.55
   if (isSOS) {
-    // Red stays reserved for SOS; a dashed red ring says "SOS, and no satellite fix".
-    return { color: SOS_RED, width: 5, dash: noFix ? [5, 3] : null, photoAlpha: 1 }
+    // Red stays reserved for SOS; a dashed red ring says "SOS, and no satellite fix". An SOS from
+    // a tracker that went quiet keeps the red ring but dims the photo and gets a grey inner ring,
+    // so it never looks live (BP-01).
+    const quiet = freshness !== LIVE
+    return { color: SOS_RED, width: 5, dash: noFix ? [5, 3] : null, photoAlpha: quiet ? photoAlpha : 1,
+             innerColor: quiet ? hexToRgba(GREY, 0.9) : null }
   }
   const base = freshness === LOST ? hexToRgba(GREY, 0.4)
     : freshness !== LIVE ? hexToRgba(GREY, 0.8)
@@ -44,21 +54,44 @@ export function ringFor({ color, isSOS, freshness, noFix }) {
 // ---- image cache -------------------------------------------------------------------------
 
 const MAX_CACHED_CANVASES = 400
-const images = new Map()     // url -> { state: 'loading' | 'ready' | 'failed', img }
+const RETRY_BASE_MS = 60_000
+const RETRY_MAX_MS = 10 * 60_000
+const images = new Map()     // url -> { state: 'loading' | 'ready' | 'failed', img, failures, retryAt }
 const canvases = new Map()   // ring/url/dpr key -> canvas
+const listeners = new Set()  // every live map instance that wants to hear about a finished load
 
-/** The decoded image for `url` when ready, else null. The first call starts the load and
- *  `onLoad` runs once it succeeds. A failure is remembered and silent (no console output,
- *  nothing with a name or URL in it): the marker just stays a dot. */
-export function photoImage(url, onLoad) {
+function startLoad(url, entry) {
+  const img = new Image()
+  entry.state = 'loading'
+  entry.img = img
+  img.onload  = () => { entry.state = 'ready'; entry.failures = 0; for (const fn of [...listeners]) fn() }
+  img.onerror = () => {
+    entry.state = 'failed'
+    entry.failures = (entry.failures ?? 0) + 1
+    entry.retryAt = Date.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (entry.failures - 1))
+  }
+  img.src = url
+}
+
+/** Subscribe to "an image finished loading". Returns the unsubscribe function (call it on
+ *  unmount): every open map restyles, not only the one that started the load. */
+export function onPhotoLoaded(fn) {
+  listeners.add(fn)
+  return () => listeners.delete(fn)
+}
+
+/** The decoded image for `url` when ready, else null. The first call starts the load; a finished
+ *  load notifies every subscriber (`onPhotoLoaded`). A failure is silent
+ *  (no console output, nothing with a name or URL in it): the marker stays a dot, and the URL is
+ *  tried again after a backoff (60 s, doubling, capped at 10 min) the next time a marker asks. */
+export function photoImage(url, now = Date.now()) {
   let entry = images.get(url)
   if (!entry) {
-    const img = new Image()
-    entry = { state: 'loading', img }
+    entry = { failures: 0 }
     images.set(url, entry)
-    img.onload  = () => { entry.state = 'ready'; onLoad?.() }
-    img.onerror = () => { entry.state = 'failed' }
-    img.src = url
+    startLoad(url, entry)
+  } else if (entry.state === 'failed' && now >= entry.retryAt) {
+    startLoad(url, entry)
   }
   return entry.state === 'ready' ? entry.img : null
 }
@@ -67,7 +100,7 @@ export function clearPhotoCache() { images.clear(); canvases.clear() }
 
 /** A circular canvas: clipped photo, ring on the outer edge. Null when no 2D context exists. */
 export function photoCanvas(url, img, ring, dpr = 1) {
-  const key = `${url}|${ring.color}|${ring.width}|${ring.dash ?? ''}|${ring.photoAlpha}|${dpr}`
+  const key = `${url}|${ring.color}|${ring.width}|${ring.dash ?? ''}|${ring.photoAlpha}|${ring.innerColor ?? ''}|${dpr}`
   const hit = canvases.get(key)
   if (hit) return hit
   const px = Math.round(PHOTO_SIZE * dpr)
@@ -89,6 +122,14 @@ export function photoCanvas(url, img, ring, dpr = 1) {
   ctx.globalAlpha = ring.photoAlpha
   ctx.drawImage(img, (iw - side) / 2, (ih - side) / 2, side, side, r - inner, r - inner, inner * 2, inner * 2)
   ctx.restore()
+  if (ring.innerColor) {   // grey inner ring: this SOS is not live
+    ctx.beginPath()
+    ctx.arc(r, r, inner - 1, 0, Math.PI * 2)
+    ctx.lineWidth = 2
+    ctx.strokeStyle = ring.innerColor
+    ctx.setLineDash?.([])
+    ctx.stroke()
+  }
   ctx.beginPath()
   ctx.arc(r, r, r - ring.width / 2, 0, Math.PI * 2)
   ctx.lineWidth = ring.width

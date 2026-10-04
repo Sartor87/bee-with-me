@@ -137,3 +137,6 @@ tr:hover td { background: var(--bg-card); }
 }
 .tt-photo--sos   { border: 4px solid var(--danger); }
 .tt-photo--stale { filter: grayscale(1); opacity: .55; }
+/* SOS that went quiet: red ring stays on the wrapper, the photo inside is dimmed with a grey inner edge. */
+.tt-photo-ring { flex: none; display: block; border: 4px solid var(--danger); border-radius: 16px; line-height: 0; }
+.tt-photo-ring .tt-photo { border: 2px solid var(--text-muted); border-radius: 12px; }

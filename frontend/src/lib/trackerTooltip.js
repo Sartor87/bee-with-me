@@ -23,15 +23,24 @@ function photoNode(pos, name) {
   if (!src) return null
   const img = document.createElement('img')
   img.className = 'tt-photo'
+  const quiet = freshnessOf(pos) !== LIVE
   if (pos.sos_active) img.classList.add('tt-photo--sos')   // red ring: SOS only
-  else if (freshnessOf(pos) !== LIVE) img.classList.add('tt-photo--stale')
+  if (quiet) img.classList.add('tt-photo--stale')          // an SOS gone quiet is dimmed too (BP-01)
   img.alt = name
   img.width = 96
   img.height = 96
   img.decoding = 'async'
-  img.onerror = () => img.remove()
+  // A dimmed filter would also dim a red ring on the image itself, so a quiet SOS keeps its
+  // red ring on a wrapper and only the photo inside is dimmed.
+  let node = img
+  if (pos.sos_active && quiet) {
+    node = el('span')
+    node.className = 'tt-photo-ring'
+    node.append(img)
+  }
+  img.onerror = () => node.remove()
   img.src = src
-  return img
+  return node
 }
 
 export function renderTrackerTooltip(target, pos, groupDetail, { showPhotos = true } = {}) {

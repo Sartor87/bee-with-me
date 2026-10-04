@@ -151,8 +151,8 @@ describe('photo ring per state [F1]', () => {
   it('live uses the group colour, solid [F1]', () => {
     expect(ringFor(base)).toMatchObject({ color: '#22aa66', width: 3, dash: null, photoAlpha: 1 })
   })
-  it('SOS is red and thicker than any other ring, photo at full strength [F1]', () => {
-    const sos = ringFor({ ...base, isSOS: true, freshness: STALE })
+  it('SOS is red and thicker than any other ring, photo at full strength while live (a quiet SOS is dimmed, see B54) [F1]', () => {
+    const sos = ringFor({ ...base, isSOS: true, freshness: LIVE })
     expect(sos.color).toBe('#ef4444')
     expect(sos.width).toBeGreaterThan(ringFor(base).width)
     expect(sos.photoAlpha).toBe(1)

@@ -265,6 +265,7 @@ export default {
       enable:       'Re-enable',
       disabledNote: 'Disabled zones are removed after 48 hours. Re-enable one before then to keep it.',
       radiusValue:  '{n} m',
+      reloadValues: 'Load current values',
     },
     targets: {
       title:        'Alarm targets',

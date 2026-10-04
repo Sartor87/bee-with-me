@@ -26,7 +26,7 @@ import { renderTrackerTooltip } from '../lib/trackerTooltip'
 import { createLongPress } from '../lib/longPress'
 import { hotspotStyleKey } from '../lib/fireStyle'
 import { hexToRgba } from '../lib/color'
-import { PHOTO_SIZE, photoCanvas, photoImage, ringFor, safePhotoUrl } from '../lib/photoMarker'
+import { PHOTO_SIZE, markerZIndex, onPhotoLoaded, photoCanvas, photoImage, ringFor, safePhotoUrl } from '../lib/photoMarker'
 
 const DEFAULT_COLOR = '#3b82f6'
 
@@ -195,6 +195,7 @@ export function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
   const strokeCol = isStale ? 'rgba(255,255,255,0.35)' : '#fff'
 
   const style = new Style({
+    zIndex: markerZIndex(isSOS, freshness),
     image: new Circle({
       radius,
       fill:   new Fill({ color: fillColor }),
@@ -220,14 +221,15 @@ export function makeMarkerStyle(color, isSOS, name, isTeam, freshness, noFix) {
 // Photo variant of the marker: same label, same states, the dot replaced by a round photo with
 // a state ring. Returns null (the caller keeps the dot) while the image is loading, after it
 // failed, or when the browser cannot draw it.
-export function makePhotoMarkerStyle(url, color, isSOS, name, freshness, noFix, onLoad) {
-  const img = photoImage(url, onLoad)
+export function makePhotoMarkerStyle(url, color, isSOS, name, freshness, noFix) {
+  const img = photoImage(url)
   if (!img) return null
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
   const canvas = photoCanvas(url, img, ringFor({ color, isSOS, freshness, noFix }), dpr)
   if (!canvas) return null
   return new Style({
     image: new Icon({ img: canvas, imgSize: [canvas.width, canvas.height], scale: 1 / dpr }),
+    zIndex: markerZIndex(isSOS, freshness),
     text: new Text({
       text:    name || '',
       offsetY: -(PHOTO_SIZE / 2 + 10),
@@ -462,7 +464,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     const label     = pos.displayLabel || pos.full_name || pos.device_name || String(pos.dev_sn ?? '')
     if (!isTeam && showPhotos.value !== false) {
       const url = safePhotoUrl(pos.photo_url)
-      const photo = url && makePhotoMarkerStyle(url, color, pos.sos_active, label, freshness, noFix, scheduleRestyle)
+      const photo = url && makePhotoMarkerStyle(url, color, pos.sos_active, label, freshness, noFix)
       if (photo) return photo
     }
     return makeMarkerStyle(color, pos.sos_active, label, isTeam, freshness, noFix)
@@ -475,6 +477,8 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
     restylePending = true
     queueMicrotask(() => { restylePending = false; restyleAll() })
   }
+  // Every open map hears about every finished photo, not only the one that started the load.
+  const offPhotoLoaded = onPhotoLoaded(scheduleRestyle)
   function restyleAll() {
     source.getFeatures().forEach(f => {
       const pos = f.get('pos')
@@ -790,6 +794,7 @@ export function useMap(mapRef, positionList, trails, onCursorMGRS, onMeasure, gr
   }, { deep: true })
 
   onUnmounted(() => {
+    offPhotoLoaded()
     const viewport = map?.getViewport()
     if (viewport) {
       viewport.removeEventListener('contextmenu', onContextMenuEvent)

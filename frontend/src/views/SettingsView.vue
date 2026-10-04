@@ -165,15 +165,21 @@
 
       <ul v-if="zoneList.length" class="zone-list">
         <li v-for="z in zoneList" :key="z.id" class="zone-item" :class="{ 'zone-off': !z.is_active }" data-testid="zone-item">
-          <SuppressionZoneForm
-            v-if="editingId === z.id"
-            inline mode="edit"
-            :initial="z"
-            :busy="zoneBusy"
-            :error-text="zoneError"
-            @submit="onZoneSave(z, $event)"
-            @cancel="stopEdit"
-          />
+          <div v-if="editingId === z.id" class="zone-edit">
+            <div v-if="editStale" class="zone-stale" data-testid="zone-stale">
+              <p class="msg-warn flush" role="alert">{{ t('fire.errors.zoneStale') }}</p>
+              <button type="button" class="secondary" data-testid="zone-reload" @click="reloadEdit(z)">{{ t('settings.zones.reloadValues') }}</button>
+            </div>
+            <SuppressionZoneForm
+              :key="editFormKey"
+              inline mode="edit"
+              :initial="editSnapshot"
+              :busy="zoneBusy || editStale"
+              :error-text="zoneError"
+              @submit="onZoneSave(z, $event)"
+              @cancel="stopEdit"
+            />
+          </div>
           <template v-else>
             <div class="zone-main">
               <div class="zone-name">
@@ -318,10 +324,28 @@ async function loadZones() {
   try { await fire.fetchZones(true) } catch { /* fire.zonesFailed drives the retry notice */ } finally { zonesLoading.value = false }
 }
 
-function startEdit(z) { editingId.value = z.id; zoneError.value = ''; rowError.value = null }
-function stopEdit() { editingId.value = null; zoneError.value = '' }
+// An edit carries the version the form was opened on (B54): a push that refetches the zone while
+// the form is open must never pair newer server data with the operator's older values.
+const editingVersion = ref(null)
+const editSnapshot = ref({})   // the values the open form started from
+const editFormKey = ref(0)     // bumped to rebuild the form from fresh values
+const editStale = computed(() => {
+  if (editingId.value == null) return false
+  const cur = fire.zones.find(z => z.id === editingId.value)
+  return !!cur && cur.updated_at !== editingVersion.value
+})
 
-// An edit carries the version the operator saw; it never carries is_active (activation has its own endpoints).
+function startEdit(z) {
+  editingId.value = z.id; editingVersion.value = z.updated_at; editSnapshot.value = { ...z }
+  editFormKey.value++; zoneError.value = ''; rowError.value = null
+}
+function stopEdit() { editingId.value = null; editingVersion.value = null; zoneError.value = '' }
+// Reload the current server values into the form (drops the operator's unsaved typing).
+function reloadEdit(z) {
+  editingVersion.value = z.updated_at; editSnapshot.value = { ...z }; editFormKey.value++; zoneError.value = ''
+}
+
+// Edits send the version the form opened on; it never carries is_active (activation has its own endpoints).
 const zoneBody = (z, over = {}) => ({
   label: z.label, latitude: z.latitude, longitude: z.longitude, radius_m: z.radius_m, notes: z.notes ?? null,
   expected_updated_at: z.updated_at, ...over,
@@ -350,8 +374,10 @@ async function runZoneAction(id, action, onError) {
 }
 
 async function onZoneSave(z, values) {
+  if (editStale.value) return   // the notice is showing: reload the values first
   zoneError.value = ''
-  const ok = await runZoneAction(z.id, () => fire.updateZone(z.id, zoneBody(z, values)), (text) => { zoneError.value = text })
+  const body = zoneBody(editSnapshot.value, { ...values, expected_updated_at: editingVersion.value })
+  const ok = await runZoneAction(z.id, () => fire.updateZone(z.id, body), (text) => { zoneError.value = text })
   if (ok) stopEdit()
 }
 async function onZoneDisable(z) {
@@ -491,6 +517,8 @@ watch(draft, () => {
 .zone-off .zone-label, .zone-off .zone-facts, .zone-off .zone-notes { color: var(--text-muted); }
 .zone-facts { display: flex; gap: 6px 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); }
 .zone-notes { font-size: 13px; color: var(--text-muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.2em; overflow-y: auto; }
+.zone-edit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.zone-stale { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .zone-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .zone-actions button { padding: 6px 12px; font-size: 13px; }
 .zones .zones-note { margin-top: 8px; margin-bottom: 0; }
