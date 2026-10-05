@@ -948,7 +948,8 @@ def test_restore_sh_name_check_does_not_depend_on_the_locale():
     check = next(l for l in lines if 'restore supports database names' in l)
     assert 'a-z' not in check or 'LC_ALL=C' in check, check
     i = next(i for i, l in enumerate(lines) if 'template_postgis' in l)
-    assert lines[i - 1].strip() == 'case "${DB,,}" in', lines[i - 1]   # compared lower-cased
+    # compared as is: NAME_RE above already admits lower-case names only (no ${DB,,}: bash 3.2)
+    assert lines[i - 1].strip() == 'case "$DB" in', lines[i - 1]
 
 
 @pytest.mark.Trait("Bug", "B21")
@@ -997,3 +998,14 @@ def test_readme_says_the_env_notes_apply_to_the_scripts_only():
     section = text[text.index('#### Backup and restore'):text.index('### 3. Backend')]
     assert 'scripts only' in section, section
     assert '`EXPORT' in section and 'lower case' in section, section
+
+
+# macOS ships bash 3.2 as /bin/bash: ${x^^}, ${x,,} and friends are a runtime "bad substitution"
+# there (backup.sh failed inside start.sh's old-install backup). Only Git-Bash-only lines may use them.
+_CASE_MODIFIER = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(\^\^?|,,?)')
+
+
+@pytest.mark.parametrize('rel', ['scripts/backup.sh', 'scripts/restore.sh', 'start.sh'])
+def test_sh_scripts_avoid_bash4_case_modifiers(rel):
+    bad = [l for l in _code_lines(_read(rel)) if _CASE_MODIFIER.search(l) and 'MINGW' not in l]
+    assert not bad, bad

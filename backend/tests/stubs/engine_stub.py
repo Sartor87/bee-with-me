@@ -10,6 +10,9 @@ B57: `compose ... up` also logs "state compose-up backups_dir=<0|1>" (did data/b
 working directory yet?). With BWM_STUB_DB set, the stub is a database container for backup.sh/backup.ps1:
 `ps` for project bee-with-me prints its id, `exec ... psql` answers the marker queries, `stat` prints a
 size of 5 and `cp` writes 5 bytes to its destination.
+
+BWM_STUB_CP_FAIL=1: `cp` fails like Docker Desktop's on a container with a single-file bind mount, and
+`exec ... cat <file>` streams the same 5 bytes to stdout instead.
 """
 
 import os
@@ -45,7 +48,13 @@ elif args[:1] == ['exec'] and 'psql' in args:
             break
 elif args[:1] == ['exec'] and 'stat' in args:
     print(5)
+elif args[:1] == ['exec'] and 'cat' in args:
+    sys.stdout.buffer.write(b'PGDMP')
 elif args[:1] == ['cp']:
+    if os.environ.get('BWM_STUB_CP_FAIL') == '1':
+        print('Error response from daemon: mkdirat docker-entrypoint-initdb.d/schema.sql: file exists',
+              file=sys.stderr)
+        sys.exit(1)
     with open(args[-1], 'wb') as dump:
         dump.write(b'PGDMP')
 elif args[:1] == ['inspect']:

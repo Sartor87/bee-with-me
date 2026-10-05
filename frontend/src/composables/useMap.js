@@ -154,13 +154,47 @@ function makeHotspotStyle(key, fieldReportLabel) {
   }
 }
 
-// Burnt areas are history, not alarm: neutral ash, never red.
+// Diagonal hatch: the cartographic sign for a burn scar, and unlike a flat wash it cannot be
+// mistaken for a basemap fill. Sized in device pixels (the map canvas is), so the spacing looks
+// the same on HiDPI screens. Null without a 2D canvas (jsdom): the caller falls back to a wash.
+function makeHatchPattern(color) {
+  try {
+    const ratio = Math.max(1, Math.round(globalThis.devicePixelRatio || 1))
+    const size = 9 * ratio
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = size
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1.5 * ratio
+    ctx.lineCap = 'square'
+    ctx.beginPath()
+    // the main diagonal plus the two corner stubs, so the tiles join into unbroken lines
+    ctx.moveTo(0, size); ctx.lineTo(size, 0)
+    ctx.moveTo(-size / 2, size / 2); ctx.lineTo(size / 2, -size / 2)
+    ctx.moveTo(size / 2, size * 1.5); ctx.lineTo(size * 1.5, size / 2)
+    ctx.stroke()
+    return ctx.createPattern(canvas, 'repeat')
+  } catch { return null }
+}
+
+// Burnt areas are history, not alarm: charcoal, never red. Three passes so the area reads on
+// light, dark and satellite basemaps alike: a light halo under the edge, a faint light wash plus
+// a charcoal hatch inside, and a solid charcoal edge on top.
 function makeBurntStyle() {
-  const ash = fireToken('--fire-burnt', '#a8a29e')
-  return new Style({
-    fill:   new Fill({ color: hexToRgba(ash, 0.28, '#a8a29e') }),
-    stroke: new Stroke({ color: hexToRgba(ash, 0.9, '#a8a29e'), width: 1.5 }),
-  })
+  const char = fireToken('--fire-burnt', '#4a2f1f')
+  const halo = fireToken('--fire-burnt-halo', '#fff7ed')
+  const hatch = makeHatchPattern(hexToRgba(char, 0.75, '#4a2f1f'))
+  return [
+    new Style({
+      fill:   new Fill({ color: hexToRgba(halo, 0.22, '#fff7ed') }),
+      stroke: new Stroke({ color: hexToRgba(halo, 0.85, '#fff7ed'), width: 5 }),
+    }),
+    new Style({
+      fill:   new Fill({ color: hatch ?? hexToRgba(char, 0.3, '#4a2f1f') }),
+      stroke: new Stroke({ color: char, width: 2 }),
+    }),
+  ]
 }
 
 // Suppression zones: an operator's "ignore detections here" circle. Muted, dashed and hollow like a

@@ -306,6 +306,14 @@ if ($env:BWM_START_DRY_RUN -eq '1') {
 }
 
 # -- Frontend deps -------------------------------------------------------------
+if (-not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    throw 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
+}
+# Floor matches "engines" in frontend\package.json; .npmrc engine-strict enforces it for npm too.
+$nodeVersion = [version]((node -v).TrimStart('v'))
+if ($nodeVersion -lt [version]'22.12.0') {
+    throw "Node.js $nodeVersion is too old (need 22.12+). Install Node.js 24 LTS and re-run."
+}
 if (-not (Test-Path "$root\frontend\node_modules")) {
     Write-Step 'Installing frontend dependencies (first run only - this can take a minute)'
     Push-Location "$root\frontend"

@@ -34,7 +34,8 @@ volume.
 - Works with both engines.
 
 **Negative / Trade-offs:**
-- The host needs Python and Node; their versions are not pinned by the repository.
+- The host needs Python and Node. Node is pinned to a floor (22.12, 24 LTS recommended) by `engines` and
+  `.nvmrc` in `frontend/` and checked by the start scripts; Python is not pinned.
 - Two storage layouts (bind mount vs Podman named volume) to cover in backup and restore scripts.
 - Podman on Windows needs `podman machine start` before the stack starts.
 

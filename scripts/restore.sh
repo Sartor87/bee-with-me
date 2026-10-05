@@ -50,10 +50,13 @@ fi
 # " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
 # is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value key="" c i LC_ALL=C
+  local line value key="" upper lower i LC_ALL=C
   # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
   # accept EXPORT) and without locale-dependent ranges
-  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  # (tr, not ${c^^}/${c,,}: macOS ships bash 3.2 as /bin/bash, which has no case modifiers)
+  upper="$(printf '%s' "$1" | LC_ALL=C tr 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
+  lower="$(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+  for ((i = 0; i < ${#1}; i++)); do key+="[${upper:i:1}${lower:i:1}]"; done
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
@@ -77,7 +80,7 @@ USER_NAME="${POSTGRES_USER:-$(env_value POSTGRES_USER rescuer)}"
 LOWER='abcdefghijklmnopqrstuvwxyz'
 NAME_RE="^[${LOWER}_][${LOWER}0123456789_]*\$"
 [[ "$DB" =~ $NAME_RE && ${#DB} -le 33 ]]   || die "POSTGRES_DB '$DB': restore supports database names of up to 33 lower-case letters, digits and _ only."
-case "${DB,,}" in
+case "$DB" in
   postgres|template0|template1|template_postgis) die "POSTGRES_DB '$DB' is a system database - restore never replaces it. Set POSTGRES_DB to the app's database." ;;
 esac
 RESTORE_DB="${DB}_restore_$(printf '%04x%04x' "$RANDOM" "$RANDOM")"

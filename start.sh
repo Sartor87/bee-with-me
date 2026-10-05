@@ -47,10 +47,13 @@ step "Using project folder: $ROOT"
 # " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
 # is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value key="" c i LC_ALL=C
+  local line value key="" upper lower i LC_ALL=C
   # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
   # accept EXPORT) and without locale-dependent ranges
-  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  # (tr, not ${c^^}/${c,,}: macOS ships bash 3.2 as /bin/bash, which has no case modifiers)
+  upper="$(printf '%s' "$1" | LC_ALL=C tr 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
+  lower="$(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+  for ((i = 0; i < ${#1}; i++)); do key+="[${upper:i:1}${lower:i:1}]"; done
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
@@ -74,7 +77,8 @@ norm_path() {
     esac
     while [[ "$p" == */ ]]; do p="${p%/}"; done
     if [[ "$p" =~ ^/mnt/([a-zA-Z])(/.*)?$ ]]; then p="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"; fi
-    if [[ "$p" =~ ^([a-zA-Z]):(.*)$ ]]; then p="${BASH_REMATCH[1],,}:${BASH_REMATCH[2]}"; fi
+    if [[ "$p" =~ ^([a-zA-Z]):(.*)$ ]]; then p="$(printf '%s' "${BASH_REMATCH[1]}" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'):${BASH_REMATCH[2]}"; fi
+    # Git Bash is bash 4+, so ${p,,} is safe here (and lowers non-ASCII letters, unlike tr).
     case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) p="${p,,}" ;; esac
     printf '%s' "$p"
 }
@@ -308,7 +312,11 @@ if [[ "${BWM_START_DRY_RUN:-}" == 1 ]]; then
 fi
 
 # -- Frontend deps ------------------------------------------------------------------
-command -v npm >/dev/null 2>&1 || die 'npm was not found on PATH. Install Node.js (LTS) and re-run.'
+command -v node >/dev/null 2>&1 || die 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
+command -v npm >/dev/null 2>&1 || die 'npm was not found on PATH. Install Node.js 24 LTS and re-run.'
+# Floor matches "engines" in frontend/package.json; .npmrc engine-strict enforces it for npm too.
+node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)' \
+    || die "Node.js $(node -v) is too old (need 22.12+). Install Node.js 24 LTS and re-run."
 if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
     step 'Installing frontend dependencies (first run only - this can take a minute)'
     (cd "$ROOT/frontend" && npm install)

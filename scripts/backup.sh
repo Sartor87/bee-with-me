@@ -49,10 +49,13 @@ fi
 # " # comment" are not part of the value; a leading `export ` (lower case only, like python-dotenv)
 # is accepted; keys match in any case (like the backend's settings and the PowerShell scripts).
 env_value() {
-  local line value key="" c i LC_ALL=C
+  local line value key="" upper lower i LC_ALL=C
   # the key as a pattern that matches it in any case ([pP][oO]...), without grep -i (which would also
   # accept EXPORT) and without locale-dependent ranges
-  for ((i = 0; i < ${#1}; i++)); do c="${1:i:1}"; key+="[${c^^}${c,,}]"; done
+  # (tr, not ${c^^}/${c,,}: macOS ships bash 3.2 as /bin/bash, which has no case modifiers)
+  upper="$(printf '%s' "$1" | LC_ALL=C tr 'abcdefghijklmnopqrstuvwxyz' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
+  lower="$(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+  for ((i = 0; i < ${#1}; i++)); do key+="[${upper:i:1}${lower:i:1}]"; done
   line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$key[[:space:]]*=" "$ROOT/.env" 2>/dev/null | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
@@ -145,7 +148,13 @@ echo "==> Dumping $DB to $FINAL ($ENGINE)"
 "$ENGINE" exec "$CONTAINER" pg_restore -l "$IN_CONTAINER" >/dev/null \
   || { echo "pg_restore -l cannot read the dump - not kept as a backup" >&2; exit 1; }
 EXPECTED="$("$ENGINE" exec "$CONTAINER" stat -c %s "$IN_CONTAINER" | tr -d '\r')"
-"$ENGINE" cp "$CONTAINER:$IN_CONTAINER" "$TARGET"
+if ! "$ENGINE" cp "$CONTAINER:$IN_CONTAINER" "$TARGET"; then
+  # Docker Desktop's cp fails on a container with a single-file bind mount ("mkdirat
+  # docker-entrypoint-initdb.d/schema.sql: file exists" - older installs mounted schema.sql). Stream the
+  # dump instead: exec without -t is binary-safe, and the size check below catches a short copy.
+  echo "NOTE: $ENGINE cp failed - streaming the dump out of the container instead" >&2
+  "$ENGINE" exec "$CONTAINER" cat "$IN_CONTAINER" > "$TARGET"
+fi
 chmod 600 "$TARGET"   # the engine copies the container file's mode (0644)
 
 if [ ! -s "$TARGET" ] || [ "$(wc -c < "$TARGET" | tr -d ' ')" != "$EXPECTED" ]; then

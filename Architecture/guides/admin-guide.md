@@ -353,7 +353,9 @@ SOS не изчезва сам. Остава и ако презаредите с
 2. С интернет: `git fetch` и `git checkout <таг>` на обявена версия (не произволно състояние на `main`).
 3. Ако `requirements.txt` или `package-lock.json` са се променили: `pip install -r backend\requirements.txt` и
    `npm ci` във `frontend\` (R-25).
-4. Пуснете Т1. Миграциите минават след автоматично резервно копие.
+4. Ако `start.ps1` спре с „Node.js … is too old“: инсталирайте Node.js 24 LTS (MSI от nodejs.org върху
+   старата версия), изтрийте `frontend\node_modules` и пуснете `npm ci` във `frontend\`.
+5. Пуснете Т1. Миграциите минават след автоматично резервно копие.
 
 ### Т5. Технически проблеми
 

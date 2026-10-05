@@ -69,9 +69,9 @@ flowchart TB
 | Import | pandas, openpyxl, xlrd, python-calamine | | Range | |
 | PDF | WeasyPrint | ≥ 70, < 71 | Range; needs GTK/Pango on Windows (R-10) | |
 | Tests (backend) | pytest, pytest-asyncio, httpx | | Range | [engineering-standards.md](engineering-standards.md) |
-| Frontend runtime | Node.js | 25 on the maintainer's machine | ⚠️ no `engines` field | |
+| Frontend runtime | Node.js | 24 LTS (floor 22.12) | `engines` + `engine-strict` in `frontend/`, `.nvmrc`, start-script check | |
 | Frontend | Vue 3, Pinia, vue-router, vue-i18n, axios, OpenLayers 10 | | `package-lock.json` | [ADR 9](../decisions/0009-vue-spa-openlayers.md) |
-| Build and dev server | Vite 5 | | Lock file | |
+| Build and dev server | Vite 8 | | Lock file | |
 | Tests (frontend) | Vitest, @vue/test-utils, jsdom | | Lock file | |
 | Ops scripts | PowerShell 5.1+/7, POSIX sh (Git Bash on Windows) | | In repo | ADR 11 |
 | Source control | Git, GitHub (fork → owner's repository) | | | [ADR 14](../decisions/0014-run-from-source-git-pull.md) |

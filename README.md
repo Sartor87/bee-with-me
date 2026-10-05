@@ -25,7 +25,7 @@ Offline people-tracking application for LoRaWAN-based rescue and volunteer opera
 ## Prerequisites
 
 - Python 3.11+
-- Node.js 20+
+- Node.js 22.12+ (24 LTS recommended; `frontend/.nvmrc`)
 - Podman 4.7+ with a compose provider (`podman compose`), **or** Docker with Docker Compose
 
 ---

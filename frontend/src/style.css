@@ -16,10 +16,13 @@
   --success:   #22c55e;
   /* Fire layers. Hotspot crimson is a detection signal, not an alarm: SOS/fire alarms keep
      --danger. Only about 2.8:1 on --bg, so hotspot markers always carry a light ring (see
-     makeHotspotStyle in useMap.js). Ash is history. Inactive is dismissed / suppressed /
+     makeHotspotStyle in useMap.js). Burnt is history: a charcoal hatch and edge over a light
+     halo (see makeBurntStyle), because a flat grey wash vanished into OSM's grey urban and
+     industrial fills and into the dark basemap. Inactive is dismissed / suppressed /
      extinguished. */
-  --fire-hotspot:  #ad1e57;
-  --fire-burnt:    #a8a29e;
+  --fire-hotspot:    #ad1e57;
+  --fire-burnt:      #4a2f1f;
+  --fire-burnt-halo: #fff7ed;
   --fire-inactive: #8892aa;
   /* Fire ALARM (fire near people), its own family so it is never read as SOS: ember ground,
      orange edge and flame, warm white text, dark ink on the light acknowledge button. Used only

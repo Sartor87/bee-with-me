@@ -446,7 +446,7 @@ def _backup_project(tmp_path):
     return proj
 
 
-def _run_backup(kind, tmp_path, out_dir, *, culture=None, engine='podman', db='stubdb'):
+def _run_backup(kind, tmp_path, out_dir, *, culture=None, engine='podman', db='stubdb', extra_env=None):
     proj = _backup_project(tmp_path)
     log = tmp_path / 'calls.log'
     log.write_text('', encoding='utf-8')
@@ -469,6 +469,7 @@ def _run_backup(kind, tmp_path, out_dir, *, culture=None, engine='podman', db='s
     })
     if db:
         env['BWM_STUB_DB'] = db
+    env.update(extra_env or {})
     if kind == 'ps':
         script = proj / 'scripts' / 'backup.ps1'
         arg = f" -OutDir '{out_dir}'" if out_dir is not None else ''
@@ -502,6 +503,18 @@ def test_backup_stub_flow_writes_a_parseable_marker(kind, tmp_path):
     marker = _marker(out)
     assert datetime.fromisoformat(marker['created_at']).tzinfo is not None, marker
     assert (out / marker['dump']).is_file()
+
+
+@pytest.mark.skipif(BASH is None, reason=SKIP_REASON)
+def test_backup_sh_streams_the_dump_when_docker_cp_fails(tmp_path):
+    # Docker Desktop: cp out of a container with a single-file bind mount (old installs mounted
+    # schema.sql) fails with "mkdirat ...: file exists"; the old-install backup must still succeed.
+    out = tmp_path / 'out'
+    res = _run_backup('sh', tmp_path, out, engine='docker', extra_env={'BWM_STUB_CP_FAIL': '1'})
+    assert res.returncode == 0, res.out
+    assert 'streaming the dump' in res.out, res.out
+    assert any(c.startswith('engine exec') and ' cat /tmp/beewithme_' in c for c in res.calls), res.calls
+    assert (out / _marker(out)['dump']).read_bytes() == b'PGDMP'
 
 
 @pytest.mark.Trait("Bug", "B57")
@@ -543,7 +556,7 @@ def test_backup_into_a_folder_it_cannot_use_stops_before_any_engine_call(kind, t
 @pytest.mark.skipif(os.name == 'nt' or not hasattr(os, 'geteuid') or os.geteuid() == 0,
                     reason='needs POSIX permissions as non-root')
 def test_backup_sh_into_a_read_only_folder_names_the_chown_fix(tmp_path):
-    out = tmp_path / 'data' / 'backups'
+    out = tmp_path / 'bproj' / 'data' / 'backups'   # under the project root, where the hint applies
     out.mkdir(parents=True)
     out.chmod(0o555)
     try:

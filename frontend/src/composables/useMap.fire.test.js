@@ -52,4 +52,21 @@ describe('useMap fire feature guard', () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain('Ivan')
     w.unmount()
   })
+
+  it('burnt areas get a halo edge under a charcoal edge, not a flat grey wash', () => {
+    const { api, w } = mountMap()
+    api.setBurntAreas({ type: 'FeatureCollection', features: [{
+      type: 'Feature', id: 'b1', properties: {},
+      geometry: { type: 'Polygon', coordinates: [[[24.1, 42.7], [24.2, 42.7], [24.2, 42.8], [24.1, 42.7]]] },
+    }] })
+    const layer = api.map()?.getLayers().getArray().find(l => l.getSource?.()?.getFeatures?.().some(f => f.getId() === 'b1'))
+    const styles = layer.getStyleFunction()(layer.getSource().getFeatures()[0], 1)
+    expect(styles).toHaveLength(2)
+    const [halo, edge] = styles
+    expect(halo.getStroke().getWidth()).toBeGreaterThan(edge.getStroke().getWidth())  // halo shows around the edge
+    expect(halo.getStroke().getColor()).toMatch(/^rgba\(255,247,237,/)                   // light
+    expect(edge.getStroke().getColor()).toBe('#4a2f1f')                                 // charcoal, never red
+    expect(edge.getFill().getColor()).toBeTruthy()  // hatch pattern, or a charcoal wash without a 2D canvas
+    w.unmount()
+  })
 })

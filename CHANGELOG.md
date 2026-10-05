@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Node.js 20 retired
+
+Node 20 reached end of life on 2026-04-30. The frontend now requires **Node.js 22.12+**, with
+**24 LTS** the recommended version (`frontend/.nvmrc`). It is enforced in three places so a field
+laptop on an old Node fails at startup with a clear message, not halfway through an operation:
+`engines` in `frontend/package.json`, `engine-strict=true` in `frontend/.npmrc`, and a version
+check in `start.sh` / `start.ps1`. No code or dependency changes were needed.
+
+**Upgrading a field laptop:** install Node.js 24 LTS, delete `frontend/node_modules`, run
+`npm ci` in `frontend/`.
+
+### Frontend toolchain: `npm audit` clean
+
+`npm audit` reported 5 advisories (1 critical, 2 high, 2 moderate), all in build/test tooling, none
+in the shipped bundle. They still mattered: the start scripts serve the app with the Vite dev
+server, so Vite's Windows `server.fs.deny` bypass and `launch-editor` NTLM-hash leak applied to
+the field laptops.
+
+- Vite 5.4 → 8.3, `@vitejs/plugin-vue` 5 → 6, Vitest 1.6 → 5.0 (critical: Vitest UI file read,
+  unused here but fixed). esbuild is no longer used by Vite.
+- `brace-expansion` (via `@vue/test-utils`) bumped in the lockfile.
+- No source or config changes; 310 tests green on Node 22, 24 and 26.
+
 ## [1.7.1] - 2026-09-08
 
 ### Test suites green for the first time
