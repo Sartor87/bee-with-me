@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Faster start on Windows
+
+The backend took about 4 s to open its database pool, and `start.ps1` lost about 2 s more, because
+`localhost` resolves to IPv6 `::1` first while the database port is published on `127.0.0.1` only; on
+Windows every refused `::1` connect waits about 2 s. The database host now defaults to `127.0.0.1`, and
+`POSTGRES_HOST=localhost` in an existing `.env` is read as `127.0.0.1`, so no `.env` needs editing.
+
 ### Starts without internet
 
 Field test feedback: with no internet the app did not start, because the start scripts ran
