@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Starts without internet
+
+Field test feedback: with no internet the app did not start, because the start scripts ran
+`pip install` on every start. Now `start.ps1` / `start.sh` check backend packages locally first
+(`pip --no-index`, plus `vendor/wheels` if present), try the internet only for what is missing
+(5 s timeout, one retry), and stop with a clear message naming the fix if a package cannot be found.
+Frontend packages follow the same order (npm cache, then online). Unchanged `requirements.txt` and
+`package-lock.json` skip the check entirely.
+
+- **`scripts/prepare-offline.ps1` / `.sh`:** run at home, with internet, after installing or updating;
+  it saves every backend package in `vendor/wheels` and installs the frontend packages.
+- **`Start Bee With Me.cmd`:** one-click start on Windows; the window stays open on an error.
+
+### Start timings
+
+The start scripts print a `Start timings:` line (containers, Python packages, migrations, frontend
+packages, total) and the backend logs `Startup timings:` (database pool, migrations, default admin,
+background tasks), to find what makes a start slow.
+
 ## [1.7.2] - 2026-10-10
 
 ### Test mode in Settings

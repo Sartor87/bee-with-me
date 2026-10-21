@@ -335,16 +335,99 @@ def test_old_container_without_inspect_information_is_left_alone(kind, project, 
     assert DRY not in res.out
 
 
-# ── B18: pip failures are reported (not fatal), stderr from native calls never aborts ─
+# ── B62: backend packages are checked locally first; the internet is only a fallback ─
 
-@pytest.mark.Trait("Bug", "B18")
+def _pips(res):
+    return [c for c in res.calls if c.startswith('pip ')]
+
+
+def _req_marker(project):
+    return project / '.venv' / '.bwm-requirements.sha256'
+
+
+@pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('kind', KINDS)
-def test_failing_pip_install_warns_and_the_start_continues(kind, project, tmp_path):
-    res = _run(kind, project, tmp_path, migrate='0', pip_fail='1')
+def test_installed_packages_are_checked_offline_only(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0')
     assert res.returncode == 0, res.out
-    assert any(c.startswith('pip ') for c in res.calls)
-    assert 'pip install failed' in res.out
-    assert res.out.index('pip install failed') < res.out.index(DRY)
+    pips = _pips(res)
+    assert len(pips) == 1 and '--no-index' in pips[0], pips
+    assert _req_marker(project).is_file()
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_unchanged_requirements_skip_pip_entirely(kind, project, tmp_path):
+    first = _run(kind, project, tmp_path, migrate='0')
+    assert first.returncode == 0, first.out
+    second = _run(kind, project, tmp_path, migrate='0')
+    assert second.returncode == 0, second.out
+    assert _pips(second) == []
+    assert DRY in second.out
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_changed_requirements_are_checked_again(kind, project, tmp_path):
+    assert _run(kind, project, tmp_path, migrate='0').returncode == 0
+    (project / 'backend' / 'requirements.txt').write_text('stubpkg>=1.0\n', encoding='utf-8')
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert len(_pips(res)) == 1 and '--no-index' in _pips(res)[0]
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_local_wheel_folder_is_used_when_present(kind, project, tmp_path):
+    (project / 'vendor' / 'wheels').mkdir(parents=True)
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    pip = _pips(res)[0]
+    assert '--no-index' in pip and '--find-links' in pip and 'wheels' in pip, pip
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_missing_package_is_fetched_online_with_a_short_timeout(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0', pip_offline_fail='1')
+    assert res.returncode == 0, res.out
+    pips = _pips(res)
+    assert len(pips) == 2, pips
+    assert '--no-index' in pips[0]
+    assert '--no-index' not in pips[1] and '--timeout' in pips[1] and '--retries' in pips[1], pips[1]
+    assert _req_marker(project).is_file()
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_missing_package_without_internet_stops_with_a_clear_message(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0', pip_fail='1')
+    assert res.returncode != 0, res.out
+    assert len(_pips(res)) == 2
+    assert 'Python packages are missing' in res.out
+    assert 'prepare-offline' in res.out
+    assert not _req_marker(project).exists()
+    assert _migrates(res) == []
+    assert DRY not in res.out
+
+
+# ── B63: the start prints how long each phase took ──────────────────────────
+
+@pytest.mark.Trait("Bug", "B63")
+@pytest.mark.parametrize('kind', KINDS)
+def test_start_prints_phase_timings(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    line = next((l for l in res.out.splitlines() if l.startswith('Start timings:')), None)
+    assert line is not None, res.out
+    for phase in ('containers', 'python packages', 'migrations', 'total'):
+        assert re.search(rf'{phase} \d+\.\d s', line), line
+    assert res.out.index('Start timings:') < res.out.index(DRY)
+
+
+# ── B18: stderr from native calls never aborts ──────────────────────────────
 
 
 @pytest.mark.Trait("Bug", "B18")

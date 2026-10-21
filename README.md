@@ -257,6 +257,24 @@ npm run dev
 
 App: **http://localhost:5173**
 
+### Starting in the field (no internet)
+
+- **One click (Windows):** double-click `Start Bee With Me.cmd` in the project folder (or a desktop shortcut
+  to it). It runs `start.ps1`; on an error the window stays open so the message can be read.
+- **Packages are checked locally first.** The start scripts install backend packages with `pip --no-index`
+  (installed packages and `vendor/wheels`), go online only for what is missing (5 s timeout, one retry), and
+  stop with "Python packages are missing" or "Frontend packages are missing" if they cannot be found. When
+  `backend/requirements.txt` and `frontend/package-lock.json` have not changed since the last good start,
+  the check is skipped.
+- **Prepare at home, with internet:** after installing or updating, run
+  `powershell -ExecutionPolicy Bypass -File .\scripts\prepare-offline.ps1` (Linux: `./scripts/prepare-offline.sh`).
+  It downloads every backend package for this laptop's Python into `vendor/wheels` (not committed) and runs
+  `npm ci`, so the next start needs no internet.
+- **Start timings:** before the servers start, the script prints one line such as
+  `Start timings: containers 8.4 s, python packages 0.6 s, migrations 1.9 s, frontend packages 0.2 s, total 11.1 s`,
+  and the backend logs `Startup timings: database pool …, migrations …, default admin …, background tasks …`.
+  Use them to find what makes a start slow.
+
 ### 5. First login
 
 A default admin account is created on first start if no users exist.
