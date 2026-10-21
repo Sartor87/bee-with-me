@@ -41,6 +41,11 @@ def verify(folder: Path) -> list[str]:
             digest, _, name = line.partition('  ')
             recorded[name.strip()] = digest.strip()
     problems = []
+    for name in sorted(recorded):
+        if not name.endswith('.whl') or '/' in name or '\\' in name or name.startswith('.'):
+            problems.append(f'{name!r} in {SUMS} is not a wheel file name')
+    if problems:
+        return problems
     present = {p.name for p in folder.iterdir() if p.is_file() and p.name != SUMS}
     for name in sorted(present - set(recorded)):
         problems.append(f'{name} is not in {SUMS}')

@@ -715,6 +715,7 @@ def test_prepare_offline_downloads_wheels_and_frontend_packages(name):
     assert 'vendor' in text and 'wheels' in text
     assert 'wheelhouse.py' in text and ' write ' in text
     assert 'npm ci' in text
+    assert '.bwm-package-lock.sha256' in text  # only prepare-offline may vouch for its own npm ci
 
 
 @pytest.mark.Trait("Bug", "B62")

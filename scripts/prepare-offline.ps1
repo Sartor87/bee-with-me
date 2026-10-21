@@ -52,5 +52,8 @@ try {
     npm ci --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw 'npm ci failed - is the internet up?' }
 } finally { Pop-Location }
+# The start script skips its own npm ci only while this marker matches the lock file (start.ps1, B62).
+$lockHash = (Get-FileHash -LiteralPath "$root\frontend\package-lock.json" -Algorithm SHA256).Hash
+Set-Content -LiteralPath "$root\frontend\node_modules\.bwm-package-lock.sha256" -Value $lockHash -Encoding ascii
 
 Write-Host 'Done. This laptop can now start Bee With Me without internet.' -ForegroundColor Green

@@ -483,11 +483,13 @@ def test_unchanged_lock_skips_npm(kind, project, tmp_path):
 
 @pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('kind', KINDS)
-def test_existing_packages_without_marker_are_adopted_without_npm(kind, project, tmp_path):
+def test_existing_packages_without_marker_are_installed_from_the_lock(kind, project, tmp_path):
+    # Field laptops from before this check have node_modules but no marker: whatever is in there was never
+    # checked against the current lock (a security update in the lock would be skipped), so npm ci runs.
     (project / 'frontend' / 'node_modules').mkdir()
     res = _run(kind, project, tmp_path, migrate='0', dry='frontend')
     assert res.returncode == 0, res.out
-    assert _npms(res) == []
+    assert _npms(res) == ['npm ci --offline --no-audit --no-fund'], _npms(res)
     assert _lock_marker(project).is_file()
 
 
@@ -501,6 +503,21 @@ def test_changed_lock_reinstalls_online_when_not_cached(kind, project, tmp_path)
     npms = _npms(res)
     assert len(npms) == 2 and npms[0].startswith('npm ci --offline'), npms
     assert npms[1].startswith('npm ci ') and '--fetch-timeout' in npms[1] and '--offline' not in npms[1], npms
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_failed_reinstall_stops_this_start_and_the_next(kind, project, tmp_path):
+    # npm ci empties node_modules before it installs; a failure leaves the empty folder and no marker behind.
+    # The next start must not take that folder as installed.
+    assert _run(kind, project, tmp_path, migrate='0', dry='frontend').returncode == 0
+    (project / 'frontend' / 'package-lock.json').write_text('{"lockfileVersion": 3, "x": 2}\n', encoding='utf-8')
+    for attempt in (1, 2):
+        res = _run(kind, project, tmp_path, migrate='0', dry='frontend', npm_fail='1')
+        assert res.returncode != 0, (attempt, res.out)
+        assert 'Frontend packages are missing' in res.out
+        assert DRY not in res.out
+        assert not _lock_marker(project).exists()
 
 
 @pytest.mark.Trait("Bug", "B62")

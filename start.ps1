@@ -293,7 +293,8 @@ if ($savedReqHash -eq $reqHash) {
     Write-Host '    Unchanged since the last start - not checked again.'
 } else {
     # vendor\wheels is used only when it holds exactly the wheels prepare-offline recorded (SHA256SUMS),
-    # so a wheel changed or added later (for example copied from another laptop) is never installed.
+    # so a wheel changed or added after it (stale or copied in) is not installed. It does not stop someone who can
+    # also rewrite SHA256SUMS, but they could edit this script as well.
     $wheels = "$root\vendor\wheels"
     $findLinks = @()
     if (Test-Path -LiteralPath $wheels -PathType Container) {
@@ -379,11 +380,9 @@ $lockHash = (Get-FileHash -LiteralPath $lockFile -Algorithm SHA256).Hash
 $savedLockHash = if (Test-Path -LiteralPath $lockMarker) { "$(Get-Content -LiteralPath $lockMarker -Raw)".Trim() } else { '' }
 if ($savedLockHash -eq $lockHash) {
     Write-Host '    Unchanged since the last start - not checked again.'
-} elseif ($savedLockHash -eq '' -and (Test-Path -LiteralPath $modules -PathType Container)) {
-    # Installed before this check existed, or by prepare-offline (npm ci): taken as matching the lock file.
-    Set-Content -LiteralPath $lockMarker -Value $lockHash -Encoding ascii
-    Write-Host '    Already installed - recorded.'
 } else {
+    # No marker means nothing vouches for node_modules (installed before this check, or a partial install):
+    # install from the lock. prepare-offline writes the marker itself after its own npm ci.
     # npm ci empties node_modules first, so after a failure below nothing is left to start with.
     Push-Location "$root\frontend"
     try {

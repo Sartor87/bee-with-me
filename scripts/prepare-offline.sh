@@ -43,5 +43,8 @@ step 'Installing backend packages from vendor/wheels'
 
 step 'Installing frontend packages (npm ci)'
 (cd "$ROOT/frontend" && npm ci --no-audit --no-fund) || die 'npm ci failed - is the internet up?'
+# The start script skips its own npm ci only while this marker matches the lock file (start.sh, B62).
+"$PYTHON" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$ROOT/frontend/package-lock.json" > "$ROOT/frontend/node_modules/.bwm-package-lock.sha256"
 
 printf '\033[32m%s\033[0m\n' 'Done. This laptop can now start Bee With Me without internet.'

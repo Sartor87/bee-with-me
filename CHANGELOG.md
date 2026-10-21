@@ -15,7 +15,9 @@ Frontend packages follow the same order (npm cache, then online). Unchanged `req
   it saves every backend package in `vendor/wheels` (wheels only) with a `SHA256SUMS` list and installs
   the frontend packages. The start uses the folder only while it matches that list, and the online
   fallback uses PyPI only. Frontend packages are installed with `npm ci`, so `package-lock.json` is
-  never rewritten on the laptop. Node.js 23 and 25 are refused at start (the build tools do not accept them).
+  never rewritten on the laptop. **After updating to this version, run `prepare-offline` (or start once
+  with internet):** existing installs have no record yet of which lock their packages came from, so
+  the first start reinstalls them with `npm ci`. Node.js 23 and 25 are refused at start (the build tools do not accept them).
 - **`Start Bee With Me.cmd`:** one-click start on Windows; the window stays open on an error.
 
 ### Start timings

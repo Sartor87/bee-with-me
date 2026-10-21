@@ -61,6 +61,16 @@ def test_listed_wheel_missing_fails(wheels):
 
 
 @pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('name', ['../outside-1.0-py3-none-any.whl', 'sub/pkg-1.0-py3-none-any.whl', 'mgrs-1.4.tar.gz'])
+def test_listed_name_that_is_not_a_plain_wheel_fails(wheels, name):
+    _run('write', wheels)
+    with (wheels / 'SHA256SUMS').open('a', encoding='utf-8') as fh:
+        fh.write(f'{"0" * 64}  {name}\n')
+    res = _run('verify', wheels)
+    assert res.returncode == 1 and 'not a wheel file name' in res.stderr
+
+
+@pytest.mark.Trait("Bug", "B62")
 def test_missing_sums_file_fails(wheels):
     res = _run('verify', wheels)
     assert res.returncode == 1 and 'SHA256SUMS' in res.stderr

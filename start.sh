@@ -297,7 +297,8 @@ if [[ -s "$REQ_MARKER" && "$(cat "$REQ_MARKER")" == "$req_hash" ]]; then
     echo '    Unchanged since the last start - not checked again.'
 else
     # vendor/wheels is used only when it holds exactly the wheels prepare-offline recorded (SHA256SUMS),
-    # so a wheel changed or added later (for example copied from another laptop) is never installed.
+    # so a wheel changed or added after it (stale or copied in) is not installed. It does not stop someone who can
+    # also rewrite SHA256SUMS, but they could edit this script as well.
     find_links=()
     if [[ -d "$ROOT/vendor/wheels" ]]; then
         if "$ROOT/.venv/bin/python" "$ROOT/scripts/wheelhouse.py" verify "$ROOT/vendor/wheels"; then
@@ -376,11 +377,9 @@ LOCK_MARKER="$MODULES/.bwm-package-lock.sha256"
 lock_hash="$(file_sha256 "$LOCK_FILE")"
 if [[ -s "$LOCK_MARKER" && "$(cat "$LOCK_MARKER")" == "$lock_hash" ]]; then
     echo '    Unchanged since the last start - not checked again.'
-elif [[ ! -s "$LOCK_MARKER" && -d "$MODULES" ]]; then
-    # Installed before this check existed, or by prepare-offline (npm ci): taken as matching the lock file.
-    printf '%s\n' "$lock_hash" > "$LOCK_MARKER"
-    echo '    Already installed - recorded.'
 else
+    # No marker means nothing vouches for node_modules (installed before this check, or a partial install):
+    # install from the lock. prepare-offline writes the marker itself after its own npm ci.
     # npm ci empties node_modules first, so after a failure below nothing is left to start with.
     if ! (cd "$ROOT/frontend" && npm ci --offline --no-audit --no-fund); then
         warn 'Some frontend packages are not in the local cache - trying to download them (needs internet).'
