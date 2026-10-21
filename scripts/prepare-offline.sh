@@ -2,7 +2,8 @@
 # Prepares this laptop to start Bee With Me without internet (B62). Run it at home, with internet,
 # after installing or updating the app.
 #
-#   1. Downloads every backend package (and its dependencies) for this laptop's Python into vendor/wheels.
+#   1. Downloads every backend package (and its dependencies) for this laptop's Python into vendor/wheels
+#      (wheels only) and records their SHA-256 in vendor/wheels/SHA256SUMS.
 #      start.sh installs from there when a package is missing and there is no internet.
 #   2. Installs the backend packages into .venv from that folder.
 #   3. Installs the frontend packages (npm ci), which also fills the local npm cache.
@@ -28,8 +29,13 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 step "Downloading backend packages into $WHEELS"
+# Start from an empty folder, so no old or foreign wheel stays next to the fresh ones. Wheels only: a source
+# archive would run its own build code during the install.
+rm -rf "$WHEELS"
 mkdir -p "$WHEELS"
-"$PYTHON" -m pip download -r "$ROOT/backend/requirements.txt" -d "$WHEELS" || die 'pip download failed - is the internet up?'
+"$PYTHON" -m pip download --only-binary :all: -r "$ROOT/backend/requirements.txt" -d "$WHEELS" || die 'pip download failed - is the internet up?'
+# Record every wheel's SHA-256: start.sh uses the folder only while it still matches (scripts/wheelhouse.py).
+"$PYTHON" "$ROOT/scripts/wheelhouse.py" write "$WHEELS" || die 'Could not write vendor/wheels/SHA256SUMS.'
 
 step 'Installing backend packages from vendor/wheels'
 "$PYTHON" -m pip install --no-index --find-links "$WHEELS" -r "$ROOT/backend/requirements.txt" \

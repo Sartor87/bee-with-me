@@ -287,18 +287,26 @@ Write-Step 'Checking backend packages'
 $reqFile = "$root\backend\requirements.txt"
 $reqMarker = "$root\.venv\.bwm-requirements.sha256"
 $reqHash = (Get-FileHash -LiteralPath $reqFile -Algorithm SHA256).Hash
-$savedReqHash = if (Test-Path -LiteralPath $reqMarker) { (Get-Content -LiteralPath $reqMarker -Raw).Trim() } else { '' }
+# An empty marker (power cut while writing) reads as $null: the string cast keeps .Trim() safe.
+$savedReqHash = if (Test-Path -LiteralPath $reqMarker) { "$(Get-Content -LiteralPath $reqMarker -Raw)".Trim() } else { '' }
 if ($savedReqHash -eq $reqHash) {
     Write-Host '    Unchanged since the last start - not checked again.'
 } else {
+    # vendor\wheels is used only when it holds exactly the wheels prepare-offline recorded (SHA256SUMS),
+    # so a wheel changed or added later (for example copied from another laptop) is never installed.
     $wheels = "$root\vendor\wheels"
-    $findLinks = if (Test-Path -LiteralPath $wheels -PathType Container) { @('--find-links', $wheels) } else { @() }
-    # 1. Local only (installed packages and vendor\wheels): no network, seconds.
+    $findLinks = @()
+    if (Test-Path -LiteralPath $wheels -PathType Container) {
+        Invoke-Native { & "$root\.venv\Scripts\python.exe" "$root\scripts\wheelhouse.py" verify $wheels }
+        if ($LASTEXITCODE -eq 0) { $findLinks = @('--find-links', $wheels) }
+        else { Write-Warn 'vendor\wheels failed its integrity check (see above) - not used. Run scripts\prepare-offline.ps1 again.' }
+    }
+    # 1. Local only (installed packages and the verified vendor\wheels): no network, seconds.
     Invoke-Native { & "$root\.venv\Scripts\python.exe" -m pip install -q --no-index @findLinks -r $reqFile }
     if ($LASTEXITCODE -ne 0) {
-        # 2. Something is missing locally: one short try over the internet.
+        # 2. Something is missing locally: one short try, from the package index only (never mixed with vendor\wheels).
         Write-Warn 'Some backend packages are not installed - trying to download them (needs internet).'
-        Invoke-Native { & "$root\.venv\Scripts\python.exe" -m pip install -q --timeout 5 --retries 1 @findLinks -r $reqFile }
+        Invoke-Native { & "$root\.venv\Scripts\python.exe" -m pip install -q --timeout 5 --retries 1 -r $reqFile }
         if ($LASTEXITCODE -ne 0) {
             throw ("Python packages are missing and could not be downloaded (no internet?). The app cannot start without them.`n" +
                    "The names are in the pip messages above. To fix it:`n" +
@@ -352,41 +360,56 @@ if ($env:BWM_START_DRY_RUN -eq '1') {
 if (-not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
 }
-# Floor matches "engines" in frontend\package.json; .npmrc engine-strict enforces it for npm too.
+# Floor matches "engines" in frontend\package.json; .npmrc engine-strict enforces it for npm too. The build tools
+# (vitest) accept only the even, long-term releases: 22.12+, 24 and 26+.
 $nodeVersion = [version]((node -v).TrimStart('v'))
 if ($nodeVersion -lt [version]'22.12.0') {
     throw "Node.js $nodeVersion is too old (need 22.12+). Install Node.js 24 LTS and re-run."
 }
-# Same order as the backend packages (B62): local npm cache first, then one short try online.
+if ($nodeVersion.Major -eq 23 -or $nodeVersion.Major -eq 25) {
+    throw "Node.js $nodeVersion is not supported by the frontend tools (use 22.12+, 24 or 26+). Install Node.js 24 LTS and re-run."
+}
+# Same order as the backend packages (B62): local npm cache first, then one short try online. npm ci installs
+# exactly package-lock.json and never rewrites it (npm install does, which would block the next git pull).
 Write-Step 'Checking frontend packages'
 $modules = "$root\frontend\node_modules"
+$lockFile = "$root\frontend\package-lock.json"
 $lockMarker = "$modules\.bwm-package-lock.sha256"
-$lockHash = (Get-FileHash -LiteralPath "$root\frontend\package-lock.json" -Algorithm SHA256).Hash
-$savedLockHash = if (Test-Path -LiteralPath $lockMarker) { (Get-Content -LiteralPath $lockMarker -Raw).Trim() } else { '' }
+$lockHash = (Get-FileHash -LiteralPath $lockFile -Algorithm SHA256).Hash
+$savedLockHash = if (Test-Path -LiteralPath $lockMarker) { "$(Get-Content -LiteralPath $lockMarker -Raw)".Trim() } else { '' }
 if ($savedLockHash -eq $lockHash) {
     Write-Host '    Unchanged since the last start - not checked again.'
+} elseif ($savedLockHash -eq '' -and (Test-Path -LiteralPath $modules -PathType Container)) {
+    # Installed before this check existed, or by prepare-offline (npm ci): taken as matching the lock file.
+    Set-Content -LiteralPath $lockMarker -Value $lockHash -Encoding ascii
+    Write-Host '    Already installed - recorded.'
 } else {
+    # npm ci empties node_modules first, so after a failure below nothing is left to start with.
     Push-Location "$root\frontend"
     try {
-        Invoke-Native { npm install --offline --no-audit --no-fund }
+        Invoke-Native { npm ci --offline --no-audit --no-fund }
         if ($LASTEXITCODE -ne 0) {
             Write-Warn 'Some frontend packages are not in the local cache - trying to download them (needs internet).'
-            Invoke-Native { npm install --no-audit --no-fund --fetch-timeout=5000 --fetch-retries=1 }
+            Invoke-Native { npm ci --no-audit --no-fund --fetch-timeout=5000 --fetch-retries=1 }
         }
         $npmExit = $LASTEXITCODE
     } finally { Pop-Location }
-    if ($npmExit -eq 0) {
-        Set-Content -LiteralPath $lockMarker -Value $lockHash -Encoding ascii
-    } elseif (Test-Path -LiteralPath $modules) {
-        Write-Warn 'Could not update the frontend packages (no internet?) - starting with the ones already installed.'
-    } else {
-        throw ("Frontend packages are missing and could not be downloaded (no internet?). The app cannot start without them.`n" +
+    if ($npmExit -ne 0) {
+        throw ("Frontend packages are missing or out of date and could not be installed. The app cannot start without them.`n" +
+               "The reason is in the npm messages above (no internet, or a Node.js version npm does not accept). To fix it:`n" +
                "  - connect this laptop to the internet once and start again, or`n" +
                "  - at home, with internet, run scripts\prepare-offline.ps1, then start again without internet.")
     }
+    Set-Content -LiteralPath $lockMarker -Value (Get-FileHash -LiteralPath $lockFile -Algorithm SHA256).Hash -Encoding ascii
 }
 Add-PhaseTime 'frontend packages'
 Write-PhaseTimes
+
+# BWM_START_DRY_RUN=frontend (script tests): stop after the frontend packages too.
+if ($env:BWM_START_DRY_RUN -eq 'frontend') {
+    Write-Host 'DRY RUN: would start backend and frontend'
+    exit 0
+}
 
 # -- Backend (own window) ------------------------------------------------------
 Write-Step 'Starting backend (uvicorn) in a new window'

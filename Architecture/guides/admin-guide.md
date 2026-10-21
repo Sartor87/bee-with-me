@@ -280,8 +280,14 @@ SOS не изчезва сам. Остава и ако презаредите с
 
 **Подготовка за терен (с интернет, у дома):** след всяка инсталация или обновяване пуснете
 `powershell -ExecutionPolicy Bypass -File .\scripts\prepare-offline.ps1` (Linux: `./scripts/prepare-offline.sh`). Той
-сваля всички Python пакети във `vendor\wheels\` и инсталира frontend пакетите, така че стартът на терен да не иска
-интернет.
+сваля всички Python пакети във `vendor\wheels\` (само wheels), записва SHA-256 на всеки в `vendor\wheels\SHA256SUMS`
+и инсталира frontend пакетите (`npm ci`), така че стартът на терен да не иска интернет. Стартът ползва
+`vendor\wheels\` само докато съвпада със `SHA256SUMS`: променен или добавен по-късно файл (например копиран от
+друг лаптоп) не се инсталира. Не копирайте wheels между лаптопи; пуснете `prepare-offline` на всеки.
+
+Ако проверката е пропусната (непроменени `requirements.txt` и `package-lock.json`), а пакет в `.venv` е повреден,
+изтрийте `.venv\.bwm-requirements.sha256` (или `frontend\node_modules\.bwm-package-lock.sha256`) и стартирайте пак:
+това налага пълна проверка.
 
 При първа инсталация: пуснете `prepare-offline` (той създава и `.venv`).
 `.env` се създава от `.env.example` при първия старт (Т2). Задайте нова парола на `admin` веднага.

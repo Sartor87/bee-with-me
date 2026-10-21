@@ -686,9 +686,11 @@ def test_start_sh_stops_when_python_packages_are_missing():
 @pytest.mark.parametrize('name', ['start.ps1', 'start.sh'])
 def test_frontend_packages_try_offline_before_online(name):
     text = _read(name)
-    offline = text.index('npm install --offline')
+    offline = text.index('npm ci --offline')
     online = text.index('--fetch-timeout', offline)
     assert offline < online
+    # npm install rewrites package-lock.json on the field laptop; only npm ci may run
+    assert not [l for l in _code_lines(text) if 'npm install' in l]
     assert '.bwm-package-lock.sha256' in text
     assert 'Frontend packages are missing' in text
 
@@ -697,16 +699,38 @@ def test_frontend_packages_try_offline_before_online(name):
 def test_one_click_starter_keeps_the_window_open_on_error():
     text = _read('Start Bee With Me.cmd')
     assert 'start.ps1' in text and '-ExecutionPolicy Bypass' in text and '%~dp0' in text
-    assert re.search(r'if\s+errorlevel\s+1\s+pause', text, re.IGNORECASE)
+    # Full path: cmd.exe looks in the current folder before PATH
+    assert r'%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe' in text
+    # pause resets the exit code: keep start.ps1's code for scheduled tasks and wrappers
+    assert re.search(r'set\s+"?rc=%errorlevel%', text, re.IGNORECASE)
+    assert re.search(r'\bpause\b', text, re.IGNORECASE)
+    assert re.search(r'exit\s+/b\s+%rc%', text, re.IGNORECASE)
 
 
 @pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('name', ['scripts/prepare-offline.ps1', 'scripts/prepare-offline.sh'])
 def test_prepare_offline_downloads_wheels_and_frontend_packages(name):
     text = _read(name)
-    assert '-m pip download' in text
+    assert '-m pip download' in text and '--only-binary :all:' in text
     assert 'vendor' in text and 'wheels' in text
+    assert 'wheelhouse.py' in text and ' write ' in text
     assert 'npm ci' in text
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('name', ['start.ps1', 'start.sh'])
+def test_wheel_folder_is_verified_and_never_mixed_with_the_index(name):
+    text = _read(name)
+    assert 'wheelhouse.py' in text and ' verify ' in text
+    online = next(l for l in _code_lines(text) if '--timeout 5' in l and 'pip install' in l)
+    assert 'find' not in online.lower(), online
+
+
+@pytest.mark.Trait("Bug", "B62")
+def test_prepare_offline_sh_is_executable():
+    out = subprocess.run(['git', 'ls-files', '-s', 'scripts/prepare-offline.sh'], cwd=ROOT,
+                         capture_output=True, text=True, check=True).stdout
+    assert out.startswith('100755'), out
 
 
 @pytest.mark.Trait("Bug", "B62")

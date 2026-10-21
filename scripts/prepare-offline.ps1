@@ -4,7 +4,8 @@
     after installing or updating the app.
 
 .DESCRIPTION
-    1. Downloads every backend package (and its dependencies) for this laptop's Python into vendor\wheels.
+    1. Downloads every backend package (and its dependencies) for this laptop's Python into vendor\wheels
+       (wheels only) and records their SHA-256 in vendor\wheels\SHA256SUMS.
        start.ps1 installs from there when a package is missing and there is no internet.
     2. Installs the backend packages into .venv from that folder.
     3. Installs the frontend packages (npm ci), which also fills the local npm cache.
@@ -19,6 +20,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $python = "$root\.venv\Scripts\python.exe"
 $wheels = "$root\vendor\wheels"
+$requirements = "$root\backend\requirements.txt"
 
 if (-not (Test-Path -LiteralPath $python)) {
     $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
@@ -30,12 +32,18 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 Write-Host "==> Downloading backend packages into $wheels" -ForegroundColor Cyan
+# Start from an empty folder, so no old or foreign wheel stays next to the fresh ones. Wheels only: a source
+# archive would run its own build code during the install.
+if (Test-Path -LiteralPath $wheels) { Remove-Item -LiteralPath $wheels -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $wheels | Out-Null
-& $python -m pip download -r "$root\backend\requirements.txt" -d $wheels
+& $python -m pip download --only-binary :all: -r $requirements -d $wheels
 if ($LASTEXITCODE -ne 0) { throw 'pip download failed - is the internet up?' }
+# Record every wheel's SHA-256: start.ps1 uses the folder only while it still matches (scripts\wheelhouse.py).
+& $python "$root\scripts\wheelhouse.py" write $wheels
+if ($LASTEXITCODE -ne 0) { throw 'Could not write vendor\wheels\SHA256SUMS.' }
 
 Write-Host '==> Installing backend packages from vendor\wheels' -ForegroundColor Cyan
-& $python -m pip install --no-index --find-links $wheels -r "$root\backend\requirements.txt"
+& $python -m pip install --no-index --find-links $wheels -r $requirements
 if ($LASTEXITCODE -ne 0) { throw 'Installing from vendor\wheels failed - see the messages above.' }
 
 Write-Host '==> Installing frontend packages (npm ci)' -ForegroundColor Cyan

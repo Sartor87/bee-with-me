@@ -293,16 +293,24 @@ step 'Checking backend packages'
 REQ_FILE="$ROOT/backend/requirements.txt"
 REQ_MARKER="$ROOT/.venv/.bwm-requirements.sha256"
 req_hash="$(file_sha256 "$REQ_FILE")"
-if [[ -f "$REQ_MARKER" && "$(cat "$REQ_MARKER")" == "$req_hash" ]]; then
+if [[ -s "$REQ_MARKER" && "$(cat "$REQ_MARKER")" == "$req_hash" ]]; then
     echo '    Unchanged since the last start - not checked again.'
 else
+    # vendor/wheels is used only when it holds exactly the wheels prepare-offline recorded (SHA256SUMS),
+    # so a wheel changed or added later (for example copied from another laptop) is never installed.
     find_links=()
-    [[ -d "$ROOT/vendor/wheels" ]] && find_links=(--find-links "$ROOT/vendor/wheels")
-    # 1. Local only (installed packages and vendor/wheels): no network, seconds.
+    if [[ -d "$ROOT/vendor/wheels" ]]; then
+        if "$ROOT/.venv/bin/python" "$ROOT/scripts/wheelhouse.py" verify "$ROOT/vendor/wheels"; then
+            find_links=(--find-links "$ROOT/vendor/wheels")
+        else
+            warn 'vendor/wheels failed its integrity check (see above) - not used. Run scripts/prepare-offline.sh again.'
+        fi
+    fi
+    # 1. Local only (installed packages and the verified vendor/wheels): no network, seconds.
     if ! "$ROOT/.venv/bin/python" -m pip install -q --no-index ${find_links[@]+"${find_links[@]}"} -r "$REQ_FILE"; then
-        # 2. Something is missing locally: one short try over the internet.
+        # 2. Something is missing locally: one short try, from the package index only (never mixed with vendor/wheels).
         warn 'Some backend packages are not installed - trying to download them (needs internet).'
-        "$ROOT/.venv/bin/python" -m pip install -q --timeout 5 --retries 1 ${find_links[@]+"${find_links[@]}"} -r "$REQ_FILE" \
+        "$ROOT/.venv/bin/python" -m pip install -q --timeout 5 --retries 1 -r "$REQ_FILE" \
             || die "Python packages are missing and could not be downloaded (no internet?). The app cannot start without them.
 The names are in the pip messages above. To fix it:
   - connect this laptop to the internet once and start again, or
@@ -356,33 +364,42 @@ command -v npm >/dev/null 2>&1 || die 'npm was not found on PATH. Install Node.j
 # Floor matches "engines" in frontend/package.json; .npmrc engine-strict enforces it for npm too.
 node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)' \
     || die "Node.js $(node -v) is too old (need 22.12+). Install Node.js 24 LTS and re-run."
-# Same order as the backend packages (B62): local npm cache first, then one short try online.
+# The build tools (vitest) accept only the even, long-term releases: 22.12+, 24 and 26+.
+node -e 'const a = Number(process.versions.node.split(".")[0]); process.exit(a === 23 || a === 25 ? 1 : 0)' \
+    || die "Node.js $(node -v) is not supported by the frontend tools (use 22.12+, 24 or 26+). Install Node.js 24 LTS and re-run."
+# Same order as the backend packages (B62): local npm cache first, then one short try online. npm ci installs
+# exactly package-lock.json and never rewrites it (npm install does, which would block the next git pull).
 step 'Checking frontend packages'
 MODULES="$ROOT/frontend/node_modules"
+LOCK_FILE="$ROOT/frontend/package-lock.json"
 LOCK_MARKER="$MODULES/.bwm-package-lock.sha256"
-lock_hash="$(file_sha256 "$ROOT/frontend/package-lock.json")"
-if [[ -f "$LOCK_MARKER" && "$(cat "$LOCK_MARKER")" == "$lock_hash" ]]; then
+lock_hash="$(file_sha256 "$LOCK_FILE")"
+if [[ -s "$LOCK_MARKER" && "$(cat "$LOCK_MARKER")" == "$lock_hash" ]]; then
     echo '    Unchanged since the last start - not checked again.'
+elif [[ ! -s "$LOCK_MARKER" && -d "$MODULES" ]]; then
+    # Installed before this check existed, or by prepare-offline (npm ci): taken as matching the lock file.
+    printf '%s\n' "$lock_hash" > "$LOCK_MARKER"
+    echo '    Already installed - recorded.'
 else
-    npm_ok=0
-    if (cd "$ROOT/frontend" && npm install --offline --no-audit --no-fund); then
-        npm_ok=1
-    else
+    # npm ci empties node_modules first, so after a failure below nothing is left to start with.
+    if ! (cd "$ROOT/frontend" && npm ci --offline --no-audit --no-fund); then
         warn 'Some frontend packages are not in the local cache - trying to download them (needs internet).'
-        (cd "$ROOT/frontend" && npm install --no-audit --no-fund --fetch-timeout=5000 --fetch-retries=1) && npm_ok=1
-    fi
-    if [[ $npm_ok -eq 1 ]]; then
-        printf '%s\n' "$lock_hash" > "$LOCK_MARKER"
-    elif [[ -d "$MODULES" ]]; then
-        warn 'Could not update the frontend packages (no internet?) - starting with the ones already installed.'
-    else
-        die "Frontend packages are missing and could not be downloaded (no internet?). The app cannot start without them.
+        (cd "$ROOT/frontend" && npm ci --no-audit --no-fund --fetch-timeout=5000 --fetch-retries=1) \
+            || die "Frontend packages are missing or out of date and could not be installed. The app cannot start without them.
+The reason is in the npm messages above (no internet, or a Node.js version npm does not accept). To fix it:
   - connect this laptop to the internet once and start again, or
   - at home, with internet, run scripts/prepare-offline.sh, then start again without internet."
     fi
+    file_sha256 "$LOCK_FILE" > "$LOCK_MARKER"
 fi
 phase_done 'frontend packages'
 print_phase_times
+
+# BWM_START_DRY_RUN=frontend (script tests): stop after the frontend packages too.
+if [[ "${BWM_START_DRY_RUN:-}" == frontend ]]; then
+    echo 'DRY RUN: would start backend and frontend'
+    exit 0
+fi
 
 # -- USB HID gateway permissions ---------------------------------------------------
 # On Linux, /dev/hidraw* is root-only by default. Without a udev rule the backend

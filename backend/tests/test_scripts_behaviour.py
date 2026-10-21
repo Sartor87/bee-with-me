@@ -81,6 +81,9 @@ def project(tmp_path, _venv, postgres_port):
         if src.is_file() and '__pycache__' not in src.parts:
             _copy_text(src, proj / src.relative_to(STUBS / 'project'), lf=not src.suffix == '.ps1')
     (proj / 'backend' / 'requirements.txt').write_text('', encoding='utf-8')
+    (proj / 'frontend').mkdir(parents=True, exist_ok=True)
+    (proj / 'frontend' / 'package-lock.json').write_text('{"lockfileVersion": 3}\n', encoding='utf-8')
+    _copy_text(ROOT / 'scripts' / 'wheelhouse.py', proj / 'scripts' / 'wheelhouse.py', lf=True)
     (proj / '.env.example').write_text(f'POSTGRES_PORT={postgres_port}\nPOSTGRES_DB=stub_db\n', encoding='utf-8')
     if _venv is not None:
         shutil.copytree(_venv, proj / '.venv')
@@ -90,15 +93,17 @@ def project(tmp_path, _venv, postgres_port):
     return proj
 
 
-def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, args=(), bash_path_prepend=None, **stub):
+def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, args=(), bash_path_prepend=None,
+         dry='1', **stub):
     log = tmp_path / 'calls.log'
     log.write_text('', encoding='utf-8')
     if kind == 'sh':
         posix = tmp_path / 'posix-stubs'
-        for name in ('podman', 'docker'):
+        for name in ('podman', 'docker', 'npm', 'node'):
             _copy_text(STUBS / 'posix' / name, posix / name, lf=True)
             os.chmod(posix / name, 0o755)
-        shutil.copy(STUBS / 'engine_stub.py', tmp_path / 'engine_stub.py')
+        for name in ('engine_stub.py', 'npm_stub.py', 'node_stub.py'):
+            shutil.copy(STUBS / name, tmp_path / name)
         stub_dir = posix
     else:
         stub_dir = STUBS / 'win'
@@ -106,7 +111,7 @@ def _run(kind, project, tmp_path, *, engine='podman', migrate='0', wait=None, ar
     env.update({
         'PATH': os.pathsep.join([str(stub_dir), os.environ.get('PATH', '')]),
         'CONTAINER_ENGINE': engine,
-        'BWM_START_DRY_RUN': '1',
+        'BWM_START_DRY_RUN': dry,
         'BWM_STUB_LOG': log.as_posix(),
         'BWM_STUB_PYTHON': Path(sys.executable).as_posix(),
         'BWM_STUB_MIGRATE_EXITS': migrate,
@@ -341,8 +346,26 @@ def _pips(res):
     return [c for c in res.calls if c.startswith('pip ')]
 
 
+def _npms(res):
+    return [c for c in res.calls if c.startswith('npm ')]
+
+
 def _req_marker(project):
     return project / '.venv' / '.bwm-requirements.sha256'
+
+
+def _lock_marker(project):
+    return project / 'frontend' / 'node_modules' / '.bwm-package-lock.sha256'
+
+
+def _wheelhouse(project, *, tamper=False):
+    wheels = project / 'vendor' / 'wheels'
+    wheels.mkdir(parents=True)
+    (wheels / 'stubpkg-1.0-py3-none-any.whl').write_bytes(b'stub wheel')
+    subprocess.run([sys.executable, str(project / 'scripts' / 'wheelhouse.py'), 'write', str(wheels)], check=True)
+    if tamper:
+        (wheels / 'stubpkg-99.0-py3-none-any.whl').write_bytes(b'planted')
+    return wheels
 
 
 @pytest.mark.Trait("Bug", "B62")
@@ -369,6 +392,15 @@ def test_unchanged_requirements_skip_pip_entirely(kind, project, tmp_path):
 
 @pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('kind', KINDS)
+def test_empty_marker_file_is_checked_again(kind, project, tmp_path):
+    _req_marker(project).write_text('', encoding='utf-8')
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert len(_pips(res)) == 1
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
 def test_changed_requirements_are_checked_again(kind, project, tmp_path):
     assert _run(kind, project, tmp_path, migrate='0').returncode == 0
     (project / 'backend' / 'requirements.txt').write_text('stubpkg>=1.0\n', encoding='utf-8')
@@ -379,8 +411,8 @@ def test_changed_requirements_are_checked_again(kind, project, tmp_path):
 
 @pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('kind', KINDS)
-def test_local_wheel_folder_is_used_when_present(kind, project, tmp_path):
-    (project / 'vendor' / 'wheels').mkdir(parents=True)
+def test_verified_wheel_folder_is_used_offline(kind, project, tmp_path):
+    _wheelhouse(project)
     res = _run(kind, project, tmp_path, migrate='0')
     assert res.returncode == 0, res.out
     pip = _pips(res)[0]
@@ -389,13 +421,26 @@ def test_local_wheel_folder_is_used_when_present(kind, project, tmp_path):
 
 @pytest.mark.Trait("Bug", "B62")
 @pytest.mark.parametrize('kind', KINDS)
-def test_missing_package_is_fetched_online_with_a_short_timeout(kind, project, tmp_path):
+def test_tampered_wheel_folder_is_not_used(kind, project, tmp_path):
+    _wheelhouse(project, tamper=True)
+    res = _run(kind, project, tmp_path, migrate='0')
+    assert res.returncode == 0, res.out
+    assert all('--find-links' not in c for c in _pips(res)), _pips(res)
+    assert 'integrity check' in res.out
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_missing_package_is_fetched_from_the_index_only(kind, project, tmp_path):
+    _wheelhouse(project)
     res = _run(kind, project, tmp_path, migrate='0', pip_offline_fail='1')
     assert res.returncode == 0, res.out
     pips = _pips(res)
     assert len(pips) == 2, pips
     assert '--no-index' in pips[0]
-    assert '--no-index' not in pips[1] and '--timeout' in pips[1] and '--retries' in pips[1], pips[1]
+    online = pips[1]
+    assert '--no-index' not in online and '--find-links' not in online, online
+    assert '--timeout' in online and '--retries' in online, online
     assert _req_marker(project).is_file()
     assert DRY in res.out
 
@@ -413,16 +458,72 @@ def test_missing_package_without_internet_stops_with_a_clear_message(kind, proje
     assert DRY not in res.out
 
 
+# ── B62: frontend packages: npm ci (never rewrites the lock), offline first ───
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_fresh_install_uses_npm_ci_offline_first(kind, project, tmp_path):
+    lock = (project / 'frontend' / 'package-lock.json').read_bytes()
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend')
+    assert res.returncode == 0, res.out
+    assert _npms(res) == ['npm ci --offline --no-audit --no-fund'], _npms(res)
+    assert _lock_marker(project).is_file()
+    assert (project / 'frontend' / 'package-lock.json').read_bytes() == lock
+    assert DRY in res.out
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_unchanged_lock_skips_npm(kind, project, tmp_path):
+    assert _run(kind, project, tmp_path, migrate='0', dry='frontend').returncode == 0
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend')
+    assert res.returncode == 0, res.out
+    assert _npms(res) == []
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_existing_packages_without_marker_are_adopted_without_npm(kind, project, tmp_path):
+    (project / 'frontend' / 'node_modules').mkdir()
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend')
+    assert res.returncode == 0, res.out
+    assert _npms(res) == []
+    assert _lock_marker(project).is_file()
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_changed_lock_reinstalls_online_when_not_cached(kind, project, tmp_path):
+    assert _run(kind, project, tmp_path, migrate='0', dry='frontend').returncode == 0
+    (project / 'frontend' / 'package-lock.json').write_text('{"lockfileVersion": 3, "x": 1}\n', encoding='utf-8')
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend', npm_offline_fail='1')
+    assert res.returncode == 0, res.out
+    npms = _npms(res)
+    assert len(npms) == 2 and npms[0].startswith('npm ci --offline'), npms
+    assert npms[1].startswith('npm ci ') and '--fetch-timeout' in npms[1] and '--offline' not in npms[1], npms
+
+
+@pytest.mark.Trait("Bug", "B62")
+@pytest.mark.parametrize('kind', KINDS)
+def test_frontend_packages_that_cannot_be_installed_stop_the_start(kind, project, tmp_path):
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend', npm_fail='1')
+    assert res.returncode != 0, res.out
+    assert 'Frontend packages are missing' in res.out
+    assert 'prepare-offline' in res.out
+    assert not _lock_marker(project).exists()
+    assert DRY not in res.out
+
+
 # ── B63: the start prints how long each phase took ──────────────────────────
 
 @pytest.mark.Trait("Bug", "B63")
 @pytest.mark.parametrize('kind', KINDS)
 def test_start_prints_phase_timings(kind, project, tmp_path):
-    res = _run(kind, project, tmp_path, migrate='0')
+    res = _run(kind, project, tmp_path, migrate='0', dry='frontend')
     assert res.returncode == 0, res.out
     line = next((l for l in res.out.splitlines() if l.startswith('Start timings:')), None)
     assert line is not None, res.out
-    for phase in ('containers', 'python packages', 'migrations', 'total'):
+    for phase in ('containers', 'python packages', 'migrations', 'frontend packages', 'total'):
         assert re.search(rf'{phase} \d+\.\d s', line), line
     assert res.out.index('Start timings:') < res.out.index(DRY)
 

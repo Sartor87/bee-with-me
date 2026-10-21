@@ -268,8 +268,10 @@ App: **http://localhost:5173**
   the check is skipped.
 - **Prepare at home, with internet:** after installing or updating, run
   `powershell -ExecutionPolicy Bypass -File .\scripts\prepare-offline.ps1` (Linux: `./scripts/prepare-offline.sh`).
-  It downloads every backend package for this laptop's Python into `vendor/wheels` (not committed) and runs
-  `npm ci`, so the next start needs no internet.
+  It downloads every backend package for this laptop's Python into `vendor/wheels` (wheels only, not committed),
+  records their SHA-256 in `vendor/wheels/SHA256SUMS` and runs `npm ci`, so the next start needs no internet. The
+  start uses `vendor/wheels` only while it matches `SHA256SUMS`, and never mixes it with PyPI. Frontend packages
+  are installed with `npm ci`, which never rewrites `package-lock.json`.
 - **Start timings:** before the servers start, the script prints one line such as
   `Start timings: containers 8.4 s, python packages 0.6 s, migrations 1.9 s, frontend packages 0.2 s, total 11.1 s`,
   and the backend logs `Startup timings: database pool …, migrations …, default admin …, background tasks …`.

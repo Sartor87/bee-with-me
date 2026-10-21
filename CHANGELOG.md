@@ -12,7 +12,10 @@ Frontend packages follow the same order (npm cache, then online). Unchanged `req
 `package-lock.json` skip the check entirely.
 
 - **`scripts/prepare-offline.ps1` / `.sh`:** run at home, with internet, after installing or updating;
-  it saves every backend package in `vendor/wheels` and installs the frontend packages.
+  it saves every backend package in `vendor/wheels` (wheels only) with a `SHA256SUMS` list and installs
+  the frontend packages. The start uses the folder only while it matches that list, and the online
+  fallback uses PyPI only. Frontend packages are installed with `npm ci`, so `package-lock.json` is
+  never rewritten on the laptop. Node.js 23 and 25 are refused at start (the build tools do not accept them).
 - **`Start Bee With Me.cmd`:** one-click start on Windows; the window stays open on an error.
 
 ### Start timings
