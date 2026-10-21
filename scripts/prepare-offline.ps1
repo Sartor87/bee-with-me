@@ -22,6 +22,18 @@ $python = "$root\.venv\Scripts\python.exe"
 $wheels = "$root\vendor\wheels"
 $requirements = "$root\backend\requirements.txt"
 
+# Same Node.js rule as start.ps1, checked before anything is downloaded or vendor\wheels is emptied.
+if (-not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    throw 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
+}
+$nodeVersion = [version]((node -v).TrimStart('v'))
+if ($nodeVersion -lt [version]'22.12.0') {
+    throw "Node.js $nodeVersion is too old (need 22.12+). Install Node.js 24 LTS and re-run."
+}
+if ($nodeVersion.Major -eq 23 -or $nodeVersion.Major -eq 25) {
+    throw "Node.js $nodeVersion is not supported by the frontend tools (use 22.12+, 24 or 26+). Install Node.js 24 LTS and re-run."
+}
+
 if (-not (Test-Path -LiteralPath $python)) {
     $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
           elseif (Get-Command py -ErrorAction SilentlyContinue) { 'py' }

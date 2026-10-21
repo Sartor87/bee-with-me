@@ -21,6 +21,14 @@ WHEELS="$ROOT/vendor/wheels"
 step() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
+# Same Node.js rule as start.sh, checked before anything is downloaded or vendor/wheels is emptied.
+command -v node >/dev/null 2>&1 || die 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
+command -v npm >/dev/null 2>&1 || die 'npm was not found on PATH. Install Node.js 24 LTS and re-run.'
+node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)' \
+    || die "Node.js $(node -v) is too old (need 22.12+). Install Node.js 24 LTS and re-run."
+node -e 'const a = Number(process.versions.node.split(".")[0]); process.exit(a === 23 || a === 25 ? 1 : 0)' \
+    || die "Node.js $(node -v) is not supported by the frontend tools (use 22.12+, 24 or 26+). Install Node.js 24 LTS and re-run."
+
 if [[ ! -x "$PYTHON" ]]; then
     PY="$(command -v python3 || command -v python || true)"
     [[ -n "$PY" ]] || die 'Python was not found on PATH (tried "python3" and "python"). Install Python 3.11+ and re-run.'

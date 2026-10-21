@@ -545,6 +545,47 @@ def test_start_prints_phase_timings(kind, project, tmp_path):
     assert res.out.index('Start timings:') < res.out.index(DRY)
 
 
+# ── B65: prepare-offline refuses an unsupported Node.js before it touches anything ──
+
+@pytest.mark.Trait("Bug", "B65")
+@pytest.mark.parametrize('kind', KINDS)
+def test_prepare_offline_refuses_unsupported_node_first(kind, tmp_path):
+    proj = tmp_path / 'proj'
+    name = 'prepare-offline.ps1' if kind == 'ps' else 'prepare-offline.sh'
+    _copy_text(ROOT / 'scripts' / name, proj / 'scripts' / name, lf=kind == 'sh')
+    keep = proj / 'vendor' / 'wheels' / 'keep.whl'
+    keep.parent.mkdir(parents=True)
+    keep.write_text('', encoding='utf-8')
+    log = tmp_path / 'calls.log'
+    log.write_text('', encoding='utf-8')
+    if kind == 'sh':
+        stub_dir = tmp_path / 'posix-stubs'
+        for stub in ('npm', 'node'):
+            _copy_text(STUBS / 'posix' / stub, stub_dir / stub, lf=True)
+            os.chmod(stub_dir / stub, 0o755)
+        for stub in ('npm_stub.py', 'node_stub.py'):
+            shutil.copy(STUBS / stub, tmp_path / stub)
+        cmd = [BASH, (proj / 'scripts' / name).as_posix()]
+    else:
+        stub_dir = STUBS / 'win'
+        cmd = [PS_EXE, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(proj / 'scripts' / name)]
+    env = {k: v for k, v in script_env().items() if not k.startswith('BWM_')}
+    env.update({
+        'PATH': os.pathsep.join([str(stub_dir), os.environ.get('PATH', '')]),
+        'BWM_STUB_LOG': log.as_posix(),
+        'BWM_STUB_PYTHON': Path(sys.executable).as_posix(),
+        'BWM_STUB_NODE_VERSION': 'v25.0.0',
+        'MSYS2_ENV_CONV_EXCL': 'BWM_STUB_',
+    })
+    res = subprocess.run(cmd, cwd=proj, env=env, capture_output=True, text=True, timeout=300)
+    out = res.stdout + res.stderr
+    assert res.returncode != 0, out
+    assert 'is not supported' in out and 'Install Node.js 24 LTS' in out, out
+    assert keep.exists()  # vendor/wheels was not emptied
+    assert not (proj / '.venv').exists()
+    assert log.read_text(encoding='utf-8') == ''  # npm never ran
+
+
 # ── B18: stderr from native calls never aborts ──────────────────────────────
 
 
