@@ -360,6 +360,13 @@ if ($env:BWM_START_DRY_RUN -eq '1') {
 
 # -- Frontend deps -------------------------------------------------------------
 if (-not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    if (Get-Command fnm -ErrorAction SilentlyContinue) {
+        try {
+            & fnm env | Out-String | Invoke-Expression
+        } catch { }
+    }
+}
+if (-not (Get-Command node -ErrorAction SilentlyContinue) -or -not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw 'Node.js was not found on PATH. Install Node.js 24 LTS and re-run.'
 }
 # Floor matches "engines" in frontend\package.json; .npmrc engine-strict enforces it for npm too. The build tools
@@ -422,7 +429,7 @@ Start-Process powershell -ArgumentList @(
 Write-Step 'Starting frontend (vite) in a new window'
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command',
-    "Set-Location '$root\frontend'; npm run dev"
+    "if ((-not (Get-Command npm -ErrorAction SilentlyContinue)) -and (Get-Command fnm -ErrorAction SilentlyContinue)) { & fnm env | Out-String | Invoke-Expression }; Set-Location '$root\frontend'; npm run dev"
 ) -WindowStyle Normal
 
 Start-Sleep -Seconds 2
